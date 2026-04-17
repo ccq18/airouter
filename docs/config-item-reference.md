@@ -22,7 +22,7 @@
 - access_token 和 account_id 获取  
   登录gpt plus后打开：https://chatgpt.com/api/auth/session
   取以下值配置上去，有效时间是3个月
-  ![session_json.png](docs/session_json.png)
+  ![session_json.png](docs/img/session_json.png)
 
 !注意不要退出登录,退出登录token就失效了
 - proxy_port 填本地的代理端口
@@ -33,7 +33,7 @@
 
 
 - 原始配置项字段说明
-![session_json.png](docs/session_json.png)
+![session_json.png](docs/img/session_json.png)
 字段说明：
 
 - `access_token`
