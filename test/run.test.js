@@ -28,6 +28,7 @@ function prepareWorkspace(appScript, initialLog = '', config = { proxy_port: 789
   }
 
   writeExecutable(path.join(binDir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+  writeExecutable(path.join(binDir, 'lsof'), '#!/usr/bin/env bash\nexit 0\n');
 
   return { cwd, binDir };
 }
@@ -74,17 +75,41 @@ function waitForFile(filePath, timeoutMs = 1000) {
   return fs.existsSync(filePath);
 }
 
+function spawnBackgroundNode(script, readyFile) {
+  const scriptPath = path.join(os.tmpdir(), `airouter-run-bg-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.js`);
+  fs.writeFileSync(scriptPath, script);
+
+  const result = spawnSync('bash', ['-lc', `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} >/dev/null 2>&1 & echo $!`], {
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout.trim(), /^\d+$/);
+  assert.equal(waitForFile(readyFile), true);
+
+  return Number(result.stdout.trim());
+}
+
 test('run.sh defaults to a 10 second startup check delay', () => {
   const script = fs.readFileSync(runScript, 'utf8');
+  const nodeOpenAiJsMatches = script.match(/node openai\.js/g) ?? [];
 
   assert.doesNotMatch(script, /STARTUP_CHECK_DELAY_SECONDS=/);
   assert.doesNotMatch(script, /STARTUP_LOG_LINES=/);
   assert.doesNotMatch(script, /LOG_TAIL_LINES=/);
   assert.doesNotMatch(script, /CONFIG_NODE_BIN=/);
+  assert.doesNotMatch(script, /STOP_WAIT_TIMEOUT_MS=/);
+  assert.doesNotMatch(script, /FORCE_STOP_WAIT_TIMEOUT_MS=/);
+  assert.doesNotMatch(script, /STOP_POLL_INTERVAL_MS=/);
+  assert.doesNotMatch(script, /POST_START_SETTLE_DELAY_MS=/);
   assert.match(script, /node -e/);
   assert.match(script, /sleep 10/);
   assert.match(script, /tail -n 20 "\$LOG_FILE"/);
   assert.match(script, /tail -n 100 -f "\$LOG_FILE"/);
+  assert.match(script, /kill -0/);
+  assert.match(script, /lsof -nP -tiTCP:/);
+  assert.doesNotMatch(script, /ps -p/);
+  assert.equal(nodeOpenAiJsMatches.length, 1);
 });
 
 test('start shows only fresh startup logs when the process stays up', () => {
@@ -195,6 +220,135 @@ test('start kills the existing process and launches a replacement', () => {
   assert.notEqual(secondPid, firstPid);
   assert.equal(waitForFile(terminatedMarker), true);
   assert.equal(fs.readFileSync(terminatedMarker, 'utf8').trim(), 'terminated');
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('stop kills the configured port listener when no tracked pid is available', () => {
+  const readyMarker = path.join(os.tmpdir(), `airouter-run-port-ready-${process.pid}-${Date.now()}`);
+  const terminatedMarker = path.join(os.tmpdir(), `airouter-run-port-stop-${process.pid}-${Date.now()}`);
+  const workspace = prepareWorkspace(
+    'setInterval(() => {}, 1000);\n',
+    '',
+    { proxy_port: 7890, port: 3456 }
+  );
+  const listenerPid = spawnBackgroundNode(
+    'const fs = require("fs");\n' +
+      `fs.writeFileSync(${JSON.stringify(readyMarker)}, "ready");\n` +
+      'process.on("SIGTERM", () => {\n' +
+      `  fs.writeFileSync(${JSON.stringify(terminatedMarker)}, "terminated");\n` +
+      '  process.exit(0);\n' +
+      '});\n' +
+      'setInterval(() => {}, 1000);\n',
+    readyMarker
+  );
+
+  writeExecutable(
+    path.join(workspace.binDir, 'lsof'),
+    '#!/usr/bin/env bash\n' +
+      `printf '%s\\n' ${listenerPid}\n`
+  );
+
+  const stopResult = runCommand(['stop'], workspace);
+
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+  assert.match(stopResult.stdout, new RegExp(`stopping existing port listener pid=${listenerPid} port=3456`));
+  assert.match(stopResult.stdout, /stopped/);
+  assert.equal(waitForFile(terminatedMarker), true);
+});
+
+test('stop waits for the process to finish shutting down before returning', () => {
+  const terminatedMarker = path.join(os.tmpdir(), `airouter-run-stop-${process.pid}-${Date.now()}`);
+  const workspace = prepareWorkspace(
+    'const fs = require("fs");\n' +
+      `const marker = ${JSON.stringify(terminatedMarker)};\n` +
+      'console.log("running");\n' +
+      'process.on("SIGTERM", () => {\n' +
+      '  setTimeout(() => {\n' +
+      '    fs.writeFileSync(marker, "terminated");\n' +
+      '    process.exit(0);\n' +
+      '  }, 200);\n' +
+      '});\n' +
+      'setInterval(() => {}, 1000);\n'
+  );
+
+  const startResult = runCommand(['start'], workspace);
+  assert.equal(startResult.status, 0, startResult.stderr);
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+  assert.match(stopResult.stdout, /stopped/);
+  assert.equal(fs.existsSync(terminatedMarker), true);
+});
+
+test('start kills the configured port listener before launching the app', () => {
+  const readyMarker = path.join(os.tmpdir(), `airouter-run-port-start-ready-${process.pid}-${Date.now()}`);
+  const terminatedMarker = path.join(os.tmpdir(), `airouter-run-port-start-stop-${process.pid}-${Date.now()}`);
+  const workspace = prepareWorkspace(
+    'console.log("fresh ready"); setInterval(() => {}, 1000);\n',
+    '',
+    { proxy_port: 7890, port: 3456 }
+  );
+  const listenerPid = spawnBackgroundNode(
+    'const fs = require("fs");\n' +
+      `fs.writeFileSync(${JSON.stringify(readyMarker)}, "ready");\n` +
+      'process.on("SIGTERM", () => {\n' +
+      `  fs.writeFileSync(${JSON.stringify(terminatedMarker)}, "terminated");\n` +
+      '  process.exit(0);\n' +
+      '});\n' +
+      'setInterval(() => {}, 1000);\n',
+    readyMarker
+  );
+
+  writeExecutable(
+    path.join(workspace.binDir, 'lsof'),
+    '#!/usr/bin/env bash\n' +
+      `printf '%s\\n' ${listenerPid}\n`
+  );
+
+  const startResult = runCommand(['start'], workspace);
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, new RegExp(`stopping existing port listener pid=${listenerPid} port=3456`));
+  assert.match(startResult.stdout, /fresh ready/);
+  assert.equal(waitForFile(terminatedMarker), true);
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start waits for the previous instance to release its exclusive resource before relaunching', () => {
+  const terminatedMarker = path.join(os.tmpdir(), `airouter-run-lock-terminated-${process.pid}-${Date.now()}`);
+  const lockFile = path.join(os.tmpdir(), `airouter-run-lock-${process.pid}-${Date.now()}`);
+  const workspace = prepareWorkspace(
+    'const fs = require("fs");\n' +
+      `const marker = ${JSON.stringify(terminatedMarker)};\n` +
+      `const lockFile = ${JSON.stringify(lockFile)};\n` +
+      'if (fs.existsSync(lockFile)) {\n' +
+      '  console.error("resource busy");\n' +
+      '  process.exit(1);\n' +
+      '}\n' +
+      'fs.writeFileSync(lockFile, String(process.pid));\n' +
+      'console.log("locked");\n' +
+      'process.on("SIGTERM", () => {\n' +
+      '  setTimeout(() => {\n' +
+      '    fs.unlinkSync(lockFile);\n' +
+      '    fs.writeFileSync(marker, "terminated");\n' +
+      '    process.exit(0);\n' +
+      '  }, 200);\n' +
+      '});\n' +
+      'setInterval(() => {}, 1000);\n'
+  );
+
+  const firstStartResult = runCommand(['start'], workspace);
+  assert.equal(firstStartResult.status, 0, firstStartResult.stderr);
+
+  const secondStartResult = runCommand(['start'], workspace);
+  assert.equal(secondStartResult.status, 0, secondStartResult.stderr);
+  assert.match(secondStartResult.stdout, /stopping existing pid=\d+/);
+  assert.match(secondStartResult.stdout, /started pid=\d+/);
+  assert.equal(waitForFile(terminatedMarker), true);
 
   const stopResult = runCommand(['stop'], workspace);
   assert.equal(stopResult.status, 0, stopResult.stderr);

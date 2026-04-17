@@ -22,11 +22,86 @@ if (value === undefined || value === null) {
 
 PROXY_PORT=$(read_config_value proxy_port "")
 PORT=$(read_config_value port "3000")
-
 START_CMD="CONFIG=${CONFIG_FILE} PORT=${PORT} https_proxy=http://127.0.0.1:${PROXY_PORT} http_proxy=http://127.0.0.1:${PROXY_PORT} all_proxy=socks5://127.0.0.1:${PROXY_PORT} nohup node openai.js > ${LOG_FILE} 2>&1 &"
 
+real_sleep_ms() {
+  node -e 'setTimeout(() => process.exit(0), Number(process.argv[1]));' "$1"
+}
+
 is_pid_running() {
-  ps -p "$1" >/dev/null 2>&1
+  kill -0 "$1" >/dev/null 2>&1
+}
+
+wait_for_pid_exit() {
+  local pid="$1"
+  local timeout_ms="${2:-5000}"
+  local waited_ms=0
+
+  while is_pid_running "$pid"; do
+    if [ "$waited_ms" -ge "$timeout_ms" ]; then
+      return 1
+    fi
+
+    real_sleep_ms 100
+    waited_ms=$((waited_ms + 100))
+  done
+
+  return 0
+}
+
+terminate_pid() {
+  local pid="$1"
+
+  if ! is_pid_running "$pid"; then
+    return 0
+  fi
+
+  kill "$pid" >/dev/null 2>&1 || true
+  if wait_for_pid_exit "$pid" 5000; then
+    return 0
+  fi
+
+  kill -9 "$pid" >/dev/null 2>&1 || true
+  wait_for_pid_exit "$pid" 1000
+}
+
+port_listener_pids() {
+  local port_pid
+
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 0
+  fi
+
+  lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u | while IFS= read -r port_pid; do
+    if [ -n "$port_pid" ] && is_pid_running "$port_pid"; then
+      printf '%s\n' "$port_pid"
+    fi
+  done
+}
+
+stop_port_listeners() {
+  local port_pids
+  local port_pid
+
+  port_pids=$(port_listener_pids)
+  if [ -z "$port_pids" ]; then
+    return 0
+  fi
+
+  while IFS= read -r port_pid; do
+    if [ -z "$port_pid" ] || ! is_pid_running "$port_pid"; then
+      continue
+    fi
+
+    echo "stopping existing port listener pid=${port_pid} port=${PORT}"
+    if ! terminate_pid "$port_pid"; then
+      return 1
+    fi
+  done <<EOF
+$port_pids
+EOF
+
+  return 0
 }
 
 current_pid() {
@@ -55,18 +130,31 @@ show_startup_logs() {
 }
 
 start() {
-  if [ -f "$PID_FILE" ] && is_pid_running "$(current_pid)"; then
-    echo "stopping existing pid=$(current_pid)"
-    kill "$(current_pid)"
+  if [ -f "$PID_FILE" ]; then
+    local existing_pid
+    existing_pid=$(current_pid)
+
+    if is_pid_running "$existing_pid"; then
+      echo "stopping existing pid=${existing_pid}"
+      if ! terminate_pid "$existing_pid"; then
+        echo "failed to stop existing pid=${existing_pid}"
+        return 1
+      fi
+    fi
+
     rm -f "$PID_FILE"
-  else
-    rm -f "$PID_FILE"
+  fi
+
+  if ! stop_port_listeners; then
+    echo "failed to stop listener on port=${PORT}"
+    return 1
   fi
 
   echo "starting"
   eval "$START_CMD"
   echo $! > "$PID_FILE"
   sleep 10
+  real_sleep_ms 250
 
   if ! is_pid_running "$(current_pid)"; then
     echo "failed to start"
@@ -86,12 +174,38 @@ logs() {
 }
 
 stop() {
-  if [ -f "$PID_FILE" ] && is_pid_running "$(current_pid)"; then
-    kill "$(current_pid)"
-    rm -f "$PID_FILE"
+  local stopped_any=0
+  local active_port_listeners
+
+  if [ -f "$PID_FILE" ]; then
+    local existing_pid
+    existing_pid=$(current_pid)
+
+    if is_pid_running "$existing_pid"; then
+      if ! terminate_pid "$existing_pid"; then
+        echo "failed to stop pid=${existing_pid}"
+        return 1
+      fi
+      rm -f "$PID_FILE"
+      stopped_any=1
+    else
+      rm -f "$PID_FILE"
+    fi
+  fi
+
+  active_port_listeners=$(port_listener_pids)
+  if [ -n "$active_port_listeners" ]; then
+    stopped_any=1
+  fi
+
+  if ! stop_port_listeners; then
+    echo "failed to stop listener on port=${PORT}"
+    return 1
+  fi
+
+  if [ "$stopped_any" -eq 1 ]; then
     echo "stopped"
   else
-    rm -f "$PID_FILE"
     echo "not running"
   fi
 }

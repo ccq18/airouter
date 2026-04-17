@@ -45,10 +45,19 @@ bash run.sh stop
 bash run.sh logs
 ```
 
+执行以下curl,有正常内容返回，就表示airouter已经成功启动
+```
+curl http://127.0.0.1:3000/v1/responses \
+-H "Content-Type: application/json" \
+-d '{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}'
+```
+
+
 使用 `bash run.sh` 可以避开脚本可执行权限问题。
 `bash run.sh logs` 会先展示最近 100 行日志，然后持续输出新日志。
 
 ## ccs配置
+建议使用 https://github.com/farion1231/cc-switch 管理本地的配置
 使用ccs配置转发到对应地址就可以，apikey随便写。也可以自己手动配置
 ![codex.jpg](docs/codex.jpg)
 ![claude.jpg](docs/claude.jpg)
