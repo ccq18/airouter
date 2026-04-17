@@ -237,6 +237,10 @@ function createAccountManager(options) {
    * 保证活动账号可用，仅当当前账号不可用时才切换。
    */
   function ensureActiveConfig(reason = 'select') {
+    if (configs.length === 0) {
+      return null;
+    }
+
     const currentConfig = getActiveConfig();
     if (isConfigAvailable(currentConfig)) {
       return currentConfig;
@@ -248,7 +252,7 @@ function createAccountManager(options) {
       activeConfigIndex = fallbackIndex;
       const nextConfig = configs[activeConfigIndex];
 
-      if (previousConfig !== nextConfig) {
+      if (previousConfig !== nextConfig && reason !== 'startup') {
         warn(`账号切换: ${previousConfig ? getAccountLabel(previousConfig) : 'none'} -> ${getAccountLabel(nextConfig)} (${reason})`);
       }
 
@@ -408,11 +412,11 @@ function createAccountManager(options) {
 
       const currentConfig = ensureActiveConfig(reason);
 
-      if (previousActiveIndex !== activeConfigIndex) {
+      if (previousActiveIndex !== activeConfigIndex && currentConfig) {
         warn(`当前活动账号: ${getAccountLabel(currentConfig)}`);
       }
 
-      if (reason === 'poll') {
+      if (reason === 'poll' && currentConfig) {
         log(`轮询额度: ${getAccountStatus(currentConfig).summaryLine}`);
       }
     } finally {
@@ -437,10 +441,21 @@ function createAccountManager(options) {
     }, quotaCheckIntervalMs);
   }
 
+  /**
+   * 停止后台额度轮询定时器。
+   */
+  function stopQuotaMonitor() {
+    if (quotaMonitorTimer) {
+      clearInterval(quotaMonitorTimer);
+      quotaMonitorTimer = null;
+    }
+  }
+
   return {
     ensureActiveConfig,
     refreshQuotas,
     startQuotaMonitor,
+    stopQuotaMonitor,
     getActiveConfig,
     getAccountStatus,
     applyQuotaPayload,

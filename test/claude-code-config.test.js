@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { transformClaudeMessagesRequest } = require('../app/claude-responses-compat');
-const { parseOpenAiConfigFile, resolveClaudeCodeOptions } = require('../app/openai-config');
+const { parseOpenAiConfigFile, resolveClaudeCodeOptions, createRuntimeConfigs } = require('../app/openai-config');
 
 function createBaseConfig(extra = {}) {
   return {
@@ -71,4 +71,38 @@ test('transformClaudeMessagesRequest force overrides client model and reasoning 
     effort: 'high',
   });
   assert.equal(transformed.instructions, 'system instruction');
+});
+
+test('createRuntimeConfigs keeps every api_key config entry', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    type: 'api_key',
+    configs: [
+      {
+        api_key: 'sk-1',
+        base_url: 'https://api.openai.com/v1',
+        description: 'primary',
+      },
+      {
+        api_key: 'sk-2',
+        base_url: 'https://example.com/v1',
+        description: 'backup',
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.equal(runtimeConfigs.length, 2);
+  assert.equal(runtimeConfigs[0].description, 'primary');
+  assert.equal(runtimeConfigs[1].description, 'backup');
+});
+
+test('parseOpenAiConfigFile accepts empty configs array', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    type: 'token',
+    configs: [],
+  }));
+
+  assert.deepEqual(parsed.configs, []);
+  assert.deepEqual(createRuntimeConfigs(parsed), []);
 });

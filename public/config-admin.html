@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>配置管理</title>
+  <style>
+    :root {
+      --bg-top: #f6efe2;
+      --bg-bottom: #d9e7ee;
+      --panel: rgba(255, 252, 247, 0.9);
+      --panel-strong: rgba(255, 255, 255, 0.96);
+      --line: rgba(28, 49, 66, 0.14);
+      --text: #1c2934;
+      --muted: #627283;
+      --accent: #b85f3b;
+      --accent-soft: rgba(184, 95, 59, 0.12);
+      --success: #216843;
+      --warning: #9b5d16;
+      --danger: #a23636;
+      --shadow: 0 20px 52px rgba(28, 49, 66, 0.12);
+      --radius: 24px;
+      --mono: "SFMono-Regular", "Menlo", "Monaco", "Courier New", monospace;
+      --sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(255, 255, 255, 0.75), transparent 28%),
+        radial-gradient(circle at right 14% top 10%, rgba(184, 95, 59, 0.14), transparent 18%),
+        linear-gradient(160deg, var(--bg-top), var(--bg-bottom));
+    }
+
+    .page {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+
+    .composer,
+    .table-wrap {
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .mono {
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .composer {
+      border-radius: var(--radius);
+      padding: 22px;
+      margin-bottom: 18px;
+    }
+
+    .composer-layout {
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .guide-list {
+      display: grid;
+      gap: 18px;
+    }
+
+    .guide-item {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      gap: 16px;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .guide-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .guide-step {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
+      background: rgba(18, 27, 46, 0.08);
+      color: var(--muted);
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .guide-title {
+      font-size: 17px;
+      font-weight: 700;
+      margin: 0 0 6px;
+    }
+
+    .guide-desc {
+      margin: 0 0 10px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    .guide-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      padding: 0 16px;
+      border-radius: 12px;
+      background: rgba(47, 99, 229, 0.1);
+      color: #2f63e5;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .guide-action:hover {
+      transform: translateY(-1px);
+    }
+
+    .composer-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .composer-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-right: auto;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .badge.ok {
+      background: rgba(33, 104, 67, 0.12);
+      color: var(--success);
+    }
+
+    .badge.warn {
+      background: rgba(155, 93, 22, 0.12);
+      color: var(--warning);
+    }
+
+    .badge.note {
+      background: rgba(28, 41, 52, 0.08);
+      color: var(--muted);
+    }
+
+    .composer p {
+      margin: 0 0 12px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--text);
+      padding: 16px;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.65;
+      resize: vertical;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font: inherit;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease;
+    }
+
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+    .primary {
+      background: var(--text);
+      color: white;
+    }
+
+    .secondary {
+      background: rgba(28, 41, 52, 0.08);
+      color: var(--text);
+    }
+
+    .danger {
+      background: rgba(162, 54, 54, 0.12);
+      color: var(--danger);
+    }
+
+    .message {
+      display: none;
+      margin-bottom: 18px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid transparent;
+      line-height: 1.6;
+    }
+
+    .message.show { display: block; }
+    .message.info {
+      background: rgba(33, 104, 67, 0.1);
+      border-color: rgba(33, 104, 67, 0.18);
+      color: var(--success);
+    }
+
+    .message.error {
+      background: rgba(162, 54, 54, 0.1);
+      border-color: rgba(162, 54, 54, 0.18);
+      color: var(--danger);
+    }
+
+    .table-wrap {
+      border-radius: var(--radius);
+      padding: 12px;
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      min-width: 1120px;
+      border-collapse: collapse;
+      background: rgba(255, 255, 255, 0.66);
+      border-radius: 18px;
+      overflow: hidden;
+    }
+
+    thead th {
+      text-align: left;
+      padding: 16px 18px;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: rgba(28, 41, 52, 0.05);
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+
+    tbody td {
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .config-col,
+    .config-name {
+      width: 120px;
+      min-width: 120px;
+    }
+
+    .config-name {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-weight: 700;
+    }
+
+    .cell-text {
+      word-break: break-word;
+    }
+
+    .account-id-col,
+    .account-id-cell {
+      width: 320px;
+      min-width: 320px;
+    }
+
+    .account-id-cell {
+      white-space: nowrap;
+      word-break: normal;
+      overflow-wrap: normal;
+    }
+
+    .summary-cell {
+      min-width: 280px;
+      color: var(--muted);
+    }
+
+    .summary-main {
+      color: var(--text);
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .action-cell {
+      width: 110px;
+      white-space: nowrap;
+    }
+
+    .empty {
+      padding: 32px;
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.62);
+      border: 1px dashed var(--line);
+      color: var(--muted);
+      text-align: center;
+    }
+
+    @media (max-width: 980px) {
+      .composer-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+  </style>
+</head>
+  <body>
+  <main class="page">
+    <div class="toolbar">
+      <button class="secondary" type="button" id="refreshButton">刷新</button>
+    </div>
+
+    <section class="composer">
+      <div class="composer-layout">
+        <aside class="guide-list">
+          <section class="guide-item">
+            <div class="guide-step">1</div>
+            <div>
+              <h2 class="guide-title">登录 ChatGPT</h2>
+              <p class="guide-desc">先登录 ChatGPT，确保账号已经在线。</p>
+              <a class="guide-action" href="https://chatgpt.com/" target="_blank" rel="noreferrer">打开 ChatGPT</a>
+            </div>
+          </section>
+          <section class="guide-item">
+            <div class="guide-step">2</div>
+            <div>
+              <h2 class="guide-title">获取 AuthSession</h2>
+              <p class="guide-desc">打开 AuthSession 页面，复制完整 JSON 内容并粘贴到输入框。</p>
+              <a class="guide-action" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noreferrer">打开 AuthSession 页面</a>
+            </div>
+          </section>
+        </aside>
+
+	        <div>
+	          <div class="composer-head">
+	            <div class="composer-title">新增配置项</div>
+	          </div>
+          <div id="message" class="message" role="status" aria-live="polite"></div>
+	          <textarea id="rawJsonInput" spellcheck="false" placeholder='{
+  "user": {
+    "email": "user@example.com"
+  },
+  "account": {
+    "id": "account-id"
+  },
+  "accessToken": "..."
+}'></textarea>
+          <div class="actions">
+            <button class="primary" type="button" id="addButton">验证并新增</button>
+          </div>
+	        </div>
+	      </div>
+	    </section>
+	    <section id="cards"></section>
+  </main>
+
+  <script>
+    const cardsEl = document.getElementById('cards');
+    const messageEl = document.getElementById('message');
+    const rawJsonInput = document.getElementById('rawJsonInput');
+    const addButton = document.getElementById('addButton');
+    const refreshButton = document.getElementById('refreshButton');
+
+    let snapshot = null;
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function setMessage(type, text) {
+      if (!text) {
+        messageEl.className = 'message';
+        messageEl.textContent = '';
+        return;
+      }
+
+      messageEl.className = `message show ${type}`;
+      messageEl.textContent = text;
+    }
+
+    function renderHeader(data) {
+      snapshot = data;
+    }
+
+    function runtimeBadges(item) {
+      const tags = [];
+
+      if (item.is_active) {
+        tags.push('<span class="badge active">当前使用</span>');
+      }
+
+      return tags.join('');
+    }
+
+    function renderSummary(runtime) {
+      if (!runtime) {
+        return `
+          <div class="summary-cell">
+            <div class="summary-main">暂无运行态数据</div>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="summary-cell">
+          <div class="summary-main">${escapeHtml(runtime.runtime_summary || 'unknown')}</div>
+        </div>
+      `;
+    }
+
+    function renderCards(data) {
+      if (!data.configs.length) {
+        cardsEl.innerHTML = '<div class="empty">当前没有配置项。</div>';
+        return;
+      }
+
+      cardsEl.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="config-col">配置</th>
+                <th class="account-id-col">account_id</th>
+                <th>description</th>
+                <th>摘要</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${data.configs.map(item => `
+                <tr>
+                  <td>
+                    <div class="config-name">
+                      <div>配置 #${item.index + 1}</div>
+                      <div>${runtimeBadges(item)}</div>
+                    </div>
+                  </td>
+                  <td class="account-id-cell mono">${escapeHtml(item.item.account_id || '-')}</td>
+                  <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
+                  <td>${renderSummary(item.runtime)}</td>
+                  <td class="action-cell">
+                    <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    async function requestJson(url, options = {}) {
+      const response = await fetch(url, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {}),
+        },
+        ...options,
+      });
+
+      const text = await response.text();
+      const payload = text ? JSON.parse(text) : null;
+
+      if (!response.ok) {
+        throw new Error(payload?.details || payload?.error || `HTTP ${response.status}`);
+      }
+
+      return payload;
+    }
+
+    async function loadSnapshot(message = '') {
+      try {
+        snapshot = await requestJson('/admin/api/configs');
+        renderHeader(snapshot);
+        renderCards(snapshot);
+        setMessage(message ? 'info' : '', message);
+      } catch (error) {
+        setMessage('error', error.message);
+        cardsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    async function addConfig() {
+      const rawJson = rawJsonInput.value;
+      const result = await requestJson('/admin/api/configs', {
+        method: 'POST',
+        body: JSON.stringify({ raw_json: rawJson }),
+      });
+
+      snapshot = result;
+      rawJsonInput.value = '';
+      renderHeader(snapshot);
+      renderCards(snapshot);
+      setMessage('info', '配置项已通过校验并写入配置文件。');
+    }
+
+    async function deleteConfig(index) {
+      if (!window.confirm('确认删除这个配置项吗？')) {
+        return;
+      }
+
+      const result = await requestJson(`/admin/api/configs/${index}`, {
+        method: 'DELETE',
+      });
+
+      snapshot = result;
+      renderHeader(snapshot);
+      renderCards(snapshot);
+      setMessage('info', '配置项已删除并热重载。');
+    }
+
+    addButton.addEventListener('click', async () => {
+      addButton.disabled = true;
+      try {
+        await addConfig();
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        addButton.disabled = false;
+      }
+    });
+
+    refreshButton.addEventListener('click', async () => {
+      refreshButton.disabled = true;
+      try {
+        await loadSnapshot('已刷新配置状态。');
+      } finally {
+        refreshButton.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async event => {
+      const button = event.target.closest('[data-action="delete"]');
+      if (!button) {
+        return;
+      }
+
+      button.disabled = true;
+      try {
+        await deleteConfig(button.dataset.index);
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    loadSnapshot();
+  </script>
+</body>
+</html>

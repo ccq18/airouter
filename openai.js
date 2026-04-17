@@ -2,7 +2,6 @@
  * OpenAI 兼容接口代理到 ChatGPT Codex backend-api
  */
 console.log("starting")
-const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const zlib = require('zlib');
@@ -12,12 +11,19 @@ const { normalizeResponsesRequestBody } = require('./app/responses-defaults');
 const { createClaudeMessagesHandler } = require('./app/claude-messages-handler');
 const { createAccountManager } = require('./app/account-manager');
 const {
-    parseOpenAiConfigFile,
     resolveClaudeCodeOptions,
     createRuntimeConfigs,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring
 } = require('./app/openai-config');
+const {
+    ConfigEditorError,
+    addConfigItem,
+    buildImportedConfigItem,
+    deleteConfigItem,
+    readParsedConfigFile,
+    writeParsedConfigFile
+} = require('./app/config-editor');
 // https://chatgpt.com/api/auth/session
 // ==================== 配置 ====================
 const PORT = process.env.PORT || 3009;
@@ -50,20 +56,25 @@ const ACCESS_LOG_ENABLED = (
 ) && !hasCliFlag('--no-access-log');
 
 function loadApiConfigs() {
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-    const parsed = parseOpenAiConfigFile(raw);
+    const parsed = readParsedConfigFile(CONFIG_FILE);
 
     return {
+        parsed,
         type: parsed.type,
         configs: createRuntimeConfigs(parsed),
         claudeCode: resolveClaudeCodeOptions(parsed)
     };
 }
 
-const LOADED_CONFIG = loadApiConfigs();
-const CONFIG_TYPE = LOADED_CONFIG.type;
-const API_CONFIGS = LOADED_CONFIG.configs;
-const CLAUDE_CODE_CONFIG = LOADED_CONFIG.claudeCode;
+let currentParsedConfig = null;
+let configType = null;
+let apiConfigs = [];
+let claudeCodeConfig = resolveClaudeCodeOptions({
+    type: 'token',
+    configs: [{}]
+});
+let accountManager = null;
+let handleClaudeMessagesRequest = null;
 
 // ==================== 工具函数 ====================
 function log(...args) {
@@ -163,19 +174,216 @@ function getCurrentTimestamp() {
     return Date.now();
 }
 
-const accountManager = createAccountManager({
-    configs: API_CONFIGS,
-    configType: CONFIG_TYPE,
-    quotaCheckPath: QUOTA_CHECK_PATH,
-    quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
-    minRemainingPercent: MIN_REMAINING_PERCENT,
-    buildAuthHeadersForConfig,
-    shouldUseQuotaMonitoring,
-    spawn,
-    log,
-    warn,
-    now: getCurrentTimestamp
-});
+function createRuntimeAccountManager() {
+    return createAccountManager({
+        configs: apiConfigs,
+        configType,
+        quotaCheckPath: QUOTA_CHECK_PATH,
+        quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
+        minRemainingPercent: MIN_REMAINING_PERCENT,
+        buildAuthHeadersForConfig,
+        shouldUseQuotaMonitoring,
+        spawn,
+        log,
+        warn,
+        now: getCurrentTimestamp
+    });
+}
+
+function createClaudeMessagesRequestHandler() {
+    return createClaudeMessagesHandler({
+        getConfig: () => {
+            const config = accountManager.getActiveConfig();
+
+            if (!config) {
+                throw new Error('当前没有可用配置，请先访问 /admin/configs 添加账号');
+            }
+
+            return config;
+        },
+        accessLogEnabled: ACCESS_LOG_ENABLED,
+        log,
+        error,
+        logRequestSnapshot: payload => {
+            logProxyRequestSnapshot(
+                { method: payload.method, url: payload.rewrittenUrl },
+                payload.originalUrl,
+                payload.rewrittenUrl,
+                {
+                    ...payload.config,
+                    description: payload.config.description
+                },
+                payload.headers,
+                payload.bodyBuffer
+            );
+        },
+        upstreamModel: process.env.CLAUDE_PROXY_MODEL || claudeCodeConfig.model,
+        reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
+        clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1'
+    });
+}
+
+function applyLoadedConfig(loadedConfig) {
+    currentParsedConfig = loadedConfig.parsed;
+    configType = loadedConfig.type;
+    apiConfigs = loadedConfig.configs;
+    claudeCodeConfig = loadedConfig.claudeCode;
+
+    if (accountManager) {
+        accountManager.stopQuotaMonitor();
+    }
+
+    accountManager = createRuntimeAccountManager();
+    handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
+}
+
+async function reloadRuntime(loadedConfig, reason) {
+    applyLoadedConfig(loadedConfig);
+
+    if (shouldUseQuotaMonitoring(configType)) {
+        await accountManager.refreshQuotas(reason);
+    }
+
+    const currentConfig = accountManager.ensureActiveConfig(reason);
+    accountManager.startQuotaMonitor();
+    return currentConfig;
+}
+
+async function persistAndReloadConfig(nextParsed, reason) {
+    const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed);
+    return reloadRuntime({
+        parsed: savedParsed,
+        type: savedParsed.type,
+        configs: createRuntimeConfigs(savedParsed),
+        claudeCode: resolveClaudeCodeOptions(savedParsed)
+    }, reason);
+}
+
+function serializeAccountStatus(accountStatus) {
+    if (!accountStatus) {
+        return null;
+    }
+
+    return {
+        index: accountStatus.index,
+        description: accountStatus.description,
+        label: accountStatus.label,
+        available: accountStatus.available,
+        remaining_percent: accountStatus.remainingPercent,
+        primary_remaining_percent: accountStatus.primaryRemainingPercent,
+        primary_reset_at: accountStatus.primaryResetAt,
+        primary_reset_after_seconds: accountStatus.primaryResetAfterSeconds,
+        secondary_remaining_percent: accountStatus.secondaryRemainingPercent,
+        secondary_reset_at: accountStatus.secondaryResetAt,
+        secondary_reset_after_seconds: accountStatus.secondaryResetAfterSeconds,
+        last_checked_at: accountStatus.lastCheckedAt,
+        reason: accountStatus.reason,
+        runtime_summary: accountStatus.runtimeSummary,
+        summary_line: accountStatus.summaryLine,
+    };
+}
+
+function buildConfigAdminResponse() {
+    const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
+    const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
+
+    return {
+        config_file: CONFIG_FILE_NAME,
+        config_path: CONFIG_FILE,
+        mode: configType,
+        runtime_port: Number(PORT),
+        file_port: currentParsedConfig.port ?? null,
+        proxy_port: currentParsedConfig.proxy_port ?? null,
+        claude_code: currentParsedConfig.claude_code ?? null,
+        active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
+        configs: currentParsedConfig.configs.map((item, index) => ({
+            index,
+            item,
+            is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
+            runtime: apiConfigs[index] ? serializeAccountStatus(accountManager.getAccountStatus(apiConfigs[index])) : null
+        }))
+    };
+}
+
+function parseConfigIndex(value) {
+    const index = Number(value);
+
+    if (!Number.isInteger(index) || index < 0) {
+        throw new ConfigEditorError('配置项索引不合法');
+    }
+
+    return index;
+}
+
+function createMissingConfigResponse(res) {
+    return res.status(503).json({
+        error: 'Service Unavailable',
+        message: '当前没有可用配置，请先访问 /admin/configs 添加账号'
+    });
+}
+
+function parseConfigItemJson(rawJson) {
+    if (typeof rawJson !== 'string' || rawJson.trim().length === 0) {
+        throw new ConfigEditorError('请先输入配置项 JSON');
+    }
+
+    try {
+        const parsed = JSON.parse(rawJson);
+
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new ConfigEditorError('配置项 JSON 必须是对象');
+        }
+
+        return parsed;
+    } catch (err) {
+        if (err instanceof ConfigEditorError) {
+            throw err;
+        }
+
+        throw new ConfigEditorError(`配置项 JSON 解析失败: ${err.message}`);
+    }
+}
+
+async function validateConfigItemBeforeAdd(type, item) {
+    let runtimeConfig;
+
+    try {
+        runtimeConfig = createRuntimeConfigs({
+            type,
+            configs: [item],
+            claude_code: {},
+        })[0];
+    } catch (err) {
+        throw new ConfigEditorError(err.message);
+    }
+
+    if (!shouldUseQuotaMonitoring(type)) {
+        return runtimeConfig;
+    }
+
+    const temporaryManager = createAccountManager({
+        configs: [runtimeConfig],
+        configType: type,
+        quotaCheckPath: QUOTA_CHECK_PATH,
+        quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
+        minRemainingPercent: MIN_REMAINING_PERCENT,
+        buildAuthHeadersForConfig,
+        shouldUseQuotaMonitoring,
+        spawn,
+        log,
+        warn,
+        now: getCurrentTimestamp
+    });
+
+    await temporaryManager.refreshQuotas('startup');
+    const runtimeStatus = temporaryManager.getAccountStatus(runtimeConfig);
+
+    if (!runtimeConfig.runtime.lastCheckedAt || runtimeConfig.runtime.lastError) {
+        throw new ConfigEditorError(`额度接口验证失败: ${runtimeConfig.runtime.lastError || runtimeStatus.reason}`);
+    }
+
+    return runtimeConfig;
+}
 
 function buildIncomingUrl(req, proxyPath = '') {
     const combinedUrl = `${req.baseUrl || ''}${req.url || ''}`;
@@ -458,6 +666,9 @@ function proxyRequest(req, res, config, body, originalUrl) {
 function createHandler(proxyPath = '') {
     return function handler(req, res) {
         const config = accountManager.getActiveConfig();
+        if (!config) {
+            return createMissingConfigResponse(res);
+        }
         const incomingUrl = buildIncomingUrl(req, proxyPath);
         const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
 
@@ -499,28 +710,20 @@ function createHandler(proxyPath = '') {
     };
 }
 
-const handleClaudeMessagesRequest = createClaudeMessagesHandler({
-    getConfig: () => accountManager.getActiveConfig(),
-    accessLogEnabled: ACCESS_LOG_ENABLED,
-    log,
-    error,
-    logRequestSnapshot: payload => {
-        logProxyRequestSnapshot(
-            { method: payload.method, url: payload.rewrittenUrl },
-            payload.originalUrl,
-            payload.rewrittenUrl,
-            {
-                ...payload.config,
-                description: payload.config.description
-            },
-            payload.headers,
-            payload.bodyBuffer
-        );
-    },
-    upstreamModel: process.env.CLAUDE_PROXY_MODEL || CLAUDE_CODE_CONFIG.model,
-    reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || CLAUDE_CODE_CONFIG.reasoningEffort,
-    clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1'
-});
+async function handleConfigMutation(res, mutate, reason, successStatus = 200) {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const nextParsed = mutate(parsed);
+        await persistAndReloadConfig(nextParsed, reason);
+        res.status(successStatus).json(buildConfigAdminResponse());
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置校验失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+}
 
 // ==================== 初始化 ====================
 const app = express();
@@ -542,33 +745,63 @@ app.use((req, res, next) => {
     next();
 });
 
+app.use('/admin/api', express.json({ limit: '1mb' }));
+
+app.get('/admin/configs', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
+});
+
+app.get('/admin/api/configs', (req, res) => {
+    try {
+        res.json(buildConfigAdminResponse());
+    } catch (err) {
+        res.status(500).json({
+            error: '读取配置失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const rawItem = parseConfigItemJson(req.body && req.body.raw_json);
+        const inputItem = buildImportedConfigItem(parsed.type, rawItem);
+        await validateConfigItemBeforeAdd(parsed.type, inputItem);
+        const nextParsed = addConfigItem(parsed, inputItem);
+        await persistAndReloadConfig(nextParsed, 'admin_create');
+        res.status(201).json(buildConfigAdminResponse());
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置新增失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.delete('/admin/api/configs/:index', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteConfigItem(parsed, parseConfigIndex(req.params.index)),
+        'admin_delete'
+    );
+});
+
 // 健康检查
 app.get('/health', (req, res) => {
     const currentConfig = accountManager.getActiveConfig();
     const currentAccountStatus = accountManager.getAccountStatus(currentConfig);
     res.json({
         status: 'ok',
-        mode: CONFIG_TYPE,
+        mode: configType,
         timestamp: new Date().toLocaleString('zh-CN', {
             timeZone: 'Asia/Shanghai',
             hour12: false
         }),
-        active_account: currentAccountStatus ? {
-            index: currentAccountStatus.index,
-            description: currentAccountStatus.description,
-            available: currentAccountStatus.available,
-            remaining_percent: currentAccountStatus.remainingPercent,
-            primary_remaining_percent: currentAccountStatus.primaryRemainingPercent,
-            primary_reset_at: currentAccountStatus.primaryResetAt,
-            primary_reset_after_seconds: currentAccountStatus.primaryResetAfterSeconds,
-            secondary_remaining_percent: currentAccountStatus.secondaryRemainingPercent,
-            secondary_reset_at: currentAccountStatus.secondaryResetAt,
-            secondary_reset_after_seconds: currentAccountStatus.secondaryResetAfterSeconds,
-            last_checked_at: currentAccountStatus.lastCheckedAt,
-            reason: currentAccountStatus.reason
-        } : null,
+        active_account: serializeAccountStatus(currentAccountStatus),
         configs: {
-            total: API_CONFIGS.length,
+            total: apiConfigs.length,
             default: currentAccountStatus ? currentAccountStatus.description : null
         }
     });
@@ -576,6 +809,9 @@ app.get('/health', (req, res) => {
 
 // Claude Messages 兼容接口
 app.post('/claude/v1/messages', (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
     void handleClaudeMessagesRequest(req, res);
 });
 
@@ -595,45 +831,47 @@ app.use((req, res) => {
 
 // ==================== 启动服务器 ====================
 async function startServer() {
-    if (shouldUseQuotaMonitoring(CONFIG_TYPE)) {
-        await accountManager.refreshQuotas('startup');
-    }
-    const currentConfig = accountManager.ensureActiveConfig('startup');
-    const currentAccountStatus = accountManager.getAccountStatus(currentConfig);
-    accountManager.startQuotaMonitor();
+    const loadedConfig = loadApiConfigs();
+    applyLoadedConfig(loadedConfig);
 
     app.listen(PORT, () => {
         log('='.repeat(70));
         log('OpenAI 兼容代理服务器已启动');
         log('='.repeat(70));
-        log(`监听端口: ${PORT}`);
-        log('代理路径: /v1/*, /wham/*');
-        log('');
-        log('API 配置:');
-        log(`  - 配置文件: ${CONFIG_FILE}`);
-        log(`  - 模式: ${CONFIG_TYPE}`);
-        log(`  - 账号数量: ${API_CONFIGS.length}`);
-        log(`  - 当前账号: ${currentAccountStatus.label}`);
-        log(`  - 目标主机: ${currentConfig.baseUrl}`);
-        log(`  - 目标前缀: ${currentConfig.apiBasePath || '(直连兼容接口)'}`);
-        log(`  - 额度轮询: ${shouldUseQuotaMonitoring(CONFIG_TYPE) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查一次，剩余低于 ${MIN_REMAINING_PERCENT}% 自动切号` : '关闭（api_key 模式）'}`);
-        log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
-        log(`  - 当前额度: ${currentAccountStatus.runtimeSummary}`);
-        if (shouldUseQuotaMonitoring(CONFIG_TYPE)) {
-            log('  - 初始化账号额度:');
-            for (const config of API_CONFIGS) {
-                log(`    ${accountManager.getAccountStatus(config).summaryLine}`);
-            }
-        }
-        log('');
-        log('路由规则:');
-        log('  - /claude/v1/messages -> /backend-api/codex/responses (Claude compatibility)');
-        log('  - /v1/responses -> /backend-api/codex/responses');
-        log('  - /v1/models -> /backend-api/codex/models');
-        log('  - /wham/* -> /backend-api/wham/*');
-        log('');
-        log(`健康检查: http://localhost:${PORT}/health`);
+        log(`配置管理: http://localhost:${PORT}/admin/configs`);
+        log(`OpenAI 代理: http://localhost:${PORT}/v1`);
+        log(`Claude 代理: http://localhost:${PORT}/claude`);
         log('='.repeat(70));
+
+        void (async () => {
+            const currentConfig = await reloadRuntime(loadedConfig, 'startup');
+            const currentAccountStatus = accountManager.getAccountStatus(currentConfig);
+
+            log('');
+            log('API 配置:');
+            log(`  - 模式: ${configType}`);
+            log(`  - 账号数量: ${apiConfigs.length}`);
+            log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
+            log(`  - 额度轮询: ${shouldUseQuotaMonitoring(configType) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查一次，剩余低于 ${MIN_REMAINING_PERCENT}% 自动切号` : '关闭（api_key 模式）'}`);
+            log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
+            if (shouldUseQuotaMonitoring(configType) && apiConfigs.length > 0) {
+                log('  - 初始化账号额度:');
+                for (const config of apiConfigs) {
+                    log(`    ${accountManager.getAccountStatus(config).summaryLine}`);
+                }
+            }
+            if (apiConfigs.length === 0) {
+                log('  - 当前没有配置项，请先访问配置管理页新增账号');
+            }
+            log('');
+            log('路由规则:');
+            log('  - /claude/v1/messages -> /backend-api/codex/responses (Claude compatibility)');
+            log('  - /v1/responses -> /backend-api/codex/responses');
+            log('  - /v1/models -> /backend-api/codex/models');
+            log('  - /wham/* -> /backend-api/wham/*');
+        })().catch(err => {
+            error('初始化账号信息失败:', err.message);
+        });
     });
 }
 
@@ -645,10 +883,16 @@ startServer().catch(err => {
 // 优雅关闭
 process.on('SIGINT', () => {
     log('收到 SIGINT 信号，正在关闭服务器...');
+    if (accountManager) {
+        accountManager.stopQuotaMonitor();
+    }
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
     log('收到 SIGTERM 信号，正在关闭服务器...');
+    if (accountManager) {
+        accountManager.stopQuotaMonitor();
+    }
     process.exit(0);
 });

@@ -123,6 +123,16 @@ test('ensureActiveConfig keeps the current account when it is still available', 
   assert.equal(warnings.length, 0);
 });
 
+test('ensureActiveConfig returns null when there are no configs', () => {
+  const { manager, warnings } = createManager([]);
+
+  const selected = manager.ensureActiveConfig('startup');
+
+  assert.equal(selected, null);
+  assert.equal(manager.getActiveConfig(), null);
+  assert.equal(warnings.length, 0);
+});
+
 test('ensureActiveConfig switches to the next available account when current one becomes unavailable', () => {
   const configs = [
     createConfig(0, { available: false, reason: 'remaining_below_3%' }),
@@ -136,6 +146,20 @@ test('ensureActiveConfig switches to the next available account when current one
   assert.equal(selected, configs[1]);
   assert.equal(manager.getActiveConfig(), configs[1]);
   assert.match(warnings[0], /账号切换: #1 account-1 -> #2 account-2 \(poll\)/);
+});
+
+test('ensureActiveConfig does not log account switches during startup', () => {
+  const configs = [
+    createConfig(0, { available: false, reason: 'remaining_below_3%' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager, warnings } = createManager(configs);
+
+  const selected = manager.ensureActiveConfig('startup');
+
+  assert.equal(selected, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(warnings.length, 0);
 });
 
 test('getActiveConfig returns the current active account without switching', () => {

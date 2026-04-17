@@ -104,7 +104,7 @@ test('run.sh defaults to a 10 second startup check delay', () => {
   assert.doesNotMatch(script, /POST_START_SETTLE_DELAY_MS=/);
   assert.match(script, /node -e/);
   assert.match(script, /sleep 10/);
-  assert.match(script, /tail -n 20 "\$LOG_FILE"/);
+  assert.match(script, /new_logs=\$\(cat "\$LOG_FILE"\)/);
   assert.match(script, /tail -n 100 -f "\$LOG_FILE"/);
   assert.match(script, /kill -0/);
   assert.match(script, /lsof -nP -tiTCP:/);
@@ -122,14 +122,47 @@ test('start shows only fresh startup logs when the process stays up', () => {
 
   assert.equal(startResult.status, 0, startResult.stderr);
   assert.match(startResult.stdout, /^starting\nstarted pid=\d+/);
-  assert.match(startResult.stdout, /openai proxy: http:\/\/localhost:3009\/v1/);
-  assert.match(startResult.stdout, /claude proxy: http:\/\/localhost:3009\/claude/);
   assert.match(startResult.stdout, /fresh ready/);
   assert.doesNotMatch(startResult.stdout, /old log line/);
 
   const stopResult = runCommand(['stop'], workspace);
   assert.equal(stopResult.status, 0, stopResult.stderr);
   assert.match(stopResult.stdout, /stopped/);
+});
+
+test('start waits briefly for startup links when logs arrive late', () => {
+  const workspace = prepareWorkspace(
+    'setTimeout(() => console.log("配置管理: http://localhost:3009/admin/configs"), 600);\n' +
+      'setTimeout(() => {}, 30000);\n',
+    'old log line\n'
+  );
+
+  const startResult = runCommand(['start'], workspace);
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, /配置管理: http:\/\/localhost:3009\/admin\/configs/);
+  assert.doesNotMatch(startResult.stdout, /old log line/);
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start shows all fresh startup logs instead of truncating to the last 20 lines', () => {
+  const freshLines = Array.from({ length: 30 }, (_, index) => `fresh-line-${index + 1}`).join('\n');
+  const workspace = prepareWorkspace(
+    `${JSON.stringify(freshLines)}.split("\\n").forEach(line => console.log(line)); setTimeout(() => {}, 30000);\n`,
+    'old log line\n'
+  );
+
+  const startResult = runCommand(['start'], workspace);
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, /fresh-line-1/);
+  assert.match(startResult.stdout, /fresh-line-30/);
+  assert.doesNotMatch(startResult.stdout, /old log line/);
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 
 test('start passes the configured port from openai.json', () => {
@@ -143,8 +176,6 @@ test('start passes the configured port from openai.json', () => {
 
   assert.equal(startResult.status, 0, startResult.stderr);
   assert.match(startResult.stdout, /^starting\nstarted pid=\d+/);
-  assert.match(startResult.stdout, /openai proxy: http:\/\/localhost:3456\/v1/);
-  assert.match(startResult.stdout, /claude proxy: http:\/\/localhost:3456\/claude/);
 
   const stopResult = runCommand(['stop'], workspace);
   assert.equal(stopResult.status, 0, stopResult.stderr);
@@ -163,7 +194,6 @@ test('start reads config without jq in PATH', () => {
   });
 
   assert.equal(startResult.status, 0, startResult.stderr);
-  assert.match(startResult.stdout, /openai proxy: http:\/\/localhost:3456\/v1/);
   assert.match(startResult.stdout, /port=3456 proxy=http:\/\/127\.0\.0\.1:6789/);
 
   const stopResult = runCommand(['stop'], {

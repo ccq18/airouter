@@ -49,8 +49,8 @@ function parseOpenAiConfigFile(raw) {
         throw new Error('配置文件 type 仅支持 token 或 api_key');
     }
 
-    if (!Array.isArray(parsed.configs) || parsed.configs.length === 0) {
-        throw new Error('配置文件 configs 必须是非空数组');
+    if (!Array.isArray(parsed.configs)) {
+        throw new Error('配置文件 configs 必须是数组');
     }
 
     if (parsed.claude_code !== undefined) {
@@ -126,7 +126,7 @@ function createApiKeyRuntimeConfig(config, index) {
 
 function createRuntimeConfigs(parsed) {
     if (parsed.type === 'api_key') {
-        return [createApiKeyRuntimeConfig(parsed.configs[0], 0)];
+        return parsed.configs.map((config, index) => createApiKeyRuntimeConfig(config, index));
     }
 
     return parsed.configs.map((config, index) => createTokenRuntimeConfig(config, index));
@@ -157,6 +157,8 @@ module.exports = {
     parseOpenAiConfigFile,
     resolveClaudeCodeOptions,
     createRuntimeConfigs,
+    createTokenRuntimeConfig,
+    createApiKeyRuntimeConfig,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring
 };

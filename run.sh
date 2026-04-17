@@ -108,11 +108,6 @@ current_pid() {
   cat "$PID_FILE"
 }
 
-show_proxy_urls() {
-  echo "openai proxy: http://localhost:${PORT}/v1"
-  echo "claude proxy: http://localhost:${PORT}/claude"
-}
-
 show_startup_logs() {
   if [ ! -f "$LOG_FILE" ]; then
     echo "no log output captured"
@@ -120,13 +115,40 @@ show_startup_logs() {
   fi
 
   local new_logs
-
-  new_logs=$(tail -n 20 "$LOG_FILE")
+  new_logs=$(cat "$LOG_FILE")
 
   if [ -n "$new_logs" ]; then
     echo "recent logs:"
     printf '%s\n' "$new_logs"
   fi
+}
+
+has_startup_link_logs() {
+  if [ ! -f "$LOG_FILE" ]; then
+    return 1
+  fi
+
+  grep -qF "http://localhost:${PORT}/admin/configs" "$LOG_FILE" 2>/dev/null
+}
+
+has_startup_log_output() {
+  [ -s "$LOG_FILE" ]
+}
+
+wait_for_startup_logs() {
+  local timeout_ms="${1:-5000}"
+  local waited_ms=0
+
+  while [ "$waited_ms" -lt "$timeout_ms" ]; do
+    if has_startup_log_output || has_startup_link_logs; then
+      return 0
+    fi
+
+    real_sleep_ms 100
+    waited_ms=$((waited_ms + 100))
+  done
+
+  return 1
 }
 
 start() {
@@ -163,8 +185,9 @@ start() {
     return 1
   fi
 
+  wait_for_startup_logs 2000 || true
+
   echo "started pid=$(current_pid)"
-  show_proxy_urls
   show_startup_logs
 }
 
