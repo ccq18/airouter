@@ -301,6 +301,12 @@ function transformClaudeMessagesRequest(body, options = {}) {
         include: []
     };
 
+    if (typeof options.reasoningEffort === 'string' && options.reasoningEffort.length > 0) {
+        responsesBody.reasoning = {
+            effort: options.reasoningEffort
+        };
+    }
+
     const includeMaxOutputTokens = options.includeMaxOutputTokens !== false;
     if (includeMaxOutputTokens && typeof body.max_tokens === 'number') {
         responsesBody.max_output_tokens = body.max_tokens;

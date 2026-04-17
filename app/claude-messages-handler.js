@@ -391,6 +391,7 @@ function createClaudeMessagesHandler({
     error = () => {},
     logRequestSnapshot = null,
     upstreamModel = 'gpt-5.4',
+    reasoningEffort = 'high',
     clientVersion = '0.0.1'
 }) {
     return async function handleMessagesRequest(req, res) {
@@ -433,6 +434,7 @@ function createClaudeMessagesHandler({
             isClientStream = claudeRequest.stream === true;
             responsesRequest = transformClaudeMessagesRequest(claudeRequest, {
                 model: upstreamModel,
+                reasoningEffort,
                 stream: true,
                 includeMaxOutputTokens: false
             });

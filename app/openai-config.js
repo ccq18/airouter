@@ -1,5 +1,8 @@
 const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
+const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.4';
+const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
+const SUPPORTED_REASONING_EFFORTS = new Set(['minimal', 'low', 'medium', 'high']);
 
 function createDefaultTokenRuntime(isEnabled) {
     return {
@@ -50,7 +53,44 @@ function parseOpenAiConfigFile(raw) {
         throw new Error('配置文件 configs 必须是非空数组');
     }
 
+    if (parsed.claude_code !== undefined) {
+        if (!parsed.claude_code || typeof parsed.claude_code !== 'object' || Array.isArray(parsed.claude_code)) {
+            throw new Error('配置文件 claude_code 必须是对象');
+        }
+
+        if (
+            parsed.claude_code.model !== undefined &&
+            (typeof parsed.claude_code.model !== 'string' || parsed.claude_code.model.trim().length === 0)
+        ) {
+            throw new Error('配置文件 claude_code.model 必须是非空字符串');
+        }
+
+        if (parsed.claude_code.reasoning_effort !== undefined) {
+            if (
+                typeof parsed.claude_code.reasoning_effort !== 'string' ||
+                !SUPPORTED_REASONING_EFFORTS.has(parsed.claude_code.reasoning_effort)
+            ) {
+                throw new Error('配置文件 claude_code.reasoning_effort 仅支持 minimal、low、medium、high');
+            }
+        }
+    }
+
     return parsed;
+}
+
+function resolveClaudeCodeOptions(parsed) {
+    const claudeCode = parsed && parsed.claude_code && typeof parsed.claude_code === 'object'
+        ? parsed.claude_code
+        : {};
+
+    return {
+        model: typeof claudeCode.model === 'string' && claudeCode.model.trim().length > 0
+            ? claudeCode.model.trim()
+            : DEFAULT_CLAUDE_CODE_MODEL,
+        reasoningEffort: typeof claudeCode.reasoning_effort === 'string' && claudeCode.reasoning_effort.length > 0
+            ? claudeCode.reasoning_effort
+            : DEFAULT_CLAUDE_CODE_REASONING_EFFORT
+    };
 }
 
 function createTokenRuntimeConfig(config, index) {
@@ -112,7 +152,10 @@ function shouldUseQuotaMonitoring(type) {
 module.exports = {
     CHATGPT_BASE_URL,
     CODEX_API_BASE_PATH,
+    DEFAULT_CLAUDE_CODE_MODEL,
+    DEFAULT_CLAUDE_CODE_REASONING_EFFORT,
     parseOpenAiConfigFile,
+    resolveClaudeCodeOptions,
     createRuntimeConfigs,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring

@@ -2,6 +2,10 @@
   "type": "token",
   "proxy_port":7890,
   "port": 3000,
+  "claude_code": {
+    "model": "gpt-5.4",
+    "reasoning_effort": "high"
+  },
   "configs": [
    {
     "access_token": "",

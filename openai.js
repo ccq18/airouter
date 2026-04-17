@@ -10,8 +10,10 @@ const express = require('express');
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
 const { normalizeResponsesRequestBody } = require('./app/responses-defaults');
 const { createClaudeMessagesHandler } = require('./app/claude-messages-handler');
+const { createAccountManager } = require('./app/account-manager');
 const {
     parseOpenAiConfigFile,
+    resolveClaudeCodeOptions,
     createRuntimeConfigs,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring
@@ -53,16 +55,15 @@ function loadApiConfigs() {
 
     return {
         type: parsed.type,
-        configs: createRuntimeConfigs(parsed)
+        configs: createRuntimeConfigs(parsed),
+        claudeCode: resolveClaudeCodeOptions(parsed)
     };
 }
 
 const LOADED_CONFIG = loadApiConfigs();
 const CONFIG_TYPE = LOADED_CONFIG.type;
 const API_CONFIGS = LOADED_CONFIG.configs;
-let activeConfigIndex = 0;
-let quotaMonitorRunning = false;
-let quotaMonitorTimer = null;
+const CLAUDE_CODE_CONFIG = LOADED_CONFIG.claudeCode;
 
 // ==================== 工具函数 ====================
 function log(...args) {
@@ -131,44 +132,6 @@ function warn(...args) {
     console.warn(`[${timestamp}]`, ...args);
 }
 
-function getAccountLabel(config) {
-    return `#${config.index + 1} ${config.description}`;
-}
-
-function formatQuotaPercent(value) {
-    return value === null || typeof value === 'undefined' ? 'unknown' : `${value}%`;
-}
-
-function formatQuotaResetTime(epochSeconds) {
-    if (epochSeconds === null || typeof epochSeconds === 'undefined') {
-        return 'unknown';
-    }
-
-    return new Date(epochSeconds * 1000).toLocaleString('zh-CN', {
-        timeZone: 'Asia/Shanghai',
-        hour12: false
-    });
-}
-
-function formatBooleanText(value) {
-    return value ? '是' : '否';
-}
-
-function formatReasonText(reason) {
-    const reasonMap = {
-        ok: '正常',
-        unchecked: '未检查',
-        api_key: 'API Key 模式',
-        missing_credentials: '缺少凭证',
-        rate_limit_not_allowed: '额度不可用',
-        rate_limit_reached: '额度已用尽',
-        [`remaining_below_${MIN_REMAINING_PERCENT}%`]: `剩余额度低于 ${MIN_REMAINING_PERCENT}%`,
-        quota_check_failed: '额度检查失败'
-    };
-
-    return reasonMap[reason] || reason || '未知';
-}
-
 function decodeResponseBody(bodyBuffer, contentEncoding) {
     if (!Buffer.isBuffer(bodyBuffer) || bodyBuffer.length === 0) {
         return '';
@@ -191,24 +154,6 @@ function decodeResponseBody(bodyBuffer, contentEncoding) {
     return bodyBuffer.toString('utf8');
 }
 
-function formatRuntimeSummary(config) {
-    const runtime = config.runtime;
-    const parts = [
-        `可用=${formatBooleanText(runtime.available)}`,
-        `额度=${formatQuotaPercent(runtime.primaryRemainingPercent)}`,
-        `刷新时间=${formatQuotaResetTime(runtime.primaryResetAt)}`,
-        `周额度=${formatQuotaPercent(runtime.secondaryRemainingPercent)}`,
-        `刷新时间=${formatQuotaResetTime(runtime.secondaryResetAt)}`,
-        `状态=${formatReasonText(runtime.reason)}`
-    ];
-
-    if (runtime.lastError) {
-        parts.push(`错误=${runtime.lastError}`);
-    }
-
-    return parts.join(' | ');
-}
-
 function isQuotaUsagePath(urlValue) {
     const parsedUrl = new URL(urlValue, 'http://localhost');
     return parsedUrl.pathname === QUOTA_CHECK_PATH;
@@ -218,294 +163,19 @@ function getCurrentTimestamp() {
     return Date.now();
 }
 
-function computeRemainingPercent(windowData) {
-    if (!windowData || typeof windowData.used_percent !== 'number') {
-        return null;
-    }
-
-    return Math.max(0, 100 - windowData.used_percent);
-}
-
-function evaluateQuotaResponse(payload) {
-    const rateLimit = payload && typeof payload === 'object' ? payload.rate_limit || {} : {};
-    const primaryRemainingPercent = computeRemainingPercent(rateLimit.primary_window);
-    const secondaryRemainingPercent = computeRemainingPercent(rateLimit.secondary_window);
-    const remainingValues = [primaryRemainingPercent, secondaryRemainingPercent].filter(value => value !== null);
-    const remainingPercent = remainingValues.length > 0 ? Math.min(...remainingValues) : null;
-
-    let available = true;
-    let reason = 'ok';
-
-    // 账号是否可用以 wham/usage 为准：
-    // 1. allowed=false 或 limit_reached=true 直接视为不可用
-    // 2. 剩余额度取主窗口/副窗口中的较小值
-    // 3. 小于 3% 时主动切到下一个账号，避免请求打到快耗尽的账号上
-    if (rateLimit.allowed === false) {
-        available = false;
-        reason = 'rate_limit_not_allowed';
-    } else if (rateLimit.limit_reached === true) {
-        available = false;
-        reason = 'rate_limit_reached';
-    } else if (remainingPercent !== null && remainingPercent < MIN_REMAINING_PERCENT) {
-        available = false;
-        reason = `remaining_below_${MIN_REMAINING_PERCENT}%`;
-    }
-
-    return {
-        available,
-        reason,
-        remainingPercent,
-        primaryRemainingPercent,
-        primaryResetAt: rateLimit.primary_window?.reset_at ?? null,
-        primaryResetAfterSeconds: rateLimit.primary_window?.reset_after_seconds ?? null,
-        secondaryRemainingPercent,
-        secondaryResetAt: rateLimit.secondary_window?.reset_at ?? null,
-        secondaryResetAfterSeconds: rateLimit.secondary_window?.reset_after_seconds ?? null
-    };
-}
-
-function applyQuotaState(config, quotaState) {
-    config.runtime.available = quotaState.available;
-    config.runtime.reason = quotaState.reason;
-    config.runtime.lastCheckedAt = getCurrentTimestamp();
-    config.runtime.remainingPercent = quotaState.remainingPercent;
-    config.runtime.primaryRemainingPercent = quotaState.primaryRemainingPercent;
-    config.runtime.primaryResetAt = quotaState.primaryResetAt;
-    config.runtime.primaryResetAfterSeconds = quotaState.primaryResetAfterSeconds;
-    config.runtime.secondaryRemainingPercent = quotaState.secondaryRemainingPercent;
-    config.runtime.secondaryResetAt = quotaState.secondaryResetAt;
-    config.runtime.secondaryResetAfterSeconds = quotaState.secondaryResetAfterSeconds;
-    config.runtime.lastError = null;
-}
-
-function isConfigAvailable(config) {
-    return Boolean(config && config.runtime && config.runtime.enabled && config.runtime.available);
-}
-
-function findNextAvailableConfigIndex(startIndex) {
-    if (API_CONFIGS.length === 0) {
-        return -1;
-    }
-
-    // 按 openai.json 中的顺序轮询下一个可用账号。
-    // 这里不会跳过“后来恢复可用”的旧账号，后续轮询检查到恢复后会重新进入候选。
-    for (let offset = 0; offset < API_CONFIGS.length; offset += 1) {
-        const index = (startIndex + offset) % API_CONFIGS.length;
-        if (isConfigAvailable(API_CONFIGS[index])) {
-            return index;
-        }
-    }
-
-    return -1;
-}
-
-function ensureActiveConfig(reason = 'select') {
-    const currentConfig = API_CONFIGS[activeConfigIndex];
-    if (isConfigAvailable(currentConfig)) {
-        return currentConfig;
-    }
-
-    // 当前账号不可用时，从当前账号的下一个位置开始找可用账号。
-    // 真正的“切号”动作就是把 activeConfigIndex 更新为 fallbackIndex。
-    const fallbackIndex = findNextAvailableConfigIndex((activeConfigIndex + 1) % Math.max(API_CONFIGS.length, 1));
-    if (fallbackIndex !== -1) {
-        const previousConfig = currentConfig;
-        activeConfigIndex = fallbackIndex;
-        const nextConfig = API_CONFIGS[activeConfigIndex];
-
-        if (previousConfig !== nextConfig) {
-            warn(`账号切换: ${previousConfig ? getAccountLabel(previousConfig) : 'none'} -> ${getAccountLabel(nextConfig)} (${reason})`);
-        }
-
-        return nextConfig;
-    }
-
-    if (currentConfig) {
-        // 如果暂时没有任何账号被判定为可用，保留当前账号继续服务。
-        // 这样短暂网络抖动不会把整个代理立即打死。
-        warn(`没有可用账号，继续使用当前账号 ${getAccountLabel(currentConfig)} (${reason})`);
-        return currentConfig;
-    }
-
-    throw new Error('没有可用账号配置');
-}
-
-function selectConfig() {
-    return ensureActiveConfig('request');
-}
-
-function buildQuotaCheckHeaders(config) {
-    return buildAuthHeadersForConfig(config);
-}
-
-function runBufferedCurl(method, targetUrl, headers, body) {
-    return new Promise((resolve, reject) => {
-        const hasBody = Buffer.isBuffer(body) && body.length > 0;
-        const args = [
-            '--http1.1',
-            '--silent',
-            '--show-error',
-            '--location',
-            '-X',
-            method,
-            targetUrl,
-            '-w',
-            '\n__CURL_STATUS__:%{http_code}'
-        ];
-
-        for (const [name, value] of Object.entries(headers || {})) {
-            if (typeof value === 'undefined') {
-                continue;
-            }
-
-            args.push('-H', `${name}: ${value}`);
-        }
-
-        if (hasBody) {
-            args.push('--data-binary', '@-');
-        }
-
-        const curl = spawn('curl', args, {
-            stdio: ['pipe', 'pipe', 'pipe']
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        curl.stdout.on('data', chunk => {
-            stdout += chunk.toString('utf8');
-        });
-
-        curl.stderr.on('data', chunk => {
-            stderr += chunk.toString('utf8');
-        });
-
-        curl.on('error', err => {
-            reject(err);
-        });
-
-        curl.on('close', code => {
-            if (code !== 0) {
-                reject(new Error(stderr.trim() || `curl exited with code ${code}`));
-                return;
-            }
-
-            const marker = '\n__CURL_STATUS__:';
-            const markerIndex = stdout.lastIndexOf(marker);
-            if (markerIndex === -1) {
-                reject(new Error('无法解析 curl 返回状态码'));
-                return;
-            }
-
-            const bodyText = stdout.slice(0, markerIndex);
-            const statusCode = Number(stdout.slice(markerIndex + marker.length).trim());
-            resolve({
-                statusCode,
-                bodyText,
-                stderr: stderr.trim()
-            });
-        });
-
-        if (hasBody) {
-            curl.stdin.end(body);
-        } else {
-            curl.stdin.end();
-        }
-    });
-}
-
-async function checkSingleAccountQuota(config) {
-    if (!shouldUseQuotaMonitoring(config.type)) {
-        return config.runtime;
-    }
-
-    if (!config.runtime.enabled) {
-        config.runtime.available = false;
-        config.runtime.reason = 'missing_credentials';
-        return config.runtime;
-    }
-
-    const targetUrl = new URL(QUOTA_CHECK_PATH, config.baseUrl).toString();
-
-    try {
-        const result = await runBufferedCurl('GET', targetUrl, buildQuotaCheckHeaders(config));
-        if (result.statusCode < 200 || result.statusCode >= 300) {
-            throw new Error(`quota check status ${result.statusCode}`);
-        }
-
-        const payload = JSON.parse(result.bodyText);
-        const quotaState = evaluateQuotaResponse(payload);
-        applyQuotaState(config, quotaState);
-    } catch (err) {
-        // 配额检查失败时保留上一次 available 状态，只记录错误。
-        // 否则一次瞬时网络错误就可能把账号误判为不可用并触发切号。
-        config.runtime.available = Boolean(config.runtime.available);
-        config.runtime.reason = 'quota_check_failed';
-        config.runtime.lastCheckedAt = getCurrentTimestamp();
-        config.runtime.lastError = err.message;
-    }
-
-    return config.runtime;
-}
-
-async function refreshAllAccountQuotas(reason = 'poll') {
-    if (!shouldUseQuotaMonitoring(CONFIG_TYPE)) {
-        return;
-    }
-
-    if (quotaMonitorRunning) {
-        return;
-    }
-
-    // 串行检查所有账号的 /wham/usage，更新各自 runtime 状态。
-    // 检查完成后再统一调用 ensureActiveConfig，避免在检查过程中反复来回切号。
-    quotaMonitorRunning = true;
-    const previousActiveIndex = activeConfigIndex;
-
-    try {
-        for (const config of API_CONFIGS) {
-            const previousAvailability = config.runtime.available;
-            const previousReason = config.runtime.reason;
-
-            await checkSingleAccountQuota(config);
-
-            const availabilityChanged = previousAvailability !== config.runtime.available || previousReason !== config.runtime.reason;
-            if (availabilityChanged && !config.runtime.available && reason !== 'startup') {
-                warn(`账号不可用: ${getAccountLabel(config)} (${config.runtime.reason}${config.runtime.lastError ? `: ${config.runtime.lastError}` : ''})`);
-            } else if (availabilityChanged && config.runtime.available && previousAvailability === false && reason !== 'startup') {
-                warn(`账号恢复可用: ${getAccountLabel(config)} (remaining=${config.runtime.remainingPercent ?? 'unknown'}%)`);
-            }
-        }
-
-        const currentConfig = ensureActiveConfig(reason);
-
-        if (previousActiveIndex !== activeConfigIndex) {
-            warn(`当前活动账号: ${getAccountLabel(currentConfig)}`);
-        }
-
-        if (reason === 'poll') {
-            log(`轮询额度: ${getAccountLabel(currentConfig)} | ${formatRuntimeSummary(currentConfig)}`);
-        }
-    } finally {
-        quotaMonitorRunning = false;
-    }
-}
-
-function startQuotaMonitor() {
-    if (!shouldUseQuotaMonitoring(CONFIG_TYPE)) {
-        return;
-    }
-
-    if (quotaMonitorTimer) {
-        clearInterval(quotaMonitorTimer);
-    }
-
-    // 隐藏轮询：每 5 分钟检查一次账号额度。
-    // ChatGPT 配额窗口约 5 小时刷新一次，所以被用尽的账号后续有机会恢复可用。
-    quotaMonitorTimer = setInterval(() => {
-        void refreshAllAccountQuotas('poll');
-    }, QUOTA_CHECK_INTERVAL_MS);
-}
+const accountManager = createAccountManager({
+    configs: API_CONFIGS,
+    configType: CONFIG_TYPE,
+    quotaCheckPath: QUOTA_CHECK_PATH,
+    quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
+    minRemainingPercent: MIN_REMAINING_PERCENT,
+    buildAuthHeadersForConfig,
+    shouldUseQuotaMonitoring,
+    spawn,
+    log,
+    warn,
+    now: getCurrentTimestamp
+});
 
 function buildIncomingUrl(req, proxyPath = '') {
     const combinedUrl = `${req.baseUrl || ''}${req.url || ''}`;
@@ -757,11 +427,10 @@ function proxyRequest(req, res, config, body, originalUrl) {
                     upstreamResponseHeaders['content-encoding']
                 );
                 const payload = JSON.parse(payloadText);
-                const quotaState = evaluateQuotaResponse(payload);
-                applyQuotaState(config, quotaState);
-                log(`额度信息: ${getAccountLabel(config)} | ${formatRuntimeSummary(config)}`);
+                accountManager.applyQuotaPayload(config, payload);
+                log(`额度信息: ${accountManager.getAccountStatus(config).summaryLine}`);
             } catch (err) {
-                warn(`额度信息解析失败: ${getAccountLabel(config)} (${err.message})`);
+                warn(`额度信息解析失败: ${accountManager.getAccountStatus(config).label} (${err.message})`);
             }
         }
 
@@ -788,7 +457,7 @@ function proxyRequest(req, res, config, body, originalUrl) {
 
 function createHandler(proxyPath = '') {
     return function handler(req, res) {
-        const config = selectConfig();
+        const config = accountManager.getActiveConfig();
         const incomingUrl = buildIncomingUrl(req, proxyPath);
         const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
 
@@ -831,7 +500,7 @@ function createHandler(proxyPath = '') {
 }
 
 const handleClaudeMessagesRequest = createClaudeMessagesHandler({
-    getConfig: () => selectConfig(),
+    getConfig: () => accountManager.getActiveConfig(),
     accessLogEnabled: ACCESS_LOG_ENABLED,
     log,
     error,
@@ -848,7 +517,8 @@ const handleClaudeMessagesRequest = createClaudeMessagesHandler({
             payload.bodyBuffer
         );
     },
-    upstreamModel: process.env.CLAUDE_PROXY_MODEL || 'gpt-5.4',
+    upstreamModel: process.env.CLAUDE_PROXY_MODEL || CLAUDE_CODE_CONFIG.model,
+    reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || CLAUDE_CODE_CONFIG.reasoningEffort,
     clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1'
 });
 
@@ -874,7 +544,8 @@ app.use((req, res, next) => {
 
 // 健康检查
 app.get('/health', (req, res) => {
-    const currentConfig = API_CONFIGS[activeConfigIndex];
+    const currentConfig = accountManager.getActiveConfig();
+    const currentAccountStatus = accountManager.getAccountStatus(currentConfig);
     res.json({
         status: 'ok',
         mode: CONFIG_TYPE,
@@ -882,23 +553,23 @@ app.get('/health', (req, res) => {
             timeZone: 'Asia/Shanghai',
             hour12: false
         }),
-        active_account: currentConfig ? {
-            index: currentConfig.index,
-            description: currentConfig.description,
-            available: currentConfig.runtime.available,
-            remaining_percent: currentConfig.runtime.remainingPercent,
-            primary_remaining_percent: currentConfig.runtime.primaryRemainingPercent,
-            primary_reset_at: currentConfig.runtime.primaryResetAt,
-            primary_reset_after_seconds: currentConfig.runtime.primaryResetAfterSeconds,
-            secondary_remaining_percent: currentConfig.runtime.secondaryRemainingPercent,
-            secondary_reset_at: currentConfig.runtime.secondaryResetAt,
-            secondary_reset_after_seconds: currentConfig.runtime.secondaryResetAfterSeconds,
-            last_checked_at: currentConfig.runtime.lastCheckedAt,
-            reason: currentConfig.runtime.reason
+        active_account: currentAccountStatus ? {
+            index: currentAccountStatus.index,
+            description: currentAccountStatus.description,
+            available: currentAccountStatus.available,
+            remaining_percent: currentAccountStatus.remainingPercent,
+            primary_remaining_percent: currentAccountStatus.primaryRemainingPercent,
+            primary_reset_at: currentAccountStatus.primaryResetAt,
+            primary_reset_after_seconds: currentAccountStatus.primaryResetAfterSeconds,
+            secondary_remaining_percent: currentAccountStatus.secondaryRemainingPercent,
+            secondary_reset_at: currentAccountStatus.secondaryResetAt,
+            secondary_reset_after_seconds: currentAccountStatus.secondaryResetAfterSeconds,
+            last_checked_at: currentAccountStatus.lastCheckedAt,
+            reason: currentAccountStatus.reason
         } : null,
         configs: {
             total: API_CONFIGS.length,
-            default: currentConfig ? currentConfig.description : null
+            default: currentAccountStatus ? currentAccountStatus.description : null
         }
     });
 });
@@ -925,10 +596,11 @@ app.use((req, res) => {
 // ==================== 启动服务器 ====================
 async function startServer() {
     if (shouldUseQuotaMonitoring(CONFIG_TYPE)) {
-        await refreshAllAccountQuotas('startup');
+        await accountManager.refreshQuotas('startup');
     }
-    const currentConfig = ensureActiveConfig('startup');
-    startQuotaMonitor();
+    const currentConfig = accountManager.ensureActiveConfig('startup');
+    const currentAccountStatus = accountManager.getAccountStatus(currentConfig);
+    accountManager.startQuotaMonitor();
 
     app.listen(PORT, () => {
         log('='.repeat(70));
@@ -941,16 +613,16 @@ async function startServer() {
         log(`  - 配置文件: ${CONFIG_FILE}`);
         log(`  - 模式: ${CONFIG_TYPE}`);
         log(`  - 账号数量: ${API_CONFIGS.length}`);
-        log(`  - 当前账号: ${getAccountLabel(currentConfig)}`);
+        log(`  - 当前账号: ${currentAccountStatus.label}`);
         log(`  - 目标主机: ${currentConfig.baseUrl}`);
         log(`  - 目标前缀: ${currentConfig.apiBasePath || '(直连兼容接口)'}`);
         log(`  - 额度轮询: ${shouldUseQuotaMonitoring(CONFIG_TYPE) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查一次，剩余低于 ${MIN_REMAINING_PERCENT}% 自动切号` : '关闭（api_key 模式）'}`);
         log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
-        log(`  - 当前额度: ${formatRuntimeSummary(currentConfig)}`);
+        log(`  - 当前额度: ${currentAccountStatus.runtimeSummary}`);
         if (shouldUseQuotaMonitoring(CONFIG_TYPE)) {
             log('  - 初始化账号额度:');
             for (const config of API_CONFIGS) {
-                log(`    ${getAccountLabel(config)} | ${formatRuntimeSummary(config)}`);
+                log(`    ${accountManager.getAccountStatus(config).summaryLine}`);
             }
         }
         log('');
