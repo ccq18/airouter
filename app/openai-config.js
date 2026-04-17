@@ -53,6 +53,20 @@ function parseOpenAiConfigFile(raw) {
         throw new Error('配置文件 configs 必须是数组');
     }
 
+    if (parsed.apikeys !== undefined) {
+        if (!Array.isArray(parsed.apikeys)) {
+            throw new Error('配置文件 apikeys 必须是字符串数组');
+        }
+
+        if (parsed.apikeys.some(item => typeof item !== 'string')) {
+            throw new Error('配置文件 apikeys 必须是字符串数组');
+        }
+    }
+
+    if (parsed.auth_token !== undefined && typeof parsed.auth_token !== 'string') {
+        throw new Error('配置文件 auth_token 必须是字符串');
+    }
+
     if (parsed.claude_code !== undefined) {
         if (!parsed.claude_code || typeof parsed.claude_code !== 'object' || Array.isArray(parsed.claude_code)) {
             throw new Error('配置文件 claude_code 必须是对象');

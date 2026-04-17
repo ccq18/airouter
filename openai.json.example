@@ -1,5 +1,7 @@
 {
   "type": "token",
+  "apikeys": [],
+  "auth_token": "",
   "proxy_port": 7890,
   "port": 3009,
   "claude_code": {

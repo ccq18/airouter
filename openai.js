@@ -22,8 +22,17 @@ const {
     buildImportedConfigItem,
     deleteConfigItem,
     readParsedConfigFile,
+    updateConfigSettings,
     writeParsedConfigFile
 } = require('./app/config-editor');
+const {
+    generateRandomSecret,
+    getConfiguredApiKeys,
+    getConfiguredAuthToken,
+    hasConfiguredApiKeys,
+    isAuthorizedAdminRequest,
+    isAuthorizedRequest
+} = require('./app/request-auth');
 // https://chatgpt.com/api/auth/session
 // ==================== 配置 ====================
 const PORT = process.env.PORT || 3009;
@@ -55,15 +64,47 @@ const ACCESS_LOG_ENABLED = (
     process.env.ACCESS_LOG === 'true'
 ) && !hasCliFlag('--no-access-log');
 
-function loadApiConfigs() {
-    const parsed = readParsedConfigFile(CONFIG_FILE);
-
+function buildLoadedConfig(parsed) {
     return {
         parsed,
         type: parsed.type,
         configs: createRuntimeConfigs(parsed),
         claudeCode: resolveClaudeCodeOptions(parsed)
     };
+}
+
+function ensureSecuritySettings(parsed) {
+    let nextParsed = parsed;
+    let changed = false;
+
+    const normalizedApiKeys = getConfiguredApiKeys(parsed);
+    const hasPersistedApiKeys = Array.isArray(parsed.apikeys);
+    if (!hasPersistedApiKeys || normalizedApiKeys.length !== parsed.apikeys.length || normalizedApiKeys.some((item, index) => item !== parsed.apikeys[index])) {
+        nextParsed = updateConfigSettings(nextParsed, {
+            apikeys: normalizedApiKeys
+        });
+        changed = true;
+    }
+
+    const authToken = getConfiguredAuthToken(nextParsed);
+    if (!authToken) {
+        nextParsed = updateConfigSettings(nextParsed, {
+            auth_token: generateRandomSecret('auth_')
+        });
+        changed = true;
+    }
+
+    return {
+        parsed: nextParsed,
+        changed
+    };
+}
+
+function loadApiConfigs() {
+    const parsed = readParsedConfigFile(CONFIG_FILE);
+    const ensured = ensureSecuritySettings(parsed);
+    const finalParsed = ensured.changed ? writeParsedConfigFile(CONFIG_FILE, ensured.parsed) : ensured.parsed;
+    return buildLoadedConfig(finalParsed);
 }
 
 let currentParsedConfig = null;
@@ -196,7 +237,7 @@ function createClaudeMessagesRequestHandler() {
             const config = accountManager.getActiveConfig();
 
             if (!config) {
-                throw new Error('当前没有可用配置，请先访问 /admin/configs 添加账号');
+                throw new Error(`当前没有可用配置，请先访问 ${buildAdminPath()} 添加账号`);
             }
 
             return config;
@@ -251,12 +292,7 @@ async function reloadRuntime(loadedConfig, reason) {
 
 async function persistAndReloadConfig(nextParsed, reason) {
     const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed);
-    return reloadRuntime({
-        parsed: savedParsed,
-        type: savedParsed.type,
-        configs: createRuntimeConfigs(savedParsed),
-        claudeCode: resolveClaudeCodeOptions(savedParsed)
-    }, reason);
+    return reloadRuntime(buildLoadedConfig(savedParsed), reason);
 }
 
 function serializeAccountStatus(accountStatus) {
@@ -286,6 +322,7 @@ function serializeAccountStatus(accountStatus) {
 function buildConfigAdminResponse() {
     const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
     const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
+    const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
 
     return {
         config_file: CONFIG_FILE_NAME,
@@ -294,6 +331,8 @@ function buildConfigAdminResponse() {
         runtime_port: Number(PORT),
         file_port: currentParsedConfig.port ?? null,
         proxy_port: currentParsedConfig.proxy_port ?? null,
+        apikeys: configuredApiKeys,
+        apikey_required: configuredApiKeys.length > 0,
         claude_code: currentParsedConfig.claude_code ?? null,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
         configs: currentParsedConfig.configs.map((item, index) => ({
@@ -318,8 +357,66 @@ function parseConfigIndex(value) {
 function createMissingConfigResponse(res) {
     return res.status(503).json({
         error: 'Service Unavailable',
-        message: '当前没有可用配置，请先访问 /admin/configs 添加账号'
+        message: `当前没有可用配置，请先访问 ${buildAdminPath()} 添加账号`
     });
+}
+
+function buildAdminPath() {
+    return `/admin/configs?auth_token=${encodeURIComponent(getConfiguredAuthToken(currentParsedConfig))}`;
+}
+
+function createProxyUnauthorizedResponse(res) {
+    res.setHeader('WWW-Authenticate', 'Bearer');
+    return res.status(401).json({
+        error: 'Unauthorized',
+        message: 'apikey 校验失败，请通过 Authorization: Bearer <apikey> 或 x-api-key 传入正确的 apikey'
+    });
+}
+
+function createAdminUnauthorizedJsonResponse(res) {
+    return res.status(401).json({
+        error: 'Unauthorized',
+        message: `auth_token 校验失败，请通过 ${buildAdminPath()} 访问管理后台`
+    });
+}
+
+function createAdminUnauthorizedPageResponse(res) {
+    return res.status(401).send('auth_token 校验失败');
+}
+
+function isAdminApiRequest(req) {
+    const requestPath = String(req.path || req.url || '');
+    return requestPath === '/api' || requestPath.startsWith('/api/');
+}
+
+function requireConfiguredApiKeys(req, res, next) {
+    const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
+
+    if (configuredApiKeys.length === 0) {
+        next();
+        return;
+    }
+
+    if (!isAuthorizedRequest(req.headers, configuredApiKeys)) {
+        createProxyUnauthorizedResponse(res);
+        return;
+    }
+
+    next();
+}
+
+function requireAdminAuthToken(req, res, next) {
+    if (!isAuthorizedAdminRequest(req.query && req.query.auth_token, getConfiguredAuthToken(currentParsedConfig))) {
+        if (isAdminApiRequest(req)) {
+            createAdminUnauthorizedJsonResponse(res);
+            return;
+        }
+
+        createAdminUnauthorizedPageResponse(res);
+        return;
+    }
+
+    next();
 }
 
 function parseConfigItemJson(rawJson) {
@@ -745,6 +842,7 @@ app.use((req, res, next) => {
     next();
 });
 
+app.use('/admin', requireAdminAuthToken);
 app.use('/admin/api', express.json({ limit: '1mb' }));
 
 app.get('/admin/configs', (req, res) => {
@@ -780,6 +878,47 @@ app.post('/admin/api/configs', async (req, res) => {
     }
 });
 
+app.post('/admin/api/apikeys', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const generatedApiKey = generateRandomSecret('sk-airouter-');
+        const nextParsed = updateConfigSettings(parsed, {
+            apikeys: [...getConfiguredApiKeys(parsed), generatedApiKey]
+        });
+
+        await persistAndReloadConfig(nextParsed, 'admin_add_apikey');
+        res.status(201).json({
+            ...buildConfigAdminResponse(),
+            generated_apikey: generatedApiKey
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? 'apikey 新增失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.delete('/admin/api/apikeys/:index', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => {
+            const apikeys = getConfiguredApiKeys(parsed);
+            const targetIndex = parseConfigIndex(req.params.index);
+
+            if (targetIndex >= apikeys.length) {
+                throw new ConfigEditorError('apikey 索引不合法');
+            }
+
+            return updateConfigSettings(parsed, {
+                apikeys: apikeys.filter((_, index) => index !== targetIndex)
+            });
+        },
+        'admin_delete_apikey'
+    );
+});
+
 app.delete('/admin/api/configs/:index', async (req, res) => {
     await handleConfigMutation(
         res,
@@ -789,7 +928,7 @@ app.delete('/admin/api/configs/:index', async (req, res) => {
 });
 
 // 健康检查
-app.get('/health', (req, res) => {
+app.get('/health', requireConfiguredApiKeys, (req, res) => {
     const currentConfig = accountManager.getActiveConfig();
     const currentAccountStatus = accountManager.getAccountStatus(currentConfig);
     res.json({
@@ -808,7 +947,7 @@ app.get('/health', (req, res) => {
 });
 
 // Claude Messages 兼容接口
-app.post('/claude/v1/messages', (req, res) => {
+app.post('/claude/v1/messages', requireConfiguredApiKeys, (req, res) => {
     if (!accountManager.getActiveConfig()) {
         return createMissingConfigResponse(res);
     }
@@ -816,10 +955,10 @@ app.post('/claude/v1/messages', (req, res) => {
 });
 
 // 兼容 OpenAI 风格接口
-app.use('/v1', createHandler());
+app.use('/v1', requireConfiguredApiKeys, createHandler());
 
 // 兼容 wham 接口
-app.use('/wham', createHandler());
+app.use('/wham', requireConfiguredApiKeys, createHandler());
 
 // 404 处理
 app.use((req, res) => {
@@ -838,7 +977,7 @@ async function startServer() {
         log('='.repeat(70));
         log('OpenAI 兼容代理服务器已启动');
         log('='.repeat(70));
-        log(`配置管理: http://localhost:${PORT}/admin/configs`);
+        log(`配置管理: http://localhost:${PORT}${buildAdminPath()}`);
         log(`OpenAI 代理: http://localhost:${PORT}/v1`);
         log(`Claude 代理: http://localhost:${PORT}/claude`);
         log('='.repeat(70));
@@ -853,6 +992,7 @@ async function startServer() {
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
             log(`  - 额度轮询: ${shouldUseQuotaMonitoring(configType) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查一次，剩余低于 ${MIN_REMAINING_PERCENT}% 自动切号` : '关闭（api_key 模式）'}`);
+            log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
             log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
             if (shouldUseQuotaMonitoring(configType) && apiConfigs.length > 0) {
                 log('  - 初始化账号额度:');

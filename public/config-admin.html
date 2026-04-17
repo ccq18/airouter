@@ -190,14 +190,23 @@
       line-height: 1.7;
     }
 
+    input,
     textarea {
       width: 100%;
-      min-height: 220px;
       border: 1px solid var(--line);
       border-radius: 18px;
       background: rgba(255, 255, 255, 0.92);
       color: var(--text);
       padding: 16px;
+      font: inherit;
+    }
+
+    input {
+      min-height: 52px;
+    }
+
+    textarea {
+      min-height: 220px;
       font-family: var(--mono);
       font-size: 13px;
       line-height: 1.65;
@@ -259,6 +268,59 @@
       background: rgba(162, 54, 54, 0.1);
       border-color: rgba(162, 54, 54, 0.18);
       color: var(--danger);
+    }
+
+    .settings-panel {
+      margin-bottom: 22px;
+      padding: 18px;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.58);
+      border: 1px solid var(--line);
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field-label {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    .key-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .key-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+
+    .key-meta {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    .key-value {
+      word-break: break-all;
     }
 
     .table-wrap {
@@ -358,6 +420,10 @@
       .composer-layout {
         grid-template-columns: 1fr;
       }
+
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
     }
 
   </style>
@@ -390,10 +456,21 @@
         </aside>
 
 	        <div>
+          <div class="composer-head">
+	            <div class="composer-title">访问控制</div>
+	            <span id="apiKeyStatusBadge" class="badge note">未读取</span>
+	          </div>
+          <div id="message" class="message" role="status" aria-live="polite"></div>
+          <div class="settings-panel">
+            <div class="actions">
+              <button class="secondary" type="button" id="addApiKeyButton">新增随机 apikey</button>
+            </div>
+            <div id="apiKeysList" class="key-list"></div>
+          </div>
+
 	          <div class="composer-head">
 	            <div class="composer-title">新增配置项</div>
 	          </div>
-          <div id="message" class="message" role="status" aria-live="polite"></div>
 	          <textarea id="rawJsonInput" spellcheck="false" placeholder='{
   "user": {
     "email": "user@example.com"
@@ -418,6 +495,10 @@
     const rawJsonInput = document.getElementById('rawJsonInput');
     const addButton = document.getElementById('addButton');
     const refreshButton = document.getElementById('refreshButton');
+    const addApiKeyButton = document.getElementById('addApiKeyButton');
+    const apiKeysListEl = document.getElementById('apiKeysList');
+    const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
+    const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
 
     let snapshot = null;
 
@@ -443,6 +524,44 @@
 
     function renderHeader(data) {
       snapshot = data;
+      const apikeys = Array.isArray(data && data.apikeys) ? data.apikeys : [];
+
+      if (apikeys.length > 0) {
+        apiKeyStatusBadge.className = 'badge ok';
+        apiKeyStatusBadge.textContent = `已配置 ${apikeys.length} 个 apikey`;
+      } else {
+        apiKeyStatusBadge.className = 'badge warn';
+        apiKeyStatusBadge.textContent = '未配置 apikey';
+      }
+
+      renderApiKeys(apikeys);
+    }
+
+    function renderApiKeys(apikeys) {
+      if (!apikeys.length) {
+        apiKeysListEl.innerHTML = '<div class="empty">当前没有代理 apikey，请求不会校验 apikey。</div>';
+        return;
+      }
+
+      apiKeysListEl.innerHTML = apikeys.map((apikey, index) => `
+        <div class="key-item">
+          <div>
+            <div class="key-meta">apikey #${index + 1}</div>
+            <div class="mono key-value">${escapeHtml(apikey)}</div>
+          </div>
+          <button class="danger" type="button" data-action="delete-apikey" data-index="${index}">删除</button>
+        </div>
+      `).join('');
+    }
+
+    function withAuthToken(url) {
+      const resolved = new URL(url, window.location.origin);
+
+      if (adminAuthToken) {
+        resolved.searchParams.set('auth_token', adminAuthToken);
+      }
+
+      return `${resolved.pathname}${resolved.search}`;
     }
 
     function runtimeBadges(item) {
@@ -513,7 +632,7 @@
     }
 
     async function requestJson(url, options = {}) {
-      const response = await fetch(url, {
+      const response = await fetch(withAuthToken(url), {
         headers: {
           'Content-Type': 'application/json',
           ...(options.headers || {}),
@@ -525,7 +644,9 @@
       const payload = text ? JSON.parse(text) : null;
 
       if (!response.ok) {
-        throw new Error(payload?.details || payload?.error || `HTTP ${response.status}`);
+        const error = new Error(payload?.details || payload?.message || payload?.error || `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
       }
 
       return payload;
@@ -538,6 +659,15 @@
         renderCards(snapshot);
         setMessage(message ? 'info' : '', message);
       } catch (error) {
+        if (error.status === 401) {
+          apiKeyStatusBadge.className = 'badge warn';
+          apiKeyStatusBadge.textContent = 'auth_token 无效';
+          setMessage('error', '当前管理地址缺少或带错 auth_token，请重新使用正确的管理后台链接访问。');
+          apiKeysListEl.innerHTML = '<div class="empty">当前管理地址缺少或带错 auth_token。</div>';
+          cardsEl.innerHTML = '<div class="empty">当前管理地址缺少或带错 auth_token。</div>';
+          return;
+        }
+
         setMessage('error', error.message);
         cardsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
       }
@@ -555,6 +685,32 @@
       renderHeader(snapshot);
       renderCards(snapshot);
       setMessage('info', '配置项已通过校验并写入配置文件。');
+    }
+
+    async function addApiKey() {
+      const result = await requestJson('/admin/api/apikeys', {
+        method: 'POST',
+      });
+
+      snapshot = result;
+      renderHeader(snapshot);
+      renderCards(snapshot);
+      setMessage('info', `已新增 apikey: ${result.generated_apikey}`);
+    }
+
+    async function deleteApiKey(index) {
+      if (!window.confirm('确认删除这个 apikey 吗？')) {
+        return;
+      }
+
+      const result = await requestJson(`/admin/api/apikeys/${index}`, {
+        method: 'DELETE',
+      });
+
+      snapshot = result;
+      renderHeader(snapshot);
+      renderCards(snapshot);
+      setMessage('info', 'apikey 已删除。');
     }
 
     async function deleteConfig(index) {
@@ -583,6 +739,17 @@
       }
     });
 
+    addApiKeyButton.addEventListener('click', async () => {
+      addApiKeyButton.disabled = true;
+      try {
+        await addApiKey();
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        addApiKeyButton.disabled = false;
+      }
+    });
+
     refreshButton.addEventListener('click', async () => {
       refreshButton.disabled = true;
       try {
@@ -593,6 +760,19 @@
     });
 
     document.addEventListener('click', async event => {
+      const deleteApiKeyButton = event.target.closest('[data-action="delete-apikey"]');
+      if (deleteApiKeyButton) {
+        deleteApiKeyButton.disabled = true;
+        try {
+          await deleteApiKey(deleteApiKeyButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          deleteApiKeyButton.disabled = false;
+        }
+        return;
+      }
+
       const button = event.target.closest('[data-action="delete"]');
       if (!button) {
         return;

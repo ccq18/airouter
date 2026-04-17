@@ -3,6 +3,8 @@
 ```
 {
   "type":"token",
+  "apikeys": [],
+  "auth_token": "",
   "proxy_port":7890,
   "port":3000,
   "claude_code": {
@@ -27,6 +29,10 @@
 !注意不要退出登录,退出登录token就失效了
 - proxy_port 填本地的代理端口
 - port 填服务监听端口，不填时默认 `3000`
+- `apikeys` 为入口请求校验密钥数组，支持 `Authorization: Bearer <apikey>` 或 `x-api-key`
+- `apikeys` 为空时，不校验入口请求；只要数组非空，请求就必须命中其中一个 key
+- `auth_token` 为管理后台访问令牌；配置页必须通过 `.../admin/configs?auth_token=<token>` 访问
+- `auth_token` 为空或缺失时，服务启动后会自动生成并写回配置文件
 - `claude_code.model` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时上游实际使用的模型
 - `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
 - 以上 `claude_code` 配置只作用于 `/claude/v1/messages`，不会影响普通 `/v1/*` OpenAI 兼容接口
@@ -82,5 +88,6 @@
 ## 安全说明
 
 - `access_token`、`api_key` 都属于敏感信息
+- 顶层 `apikeys`、`auth_token` 也属于敏感信息
 - 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
 - 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效

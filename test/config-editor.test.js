@@ -9,6 +9,7 @@ const {
   addConfigItem,
   buildImportedConfigItem,
   updateConfigItem,
+  updateConfigSettings,
   deleteConfigItem,
   readParsedConfigFile,
   writeParsedConfigFile,
@@ -145,6 +146,26 @@ test('deleteConfigItem allows removing the last remaining config', () => {
   const next = deleteConfigItem(createTokenConfig(), 0);
 
   assert.deepEqual(next.configs, []);
+});
+
+test('updateConfigSettings normalizes top-level apikeys and auth_token', () => {
+  const withSecuritySettings = updateConfigSettings(createTokenConfig(), {
+    apikeys: ['  router-secret  ', '', 'backup-secret'],
+    auth_token: '  admin-secret  ',
+  });
+
+  assert.deepEqual(withSecuritySettings.apikeys, ['router-secret', 'backup-secret']);
+  assert.equal(withSecuritySettings.auth_token, 'admin-secret');
+
+  const cleared = updateConfigSettings(withSecuritySettings, {
+    apikeys: [],
+    auth_token: '   ',
+  });
+
+  assert.deepEqual(cleared.apikeys, []);
+  assert.equal(cleared.auth_token, '');
+  assert.equal(cleared.configs.length, 1);
+  assert.equal(cleared.configs[0].description, 'primary');
 });
 
 test('writeParsedConfigFile persists a validated config file', () => {

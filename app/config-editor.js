@@ -24,6 +24,16 @@ function normalizeString(value) {
     return String(value);
 }
 
+function normalizeStringArray(values) {
+    if (!Array.isArray(values)) {
+        throw new ConfigEditorError('配置设置 apikeys 必须是数组');
+    }
+
+    return values
+        .map(value => normalizeString(value))
+        .filter(Boolean);
+}
+
 function getEditableFields(type) {
     if (type === 'api_key') {
         return ['api_key', 'base_url', 'description'];
@@ -140,6 +150,22 @@ function deleteConfigItem(parsed, index) {
     return validateParsedConfig(nextParsed);
 }
 
+function updateConfigSettings(parsed, settings) {
+    assertPlainObject(settings, '配置设置必须是对象');
+
+    const nextParsed = cloneParsedConfig(parsed);
+
+    if (Object.prototype.hasOwnProperty.call(settings, 'apikeys')) {
+        nextParsed.apikeys = normalizeStringArray(settings.apikeys);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(settings, 'auth_token')) {
+        nextParsed.auth_token = normalizeString(settings.auth_token);
+    }
+
+    return validateParsedConfig(nextParsed);
+}
+
 function writeParsedConfigFile(configFile, parsed) {
     const validated = validateParsedConfig(parsed);
     const tempFile = `${configFile}.tmp`;
@@ -155,6 +181,7 @@ module.exports = {
     addConfigItem,
     buildImportedConfigItem,
     updateConfigItem,
+    updateConfigSettings,
     deleteConfigItem,
     readParsedConfigFile,
     writeParsedConfigFile,

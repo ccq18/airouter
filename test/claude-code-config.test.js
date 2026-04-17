@@ -122,3 +122,37 @@ test('parseOpenAiConfigFile accepts empty configs array', () => {
   assert.deepEqual(parsed.configs, []);
   assert.deepEqual(createRuntimeConfigs(parsed), []);
 });
+
+test('parseOpenAiConfigFile accepts optional top-level apikeys and auth_token fields', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+    apikeys: ['router-secret', 'backup-secret'],
+    auth_token: 'admin-token',
+  })));
+
+  assert.deepEqual(parsed.apikeys, ['router-secret', 'backup-secret']);
+  assert.equal(parsed.auth_token, 'admin-token');
+});
+
+test('parseOpenAiConfigFile rejects a non-array apikeys field', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+      apikeys: 'router-secret',
+    })));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /apikeys 必须是字符串数组/);
+    return true;
+  });
+});
+
+test('parseOpenAiConfigFile rejects a non-string auth_token field', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+      auth_token: 12345,
+    })));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /auth_token 必须是字符串/);
+    return true;
+  });
+});
