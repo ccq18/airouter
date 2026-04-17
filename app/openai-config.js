@@ -2,7 +2,7 @@ const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
 const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.4';
 const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
-const SUPPORTED_REASONING_EFFORTS = new Set(['minimal', 'low', 'medium', 'high']);
+const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 function createDefaultTokenRuntime(isEnabled) {
     return {
@@ -70,7 +70,7 @@ function parseOpenAiConfigFile(raw) {
                 typeof parsed.claude_code.reasoning_effort !== 'string' ||
                 !SUPPORTED_REASONING_EFFORTS.has(parsed.claude_code.reasoning_effort)
             ) {
-                throw new Error('配置文件 claude_code.reasoning_effort 仅支持 minimal、low、medium、high');
+                throw new Error('配置文件 claude_code.reasoning_effort 仅支持 none、minimal、low、medium、high、xhigh');
             }
         }
     }

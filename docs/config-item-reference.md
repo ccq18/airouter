@@ -28,7 +28,7 @@
 - proxy_port 填本地的代理端口
 - port 填服务监听端口，不填时默认 `3000`
 - `claude_code.model` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时上游实际使用的模型
-- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时的推理强度，默认 `high`
+- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
 - 以上 `claude_code` 配置只作用于 `/claude/v1/messages`，不会影响普通 `/v1/*` OpenAI 兼容接口
 
 

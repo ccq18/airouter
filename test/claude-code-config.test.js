@@ -33,14 +33,30 @@ test('resolveClaudeCodeOptions uses the configured Claude Code overrides', () =>
   const parsed = parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
     claude_code: {
       model: 'gpt-5-mini',
-      reasoning_effort: 'medium',
+      reasoning_effort: 'xhigh',
     },
   })));
 
   assert.deepEqual(resolveClaudeCodeOptions(parsed), {
     model: 'gpt-5-mini',
-    reasoningEffort: 'medium',
+    reasoningEffort: 'xhigh',
   });
+});
+
+test('parseOpenAiConfigFile accepts none and minimal reasoning_effort values', () => {
+  const parsedWithNone = parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+    claude_code: {
+      reasoning_effort: 'none',
+    },
+  })));
+  const parsedWithMinimal = parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+    claude_code: {
+      reasoning_effort: 'minimal',
+    },
+  })));
+
+  assert.equal(resolveClaudeCodeOptions(parsedWithNone).reasoningEffort, 'none');
+  assert.equal(resolveClaudeCodeOptions(parsedWithMinimal).reasoningEffort, 'minimal');
 });
 
 test('transformClaudeMessagesRequest force overrides client model and reasoning for Claude Code', () => {
