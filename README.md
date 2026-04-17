@@ -23,9 +23,10 @@
 ```
 - access_token 和 account_id 获取  
 登录gpt plus后打开：https://chatgpt.com/api/auth/session
-取以下值配置上去，有效时间是3个月，注意不要退出账号
-![img.png](img.png)
+取以下值配置上去，有效时间是3个月
+![session_json.png](doc/session_json.png)
 
+!注意不要退出登录,退出登录token就失效了
 
 ## 启动
 CONFIG=openai.json PORT=3000 https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890 node openai.js
