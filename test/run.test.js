@@ -122,8 +122,8 @@ test('start shows only fresh startup logs when the process stays up', () => {
 
   assert.equal(startResult.status, 0, startResult.stderr);
   assert.match(startResult.stdout, /^starting\nstarted pid=\d+/);
-  assert.match(startResult.stdout, /openai proxy: http:\/\/localhost:3000\/v1/);
-  assert.match(startResult.stdout, /claude proxy: http:\/\/localhost:3000\/claude/);
+  assert.match(startResult.stdout, /openai proxy: http:\/\/localhost:3009\/v1/);
+  assert.match(startResult.stdout, /claude proxy: http:\/\/localhost:3009\/claude/);
   assert.match(startResult.stdout, /fresh ready/);
   assert.doesNotMatch(startResult.stdout, /old log line/);
 

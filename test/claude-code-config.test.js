@@ -8,7 +8,7 @@ function createBaseConfig(extra = {}) {
   return {
     type: 'token',
     proxy_port: 7890,
-    port: 3000,
+    port: 3009,
     configs: [
       {
         access_token: 'token',

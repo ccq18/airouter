@@ -20,7 +20,7 @@ const {
 } = require('./app/openai-config');
 // https://chatgpt.com/api/auth/session
 // ==================== 配置 ====================
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3009;
 let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';

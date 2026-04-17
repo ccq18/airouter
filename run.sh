@@ -21,7 +21,7 @@ if (value === undefined || value === null) {
 }
 
 PROXY_PORT=$(read_config_value proxy_port "")
-PORT=$(read_config_value port "3000")
+PORT=$(read_config_value port "3009")
 START_CMD="CONFIG=${CONFIG_FILE} PORT=${PORT} https_proxy=http://127.0.0.1:${PROXY_PORT} http_proxy=http://127.0.0.1:${PROXY_PORT} all_proxy=socks5://127.0.0.1:${PROXY_PORT} nohup node openai.js > ${LOG_FILE} 2>&1 &"
 
 real_sleep_ms() {
