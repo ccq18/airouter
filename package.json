@@ -1,0 +1,21 @@
+{
+  "name": "claude-proxy-router",
+  "version": "1.0.0",
+  "description": "Claude API proxy router with model-based routing",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --no-deprecation server.js",
+    "dev": "NODE_ENV=dev node --no-deprecation server.js"
+  },
+  "keywords": [
+    "claude",
+    "proxy",
+    "api"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "http-proxy": "^1.18.1"
+  }
+}

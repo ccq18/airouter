@@ -1,0 +1,10 @@
+{
+  "type": "token",
+  "configs": [
+   {
+    "access_token": "",
+    "account_id": "",
+    "description": "ChatGPT Codex 默认配置，获取：https://chatgpt.com/api/auth/session"
+  }
+  ]
+}
