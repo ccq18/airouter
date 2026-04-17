@@ -15,19 +15,19 @@ function writeExecutable(filePath, content) {
   fs.writeFileSync(filePath, content, { mode: 0o755 });
 }
 
-function prepareWorkspace(nodeScript, initialLog = '', config = { proxy_port: 7890 }) {
+function prepareWorkspace(appScript, initialLog = '', config = { proxy_port: 7890 }) {
   const cwd = makeTempDir();
   const binDir = path.join(cwd, 'bin');
 
   fs.mkdirSync(binDir);
   fs.writeFileSync(path.join(cwd, 'openai.json'), `${JSON.stringify(config)}\n`);
-  fs.writeFileSync(path.join(cwd, 'openai.js'), '// test stub\n');
+  fs.writeFileSync(path.join(cwd, 'openai.js'), appScript);
 
   if (initialLog) {
     fs.writeFileSync(path.join(cwd, 'openai.log'), initialLog);
   }
 
-  writeExecutable(path.join(binDir, 'node'), nodeScript);
+  writeExecutable(path.join(binDir, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
 
   return { cwd, binDir };
 }
@@ -38,9 +38,21 @@ function runCommand(args, options) {
     env: {
       ...process.env,
       PATH: `${options.binDir}:${options.systemPath ?? process.env.PATH}`,
-      STARTUP_CHECK_DELAY_SECONDS: options.startupCheckDelaySeconds ?? '1',
     },
     encoding: 'utf8',
+  });
+}
+
+function runLogsCommand(options) {
+  return spawnSync('bash', [runScript, 'logs'], {
+    cwd: options.cwd,
+    env: {
+      ...process.env,
+      PATH: `${options.binDir}:${options.systemPath ?? process.env.PATH}`,
+    },
+    encoding: 'utf8',
+    timeout: options.timeoutMs ?? 500,
+    killSignal: 'SIGTERM',
   });
 }
 
@@ -65,14 +77,19 @@ function waitForFile(filePath, timeoutMs = 1000) {
 test('run.sh defaults to a 10 second startup check delay', () => {
   const script = fs.readFileSync(runScript, 'utf8');
 
-  assert.match(script, /STARTUP_CHECK_DELAY_SECONDS="\$\{STARTUP_CHECK_DELAY_SECONDS:-10\}"/);
+  assert.doesNotMatch(script, /STARTUP_CHECK_DELAY_SECONDS=/);
+  assert.doesNotMatch(script, /STARTUP_LOG_LINES=/);
+  assert.doesNotMatch(script, /LOG_TAIL_LINES=/);
+  assert.doesNotMatch(script, /CONFIG_NODE_BIN=/);
+  assert.match(script, /node -e/);
+  assert.match(script, /sleep 10/);
+  assert.match(script, /tail -n 20 "\$LOG_FILE"/);
+  assert.match(script, /tail -n 100 -f "\$LOG_FILE"/);
 });
 
 test('start shows only fresh startup logs when the process stays up', () => {
   const workspace = prepareWorkspace(
-    '#!/usr/bin/env bash\n' +
-      'echo "fresh ready"\n' +
-      'sleep 30\n',
+    'console.log("fresh ready"); setTimeout(() => {}, 30000);\n',
     'old log line\n'
   );
 
@@ -92,8 +109,7 @@ test('start shows only fresh startup logs when the process stays up', () => {
 
 test('start passes the configured port from openai.json', () => {
   const workspace = prepareWorkspace(
-    '#!/usr/bin/env bash\n' +
-      'sleep 30\n',
+    'setTimeout(() => {}, 30000);\n',
     '',
     { proxy_port: 7890, port: 3456 }
   );
@@ -111,16 +127,14 @@ test('start passes the configured port from openai.json', () => {
 
 test('start reads config without jq in PATH', () => {
   const workspace = prepareWorkspace(
-    '#!/usr/bin/env bash\n' +
-      'echo "port=$PORT proxy=$https_proxy"\n' +
-      'sleep 30\n',
+    'console.log(`port=${process.env.PORT} proxy=${process.env.https_proxy}`); setTimeout(() => {}, 30000);\n',
     '',
     { proxy_port: 6789, port: 3456 }
   );
 
   const startResult = runCommand(['start'], {
     ...workspace,
-    systemPath: '/usr/bin:/bin',
+    systemPath: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
   });
 
   assert.equal(startResult.status, 0, startResult.stderr);
@@ -129,19 +143,42 @@ test('start reads config without jq in PATH', () => {
 
   const stopResult = runCommand(['stop'], {
     ...workspace,
-    systemPath: '/usr/bin:/bin',
+    systemPath: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
   });
   assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('logs prints the latest 100 lines before following new output', () => {
+  const workspace = prepareWorkspace('setTimeout(() => {}, 30000);\n');
+  const lines = Array.from({ length: 120 }, (_, index) => `line-${index + 1}`).join('\n');
+
+  fs.writeFileSync(path.join(workspace.cwd, 'openai.log'), `${lines}\n`);
+
+  const logsResult = runLogsCommand(workspace);
+
+  assert.equal(logsResult.signal, 'SIGTERM');
+  assert.doesNotMatch(logsResult.stdout, /line-1\n/);
+  assert.match(logsResult.stdout, /^line-21$/m);
+  assert.match(logsResult.stdout, /^line-120$/m);
+});
+
+test('logs follows an empty log file when it does not exist yet', () => {
+  const workspace = prepareWorkspace('setTimeout(() => {}, 30000);\n');
+
+  const logsResult = runLogsCommand(workspace);
+
+  assert.equal(logsResult.signal, 'SIGTERM');
+  assert.equal(logsResult.stdout, '');
 });
 
 test('start kills the existing process and launches a replacement', () => {
   const terminatedMarker = path.join(os.tmpdir(), `airouter-run-terminated-${process.pid}-${Date.now()}`);
 
   const workspace = prepareWorkspace(
-    '#!/usr/bin/env bash\n' +
-      `trap 'echo terminated > "${terminatedMarker}"; exit 0' TERM\n` +
-      'echo "replacement ready"\n' +
-      'while :; do :; done\n'
+    'const fs = require("fs");\n' +
+      `process.on("SIGTERM", () => { fs.writeFileSync(${JSON.stringify(terminatedMarker)}, "terminated"); process.exit(0); });\n` +
+      'console.log("replacement ready");\n' +
+      'setInterval(() => {}, 1000);\n'
   );
 
   const firstStartResult = runCommand(['start'], workspace);
@@ -165,9 +202,7 @@ test('start kills the existing process and launches a replacement', () => {
 
 test('start fails fast and prints fresh startup errors when the process exits', () => {
   const workspace = prepareWorkspace(
-    '#!/usr/bin/env bash\n' +
-      'echo "startup boom" >&2\n' +
-      'exit 1\n',
+    'console.error("startup boom"); process.exit(1);\n',
     'old log line\n'
   );
 

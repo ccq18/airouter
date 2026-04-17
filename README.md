@@ -32,12 +32,14 @@
 - proxy_port 填本地的代理端口
 - port 填服务监听端口，不填时默认 `3000`
 ## 启动
-```
+``` 
 bash run.sh
 bash run.sh stop
+bash run.sh logs
 ```
 
 使用 `bash run.sh` 可以避开脚本可执行权限问题。
+`bash run.sh logs` 会先展示最近 100 行日志，然后持续输出新日志。
 
 ## ccs配置
 使用ccs配置转发到对应地址就可以，apikey随便写。也可以自己手动配置

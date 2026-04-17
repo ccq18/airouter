@@ -3,8 +3,6 @@
 PID_FILE="openai.pid"
 LOG_FILE="openai.log"
 CONFIG_FILE="openai.json"
-STARTUP_CHECK_DELAY_SECONDS="${STARTUP_CHECK_DELAY_SECONDS:-10}"
-STARTUP_LOG_LINES="${STARTUP_LOG_LINES:-20}"
 
 read_config_value() {
   node -e '
@@ -48,7 +46,7 @@ show_startup_logs() {
 
   local new_logs
 
-  new_logs=$(tail -n "$STARTUP_LOG_LINES" "$LOG_FILE")
+  new_logs=$(tail -n 20 "$LOG_FILE")
 
   if [ -n "$new_logs" ]; then
     echo "recent logs:"
@@ -68,7 +66,7 @@ start() {
   echo "starting"
   eval "$START_CMD"
   echo $! > "$PID_FILE"
-  sleep "$STARTUP_CHECK_DELAY_SECONDS"
+  sleep 10
 
   if ! is_pid_running "$(current_pid)"; then
     echo "failed to start"
@@ -84,7 +82,7 @@ start() {
 
 logs() {
   touch "$LOG_FILE"
-  tail -n "$STARTUP_LOG_LINES" -f "$LOG_FILE"
+  tail -n 100 -f "$LOG_FILE"
 }
 
 stop() {
