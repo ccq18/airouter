@@ -11,6 +11,8 @@
 ```
 {
   "type":"token",
+  "proxy_port":7890,
+  "port":3000,
   "configs":[
       {
         "access_token": "",
@@ -27,10 +29,11 @@
 ![session_json.png](doc/session_json.png)
 
 !注意不要退出登录,退出登录token就失效了
-
+- proxy_port 填本地的代理端口
+- port 填服务监听端口，不填时默认 `3000`
 ## 启动
-CONFIG=openai.json PORT=3000 https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 all_proxy=socks5://127.0.0.1:7890 node openai.js
-
+./run.sh
+./run.sh stop
 
 ## ccs配置
 使用ccs配置转发到对应地址就可以，apikey随便写。也可以自己手动配置

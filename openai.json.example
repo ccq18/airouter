@@ -1,5 +1,7 @@
 {
   "type": "token",
+  "proxy_port":7890,
+  "port": 3000,
   "configs": [
    {
     "access_token": "",
