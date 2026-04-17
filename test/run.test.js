@@ -37,7 +37,7 @@ function runCommand(args, options) {
     cwd: options.cwd,
     env: {
       ...process.env,
-      PATH: `${options.binDir}:${process.env.PATH}`,
+      PATH: `${options.binDir}:${options.systemPath ?? process.env.PATH}`,
       STARTUP_CHECK_DELAY_SECONDS: options.startupCheckDelaySeconds ?? '1',
     },
     encoding: 'utf8',
@@ -106,6 +106,31 @@ test('start passes the configured port from openai.json', () => {
   assert.match(startResult.stdout, /claude proxy: http:\/\/localhost:3456\/claude/);
 
   const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start reads config without jq in PATH', () => {
+  const workspace = prepareWorkspace(
+    '#!/usr/bin/env bash\n' +
+      'echo "port=$PORT proxy=$https_proxy"\n' +
+      'sleep 30\n',
+    '',
+    { proxy_port: 6789, port: 3456 }
+  );
+
+  const startResult = runCommand(['start'], {
+    ...workspace,
+    systemPath: '/usr/bin:/bin',
+  });
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, /openai proxy: http:\/\/localhost:3456\/v1/);
+  assert.match(startResult.stdout, /port=3456 proxy=http:\/\/127\.0\.0\.1:6789/);
+
+  const stopResult = runCommand(['stop'], {
+    ...workspace,
+    systemPath: '/usr/bin:/bin',
+  });
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 

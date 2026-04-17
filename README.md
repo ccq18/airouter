@@ -33,9 +33,11 @@
 - port 填服务监听端口，不填时默认 `3000`
 ## 启动
 ```
-./run.sh
-./run.sh stop
+bash run.sh
+bash run.sh stop
 ```
+
+使用 `bash run.sh` 可以避开脚本可执行权限问题。
 
 ## ccs配置
 使用ccs配置转发到对应地址就可以，apikey随便写。也可以自己手动配置

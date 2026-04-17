@@ -6,8 +6,24 @@ CONFIG_FILE="openai.json"
 STARTUP_CHECK_DELAY_SECONDS="${STARTUP_CHECK_DELAY_SECONDS:-10}"
 STARTUP_LOG_LINES="${STARTUP_LOG_LINES:-20}"
 
-PROXY_PORT=$(jq -r '.proxy_port' "$CONFIG_FILE")
-PORT=$(jq -r '.port // 3000' "$CONFIG_FILE")
+read_config_value() {
+  node -e '
+const fs = require("fs");
+const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const key = process.argv[2];
+const fallback = process.argv[3];
+const value = config[key];
+
+if (value === undefined || value === null) {
+  process.stdout.write(fallback);
+} else {
+  process.stdout.write(String(value));
+}
+' "$CONFIG_FILE" "$1" "$2"
+}
+
+PROXY_PORT=$(read_config_value proxy_port "")
+PORT=$(read_config_value port "3000")
 
 START_CMD="CONFIG=${CONFIG_FILE} PORT=${PORT} https_proxy=http://127.0.0.1:${PROXY_PORT} http_proxy=http://127.0.0.1:${PROXY_PORT} all_proxy=socks5://127.0.0.1:${PROXY_PORT} nohup node openai.js > ${LOG_FILE} 2>&1 &"
 
