@@ -3,6 +3,7 @@
   "apikeys": [],
   "auth_token": "",
   "port": 3009,
+  "proxy_port": 7890,
   "claude_code": {
     "model": "gpt-5.4",
     "reasoning_effort": "high"
