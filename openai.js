@@ -57,6 +57,33 @@ const HOP_BY_HOP_HEADERS = new Set([
     'transfer-encoding',
     'upgrade'
 ]);
+const LOCAL_ONLY_AUTH_HEADERS = new Set([
+    'authorization',
+    'x-api-key',
+    'chatgpt-account-id'
+]);
+const LOCAL_ONLY_HEADER_PREFIXES = [
+    'x-airouter-',
+    'x-admin-'
+];
+
+function parseTimeoutMs(name, fallbackValue) {
+    const rawValue = process.env[name];
+
+    if (typeof rawValue === 'undefined' || rawValue === '') {
+        return fallbackValue;
+    }
+
+    const parsedValue = Number(rawValue);
+    if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+        throw new Error(`${name} 必须是非负数字`);
+    }
+
+    return Math.floor(parsedValue);
+}
+
+const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 5 * 60 * 1000);
+const QUOTA_CHECK_TIMEOUT_MS = parseTimeoutMs('QUOTA_CHECK_TIMEOUT_MS', 10 * 1000);
 
 function hasCliFlag(flag) {
     return process.argv.includes(flag);
@@ -226,6 +253,10 @@ function getCurrentTimestamp() {
     return Date.now();
 }
 
+function getGatewayStatusCode(err) {
+    return err && err.code === 'ETIMEDOUT' ? 504 : 502;
+}
+
 function createClaudeMessagesRequestHandler() {
     return createClaudeMessagesHandler({
         getConfig: () => {
@@ -255,7 +286,8 @@ function createClaudeMessagesRequestHandler() {
         },
         upstreamModel: process.env.CLAUDE_PROXY_MODEL || claudeCodeConfig.model,
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
-        clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1'
+        clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1',
+        upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS
     });
 }
 
@@ -274,6 +306,7 @@ function applyLoadedConfig(loadedConfig) {
         configType,
         initialActiveConfigIndex: loadedConfig.initialActiveConfigIndex ?? 0,
         quotaCheckPath: QUOTA_CHECK_PATH,
+        quotaCheckTimeoutMs: QUOTA_CHECK_TIMEOUT_MS,
         quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
         minRemainingPercent: MIN_REMAINING_PERCENT,
         buildAuthHeadersForConfig,
@@ -515,15 +548,31 @@ function rewriteProxyUrl(incomingUrl, config) {
     return `${parsedUrl.pathname}${parsedUrl.search}`;
 }
 
+function deleteHeadersCaseInsensitive(headers, namesToDelete) {
+    for (const headerName of Object.keys(headers)) {
+        if (namesToDelete.has(String(headerName).toLowerCase())) {
+            delete headers[headerName];
+        }
+    }
+}
+
+function deleteLocalOnlyHeaders(headers) {
+    for (const headerName of Object.keys(headers)) {
+        const normalizedHeaderName = String(headerName).toLowerCase();
+        if (
+            LOCAL_ONLY_AUTH_HEADERS.has(normalizedHeaderName) ||
+            LOCAL_ONLY_HEADER_PREFIXES.some(prefix => normalizedHeaderName.startsWith(prefix))
+        ) {
+            delete headers[headerName];
+        }
+    }
+}
+
 function buildProxyHeaders(reqHeaders, config, contentLength) {
     const headers = { ...reqHeaders };
 
-    for (const headerName of HOP_BY_HOP_HEADERS) {
-        delete headers[headerName];
-    }
-
-    delete headers.authorization;
-    delete headers['chatgpt-account-id'];
+    deleteHeadersCaseInsensitive(headers, HOP_BY_HOP_HEADERS);
+    deleteLocalOnlyHeaders(headers);
     const authHeaders = buildAuthHeadersForConfig(config);
     for (const [name, value] of Object.entries(authHeaders)) {
         if (typeof value !== 'undefined') {
@@ -581,7 +630,8 @@ function proxyRequest(req, res, config, body, originalUrl) {
         method: req.method,
         targetUrl,
         headers,
-        body: hasBufferedBody ? body : undefined
+        body: hasBufferedBody ? body : undefined,
+        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS
     });
 
     let headersApplied = false;
@@ -636,8 +686,9 @@ function proxyRequest(req, res, config, body, originalUrl) {
 
             error('代理请求失败:', err.message);
             if (!res.headersSent) {
-                res.status(502).json({
-                    error: 'Bad Gateway',
+                const statusCode = getGatewayStatusCode(err);
+                res.status(statusCode).json({
+                    error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                     message: err.message
                 });
                 return;
@@ -654,8 +705,9 @@ function proxyRequest(req, res, config, body, originalUrl) {
 
         error('代理请求失败:', err.message);
         if (!headersApplied && !res.headersSent) {
-            res.status(502).json({
-                error: 'Bad Gateway',
+            const statusCode = getGatewayStatusCode(err);
+            res.status(statusCode).json({
+                error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                 message: err.message
             });
             return;
@@ -996,6 +1048,8 @@ async function startServer() {
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
             log(`  - 额度轮询: ${shouldUseQuotaMonitoring(configType) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查一次，剩余低于 ${MIN_REMAINING_PERCENT}% 自动切号` : '关闭（api_key 模式）'}`);
+            log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
+            log(`  - quota check 超时: ${shouldUseQuotaMonitoring(configType) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（api_key 模式）'}`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
             log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
             if (shouldUseQuotaMonitoring(configType) && apiConfigs.length > 0) {
@@ -1009,7 +1063,7 @@ async function startServer() {
             }
             log('');
             log('路由规则:');
-            log('  - /claude/v1/messages -> /backend-api/codex/responses (Claude compatibility)');
+            log(`  - /claude/v1/messages -> ${configType === 'token' ? '/backend-api/codex/responses (Claude compatibility)' : '当前模式不支持，需切换到 token 模式'}`);
             log('  - /v1/responses -> /backend-api/codex/responses');
             log('  - /v1/models -> /backend-api/codex/models');
             log('  - /wham/* -> /backend-api/wham/*');
@@ -1028,16 +1082,28 @@ async function startServer() {
     startControlWatcher();
 }
 
-startServer().catch(err => {
-    error('启动失败:', err.message);
-    process.exit(1);
-});
+if (require.main === module) {
+    startServer().catch(err => {
+        error('启动失败:', err.message);
+        process.exit(1);
+    });
 
-// 优雅关闭
-process.on('SIGINT', () => {
-    shutdownServer('收到 SIGINT 信号');
-});
+    // 优雅关闭
+    process.on('SIGINT', () => {
+        shutdownServer('收到 SIGINT 信号');
+    });
 
-process.on('SIGTERM', () => {
-    shutdownServer('收到 SIGTERM 信号');
-});
+    process.on('SIGTERM', () => {
+        shutdownServer('收到 SIGTERM 信号');
+    });
+}
+
+module.exports = {
+    buildProxyHeaders,
+    deleteHeadersCaseInsensitive,
+    deleteLocalOnlyHeaders,
+    LOCAL_ONLY_AUTH_HEADERS,
+    LOCAL_ONLY_HEADER_PREFIXES,
+    getGatewayStatusCode,
+    startServer
+};

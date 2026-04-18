@@ -105,6 +105,10 @@ function sendUpstreamError(res, status, contentType, bodyText) {
     res.send(bodyText);
 }
 
+function getGatewayStatusCode(err) {
+    return err && err.code === 'ETIMEDOUT' ? 504 : 502;
+}
+
 function writeSseEvent(res, entry) {
     res.write(`event: ${entry.event}\n`);
     res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
@@ -315,7 +319,9 @@ function createClaudeMessagesHandler({
     logRequestSnapshot = null,
     upstreamModel = 'gpt-5.4',
     reasoningEffort = 'high',
-    clientVersion = '0.0.1'
+    clientVersion = '0.0.1',
+    upstreamRequestTimeoutMs = 0,
+    createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest
 }) {
     return async function handleMessagesRequest(req, res) {
         const incomingUrl = buildIncomingUrl(req, '/claude');
@@ -342,6 +348,13 @@ function createClaudeMessagesHandler({
             return sendJsonError(res, 502, {
                 error: 'Bad Gateway',
                 message: err.message
+            });
+        }
+
+        if (config.type === 'api_key') {
+            return sendJsonError(res, 400, {
+                error: 'Unsupported Mode',
+                message: '/claude/v1/messages 仅支持 token 模式，当前 api_key 模式请改用 /v1 接口或切换到 token 模式'
             });
         }
 
@@ -390,11 +403,12 @@ function createClaudeMessagesHandler({
         upstreamHeaders.session_id = sessionId;
         upstreamHeaders['x-client-request-id'] = sessionId;
         const targetUrl = new URL(`${responsesApiPath}?client_version=${encodeURIComponent(clientVersion)}`, config.baseUrl).toString();
-        const upstream = createUpstreamRequest({
+        const upstream = createUpstreamRequestImpl({
             method: 'POST',
             targetUrl,
             headers: upstreamHeaders,
-            body: upstreamBody
+            body: upstreamBody,
+            timeoutMs: upstreamRequestTimeoutMs
         });
 
         let headersParsed = false;
@@ -489,8 +503,9 @@ function createClaudeMessagesHandler({
                 }
 
                 error(`代理请求失败: ${err.message}`);
-                sendJsonError(res, 502, {
-                    error: 'Bad Gateway',
+                const statusCode = getGatewayStatusCode(err);
+                sendJsonError(res, statusCode, {
+                    error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                     message: err.message
                 });
             });
@@ -501,8 +516,9 @@ function createClaudeMessagesHandler({
 
             const message = err.message || 'upstream request failed';
             error(`代理请求失败: ${message}`);
-            sendJsonError(res, 502, {
-                error: 'Bad Gateway',
+            const statusCode = getGatewayStatusCode(err);
+            sendJsonError(res, statusCode, {
+                error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                 message
             });
         });

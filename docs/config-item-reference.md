@@ -35,6 +35,7 @@
 - `claude_code.model` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时上游实际使用的模型
 - `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
 - 以上 `claude_code` 配置只作用于 `/claude/v1/messages`，不会影响普通 `/v1/*` OpenAI 兼容接口
+- `/claude/v1/messages` 仅支持 `token` 模式；`api_key` 模式下该路由会明确返回不支持
 
 
 - 原始配置项字段说明
@@ -83,6 +84,8 @@
   - 例如 `https://api.openai.com/v1`
 - `description`
   - 本地展示用的描述文本
+- `api_key` 模式支持 `/v1/*`、`/wham/*` 等通用转发路由
+- `api_key` 模式不支持 `/claude/v1/messages`
 
 ## 安全说明
 

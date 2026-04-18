@@ -9,6 +9,7 @@ function createAccountManager(options) {
     configType,
     initialActiveConfigIndex = 0,
     quotaCheckPath,
+    quotaCheckTimeoutMs = 0,
     quotaCheckIntervalMs,
     minRemainingPercent,
     buildAuthHeadersForConfig,
@@ -24,6 +25,7 @@ function createAccountManager(options) {
     : 0;
   let quotaMonitorRunning = false;
   let quotaMonitorTimer = null;
+  let unavailableProbeCursor = -1;
 
   /**
    * 生成日志里使用的账号标识。
@@ -239,6 +241,62 @@ function createAccountManager(options) {
   }
 
   /**
+   * 轮转选择一个非活动且当前不可用的账号做补充复查，避免永久漏检。
+   */
+  function getNextUnavailableProbeConfig() {
+    if (configs.length <= 1) {
+      return null;
+    }
+
+    const activeConfig = getActiveConfig();
+    const startIndex = unavailableProbeCursor >= 0
+      ? (unavailableProbeCursor + 1) % configs.length
+      : (activeConfigIndex + 1) % configs.length;
+
+    for (let offset = 0; offset < configs.length; offset += 1) {
+      const index = (startIndex + offset) % configs.length;
+      const config = configs[index];
+
+      if (!config || config === activeConfig) {
+        continue;
+      }
+
+      if (!shouldUseQuotaMonitoring(config.type) || !config.runtime.enabled) {
+        continue;
+      }
+
+      if (config.runtime.available !== false) {
+        continue;
+      }
+
+      unavailableProbeCursor = index;
+      return config;
+    }
+
+    return null;
+  }
+
+  function withQuotaCheckTimeout(promise) {
+    if (!Number.isFinite(quotaCheckTimeoutMs) || quotaCheckTimeoutMs <= 0) {
+      return promise;
+    }
+
+    let timeoutHandle = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`quota check timeout after ${quotaCheckTimeoutMs}ms`));
+      }, quotaCheckTimeoutMs);
+    });
+
+    return Promise.race([promise, timeoutPromise])
+      .finally(() => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+      });
+  }
+
+  /**
    * 保证活动账号可用，仅当当前账号不可用时才切换。
    */
   function ensureActiveConfig(reason = 'select') {
@@ -291,12 +349,13 @@ function createAccountManager(options) {
     const targetUrl = new URL(quotaCheckPath, config.baseUrl).toString();
 
     try {
-      const result = await requestBufferedFn({
+      const result = await withQuotaCheckTimeout(requestBufferedFn({
         method: 'GET',
         targetUrl,
         headers: buildAuthHeadersForConfig(config),
+        timeoutMs: quotaCheckTimeoutMs,
         maxRedirects: 5,
-      });
+      }));
       if (result.statusCode < 200 || result.statusCode >= 300) {
         throw new Error(`quota check status ${result.statusCode}`);
       }
@@ -313,7 +372,7 @@ function createAccountManager(options) {
   }
 
   /**
-   * 轮询额度；后台轮询仅检查当前账号，启动阶段仍会全量刷新。
+   * 轮询额度；后台轮询检查当前账号并轮转复查一个不可用的非活动账号，启动阶段仍会全量刷新。
    */
   async function refreshQuotas(reason = 'poll') {
     if (!shouldUseQuotaMonitoring(configType)) {
@@ -326,7 +385,9 @@ function createAccountManager(options) {
 
     quotaMonitorRunning = true;
     const previousActiveIndex = activeConfigIndex;
-    const configsToCheck = reason === 'poll' ? [getActiveConfig()].filter(Boolean) : configs;
+    const configsToCheck = reason === 'poll'
+      ? [getActiveConfig(), getNextUnavailableProbeConfig()].filter((config, index, array) => config && array.indexOf(config) === index)
+      : configs;
 
     try {
       for (const config of configsToCheck) {
