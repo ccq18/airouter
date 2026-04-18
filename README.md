@@ -1,6 +1,7 @@
 # 介绍
 - 实现了openai codex 接口转发，支持多账号额度调度，5小时额度低于3%会自动切换新账号
 - 并且实现了messages api和responses api的翻译，可以让claude code 使用gpt-5.4
+- 极简依赖，只需要nodejs即可运行。
 ## 配置
 ```bash
 git clone git@github.com:ccq18/airouter.git
