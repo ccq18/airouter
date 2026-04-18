@@ -875,7 +875,7 @@ git commit -m "refactor: wire openai entrypoint to account manager"
 **Files:**
 - Verify: `test/account-manager.test.js`
 - Verify: `test/run.test.js`
-- Verify: `run.sh`
+- Verify: `run.js`
 
 - [ ] **Step 1: Run the unit tests for account manager**
 
@@ -887,7 +887,7 @@ node --test test/account-manager.test.js
 
 Expected: PASS.
 
-- [ ] **Step 2: Run the existing run.sh regression tests**
+- [ ] **Step 2: Run the existing run.js regression tests**
 
 Run:
 
@@ -902,7 +902,7 @@ Expected: PASS.
 Run:
 
 ```bash
-bash -n run.sh
+node --check run.js
 ```
 
 Expected: no output, exit code `0`.

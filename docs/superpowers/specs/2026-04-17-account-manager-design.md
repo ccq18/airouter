@@ -179,7 +179,7 @@
 保留并继续执行已有验证：
 
 - `node --test test/run.test.js`
-- `bash -n run.sh`
+- `node --check run.js`
 
 ## Risks
 
@@ -216,5 +216,5 @@
 - `openai.js` 中账号管理相关函数和状态显著减少
 - 新增 `app/account-manager.js` 承担账号轮询和切号职责
 - 运行行为与当前实现一致
-- 现有 `run.sh` 相关测试保持通过
+- 现有 `run.js` 相关测试保持通过
 - 新增账号管理模块测试通过

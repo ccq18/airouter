@@ -1,3 +1,5 @@
+const { requestBuffered } = require('./upstream-request');
+
 /**
  * 封装账号状态、额度刷新和活动账号切换逻辑。
  */
@@ -5,18 +7,21 @@ function createAccountManager(options) {
   const {
     configs,
     configType,
+    initialActiveConfigIndex = 0,
     quotaCheckPath,
     quotaCheckIntervalMs,
     minRemainingPercent,
     buildAuthHeadersForConfig,
+    requestBufferedFn = requestBuffered,
     shouldUseQuotaMonitoring,
-    spawn,
     log,
     warn,
     now,
   } = options;
 
-  let activeConfigIndex = 0;
+  let activeConfigIndex = Number.isInteger(initialActiveConfigIndex) && initialActiveConfigIndex >= 0
+    ? Math.min(initialActiveConfigIndex, Math.max(configs.length - 1, 0))
+    : 0;
   let quotaMonitorRunning = false;
   let quotaMonitorTimer = null;
 
@@ -268,83 +273,6 @@ function createAccountManager(options) {
   }
 
   /**
-   * 使用 curl 发起额度查询，并缓冲完整响应体。
-   */
-  function runBufferedCurl(method, targetUrl, headers, body) {
-    return new Promise((resolve, reject) => {
-      const hasBody = Buffer.isBuffer(body) && body.length > 0;
-      const args = [
-        '--http1.1',
-        '--silent',
-        '--show-error',
-        '--location',
-        '-X',
-        method,
-        targetUrl,
-        '-w',
-        '\n__CURL_STATUS__:%{http_code}',
-      ];
-
-      for (const [name, value] of Object.entries(headers || {})) {
-        if (typeof value === 'undefined') {
-          continue;
-        }
-
-        args.push('-H', `${name}: ${value}`);
-      }
-
-      if (hasBody) {
-        args.push('--data-binary', '@-');
-      }
-
-      const curl = spawn('curl', args, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      curl.stdout.on('data', chunk => {
-        stdout += chunk.toString('utf8');
-      });
-
-      curl.stderr.on('data', chunk => {
-        stderr += chunk.toString('utf8');
-      });
-
-      curl.on('error', err => {
-        reject(err);
-      });
-
-      curl.on('close', code => {
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || `curl exited with code ${code}`));
-          return;
-        }
-
-        const marker = '\n__CURL_STATUS__:';
-        const markerIndex = stdout.lastIndexOf(marker);
-        if (markerIndex === -1) {
-          reject(new Error('无法解析 curl 返回状态码'));
-          return;
-        }
-
-        resolve({
-          statusCode: Number(stdout.slice(markerIndex + marker.length).trim()),
-          bodyText: stdout.slice(0, markerIndex),
-          stderr: stderr.trim(),
-        });
-      });
-
-      if (hasBody) {
-        curl.stdin.end(body);
-      } else {
-        curl.stdin.end();
-      }
-    });
-  }
-
-  /**
    * 刷新单个账号的额度状态。
    */
   async function checkSingleAccountQuota(config, options = {}) {
@@ -363,7 +291,12 @@ function createAccountManager(options) {
     const targetUrl = new URL(quotaCheckPath, config.baseUrl).toString();
 
     try {
-      const result = await runBufferedCurl('GET', targetUrl, buildAuthHeadersForConfig(config));
+      const result = await requestBufferedFn({
+        method: 'GET',
+        targetUrl,
+        headers: buildAuthHeadersForConfig(config),
+        maxRedirects: 5,
+      });
       if (result.statusCode < 200 || result.statusCode >= 300) {
         throw new Error(`quota check status ${result.statusCode}`);
       }

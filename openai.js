@@ -2,10 +2,11 @@
  * OpenAI 兼容接口代理到 ChatGPT Codex backend-api
  */
 console.log("starting")
+const fs = require('node:fs');
 const path = require('path');
-const { spawn } = require('child_process');
 const zlib = require('zlib');
 const express = require('express');
+const { createUpstreamRequest } = require('./app/upstream-request');
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
 const { normalizeResponsesRequestBody } = require('./app/responses-defaults');
 const { createClaudeMessagesHandler } = require('./app/claude-messages-handler');
@@ -25,6 +26,7 @@ const {
     updateConfigSettings,
     writeParsedConfigFile
 } = require('./app/config-editor');
+const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
 const {
     generateRandomSecret,
     getConfiguredApiKeys,
@@ -38,6 +40,8 @@ const {
 const PORT = process.env.PORT || 3009;
 let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
+const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
+const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const MIN_REMAINING_PERCENT = 3;
@@ -116,6 +120,9 @@ let claudeCodeConfig = resolveClaudeCodeOptions({
 });
 let accountManager = null;
 let handleClaudeMessagesRequest = null;
+let server = null;
+let shuttingDown = false;
+const activeSockets = new Set();
 
 // ==================== 工具函数 ====================
 function log(...args) {
@@ -132,6 +139,10 @@ function error(...args) {
         hour12: false
     });
     console.error(`[${timestamp}]`, ...args);
+}
+
+function buildLocalBaseUrl() {
+    return `http://localhost:${PORT}`;
 }
 
 function formatRequestBody(bodyBuffer, headers) {
@@ -215,22 +226,6 @@ function getCurrentTimestamp() {
     return Date.now();
 }
 
-function createRuntimeAccountManager() {
-    return createAccountManager({
-        configs: apiConfigs,
-        configType,
-        quotaCheckPath: QUOTA_CHECK_PATH,
-        quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
-        minRemainingPercent: MIN_REMAINING_PERCENT,
-        buildAuthHeadersForConfig,
-        shouldUseQuotaMonitoring,
-        spawn,
-        log,
-        warn,
-        now: getCurrentTimestamp
-    });
-}
-
 function createClaudeMessagesRequestHandler() {
     return createClaudeMessagesHandler({
         getConfig: () => {
@@ -274,14 +269,42 @@ function applyLoadedConfig(loadedConfig) {
         accountManager.stopQuotaMonitor();
     }
 
-    accountManager = createRuntimeAccountManager();
+    accountManager = createAccountManager({
+        configs: apiConfigs,
+        configType,
+        initialActiveConfigIndex: loadedConfig.initialActiveConfigIndex ?? 0,
+        quotaCheckPath: QUOTA_CHECK_PATH,
+        quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
+        minRemainingPercent: MIN_REMAINING_PERCENT,
+        buildAuthHeadersForConfig,
+        shouldUseQuotaMonitoring,
+        log,
+        warn,
+        now: getCurrentTimestamp
+    });
     handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
 }
 
-async function reloadRuntime(loadedConfig, reason) {
-    applyLoadedConfig(loadedConfig);
+function hydrateLoadedConfig(loadedConfig, options = {}) {
+    const previousActiveConfig = accountManager ? accountManager.getActiveConfig() : null;
+    const previousActiveIndex = previousActiveConfig ? previousActiveConfig.index : 0;
+    const reconciled = reconcileRuntimeConfigs(apiConfigs, loadedConfig.configs, {
+        previousActiveConfig,
+        previousActiveIndex,
+        runtimeOverrides: options.runtimeOverrides
+    });
 
-    if (shouldUseQuotaMonitoring(configType)) {
+    return {
+        ...loadedConfig,
+        configs: reconciled.configs,
+        initialActiveConfigIndex: reconciled.initialActiveConfigIndex
+    };
+}
+
+async function reloadRuntime(loadedConfig, reason, options = {}) {
+    applyLoadedConfig(hydrateLoadedConfig(loadedConfig, options));
+
+    if (shouldUseQuotaMonitoring(configType) && !options.skipQuotaRefresh) {
         await accountManager.refreshQuotas(reason);
     }
 
@@ -290,9 +313,15 @@ async function reloadRuntime(loadedConfig, reason) {
     return currentConfig;
 }
 
-async function persistAndReloadConfig(nextParsed, reason) {
+async function persistAndReloadConfig(nextParsed, reason, options = {}) {
     const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed);
-    return reloadRuntime(buildLoadedConfig(savedParsed), reason);
+    return reloadRuntime(buildLoadedConfig(savedParsed), reason, options);
+}
+
+function persistConfigWithoutRuntimeReload(nextParsed) {
+    const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed);
+    currentParsedConfig = savedParsed;
+    return savedParsed;
 }
 
 function serializeAccountStatus(accountStatus) {
@@ -441,11 +470,9 @@ function parseConfigItemJson(rawJson) {
     }
 }
 
-async function validateConfigItemBeforeAdd(type, item) {
-    let runtimeConfig;
-
+function validateConfigItemBeforeAdd(type, item) {
     try {
-        runtimeConfig = createRuntimeConfigs({
+        return createRuntimeConfigs({
             type,
             configs: [item],
             claude_code: {},
@@ -453,33 +480,6 @@ async function validateConfigItemBeforeAdd(type, item) {
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
-
-    if (!shouldUseQuotaMonitoring(type)) {
-        return runtimeConfig;
-    }
-
-    const temporaryManager = createAccountManager({
-        configs: [runtimeConfig],
-        configType: type,
-        quotaCheckPath: QUOTA_CHECK_PATH,
-        quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
-        minRemainingPercent: MIN_REMAINING_PERCENT,
-        buildAuthHeadersForConfig,
-        shouldUseQuotaMonitoring,
-        spawn,
-        log,
-        warn,
-        now: getCurrentTimestamp
-    });
-
-    await temporaryManager.refreshQuotas('startup');
-    const runtimeStatus = temporaryManager.getAccountStatus(runtimeConfig);
-
-    if (!runtimeConfig.runtime.lastCheckedAt || runtimeConfig.runtime.lastError) {
-        throw new ConfigEditorError(`额度接口验证失败: ${runtimeConfig.runtime.lastError || runtimeStatus.reason}`);
-    }
-
-    return runtimeConfig;
 }
 
 function buildIncomingUrl(req, proxyPath = '') {
@@ -541,86 +541,24 @@ function buildProxyHeaders(reqHeaders, config, contentLength) {
     return applyForcedProxyHeaders(headers);
 }
 
-function buildCurlArgs(method, targetUrl, headers, hasBody) {
-    const args = [
-        '--http1.1',
-        '--silent',
-        '--show-error',
-        '--no-buffer',
-        '--include',
-        '--suppress-connect-headers',
-        '-X',
-        method,
-        targetUrl
-    ];
-
-    for (const [name, value] of Object.entries(headers)) {
-        if (typeof value === 'undefined') {
-            continue;
-        }
-
-        if (Array.isArray(value)) {
-            for (const item of value) {
-                args.push('-H', `${name}: ${item}`);
-            }
-            continue;
-        }
-
-        args.push('-H', `${name}: ${value}`);
-    }
-
-    if (hasBody) {
-        args.push('--data-binary', '@-');
-    }
-
-    return args;
-}
-
-function findHeaderTerminator(buffer) {
-    const crlfIndex = buffer.indexOf('\r\n\r\n');
-    if (crlfIndex !== -1) {
-        return { index: crlfIndex, length: 4 };
-    }
-
-    const lfIndex = buffer.indexOf('\n\n');
-    if (lfIndex !== -1) {
-        return { index: lfIndex, length: 2 };
-    }
-
-    return null;
-}
-
-function applyResponseHeaders(res, rawHeaderBlock) {
-    const headerLines = rawHeaderBlock.split(/\r?\n/).filter(Boolean);
-    const statusLine = headerLines.shift() || '';
-    const match = statusLine.match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})\s*(.*)$/i);
-
-    if (!match) {
-        throw new Error(`无法解析上游响应头: ${statusLine}`);
-    }
-
-    const statusCode = Number(match[1]);
+function normalizeUpstreamResponseHeaders(rawHeaders) {
     const headers = {};
 
-    for (const line of headerLines) {
-        const separatorIndex = line.indexOf(':');
-        if (separatorIndex === -1) {
+    for (const [name, value] of Object.entries(rawHeaders || {})) {
+        const normalizedName = String(name).toLowerCase();
+
+        if (HOP_BY_HOP_HEADERS.has(normalizedName) || normalizedName === 'content-length' || typeof value === 'undefined') {
             continue;
         }
 
-        const name = line.slice(0, separatorIndex).trim().toLowerCase();
-        const value = line.slice(separatorIndex + 1).trim();
-
-        if (HOP_BY_HOP_HEADERS.has(name) || name === 'content-length') {
-            continue;
-        }
-
-        if (headers[name]) {
-            headers[name] = `${headers[name]}, ${value}`;
-        } else {
-            headers[name] = value;
-        }
+        headers[normalizedName] = value;
     }
+
+    return headers;
+}
+
+function applyResponseHeaders(res, statusCode, rawHeaders) {
+    const headers = normalizeUpstreamResponseHeaders(rawHeaders);
 
     res.status(statusCode);
     for (const [name, value] of Object.entries(headers)) {
@@ -639,104 +577,88 @@ function proxyRequest(req, res, config, body, originalUrl) {
     logProxyRequestSnapshot(req, originalUrl, req.url, config, headers, hasBufferedBody ? body : Buffer.alloc(0));
     req.headers = headers;
     const targetUrl = new URL(req.url, config.baseUrl).toString();
-    const curlArgs = buildCurlArgs(req.method, targetUrl, headers, hasBufferedBody);
-    const curl = spawn('curl', curlArgs, {
-        stdio: ['pipe', 'pipe', 'pipe']
+    const upstream = createUpstreamRequest({
+        method: req.method,
+        targetUrl,
+        headers,
+        body: hasBufferedBody ? body : undefined
     });
 
-    let stderr = '';
-    let headerBuffer = Buffer.alloc(0);
-    let headersParsed = false;
+    let headersApplied = false;
     let responseFinished = false;
+    let requestClosed = false;
     const shouldLogQuotaUsage = req.method === 'GET' && isQuotaUsagePath(req.url);
     const responseBodyChunks = [];
     let upstreamResponseHeaders = {};
+    let upstreamResponse = null;
 
-    curl.stdout.on('data', (chunk) => {
-        if (headersParsed) {
+    upstream.responsePromise.then(response => {
+        upstreamResponse = response;
+        const statusCode = Number(response.statusCode || 502);
+        const responseMeta = applyResponseHeaders(res, statusCode, response.headers);
+        upstreamResponseHeaders = responseMeta.headers;
+        headersApplied = true;
+        res.flushHeaders();
+
+        response.on('data', chunk => {
             if (shouldLogQuotaUsage) {
                 responseBodyChunks.push(chunk);
             }
             res.write(chunk);
-            return;
-        }
+        });
 
-        headerBuffer = Buffer.concat([headerBuffer, chunk]);
+        response.on('end', () => {
+            responseFinished = true;
 
-        while (!headersParsed) {
-            const terminator = findHeaderTerminator(headerBuffer);
-            if (!terminator) {
+            if (shouldLogQuotaUsage) {
+                try {
+                    const payloadText = decodeResponseBody(
+                        Buffer.concat(responseBodyChunks),
+                        upstreamResponseHeaders['content-encoding']
+                    );
+                    const payload = JSON.parse(payloadText);
+                    accountManager.applyQuotaPayload(config, payload);
+                    log(`额度信息: ${accountManager.getAccountStatus(config).summaryLine}`);
+                } catch (err) {
+                    warn(`额度信息解析失败: ${accountManager.getAccountStatus(config).label} (${err.message})`);
+                }
+            }
+
+            if (!res.writableEnded) {
+                res.end();
+            }
+        });
+
+        response.on('error', err => {
+            if (requestClosed) {
                 return;
             }
 
-            const rawHeaderBlock = headerBuffer.slice(0, terminator.index).toString('utf8');
-            const remaining = headerBuffer.slice(terminator.index + terminator.length);
-            const statusMatch = rawHeaderBlock.match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i);
-            const statusCode = statusMatch ? Number(statusMatch[1]) : 0;
-
-            // Ignore interim responses and keep parsing until the final header block.
-            if (statusCode >= 100 && statusCode < 200) {
-                headerBuffer = remaining;
-                continue;
+            error('代理请求失败:', err.message);
+            if (!res.headersSent) {
+                res.status(502).json({
+                    error: 'Bad Gateway',
+                    message: err.message
+                });
+                return;
             }
 
-            const responseMeta = applyResponseHeaders(res, rawHeaderBlock);
-            upstreamResponseHeaders = responseMeta.headers;
-            res.flushHeaders();
-            headersParsed = true;
-
-            if (remaining.length > 0) {
-                if (shouldLogQuotaUsage) {
-                    responseBodyChunks.push(remaining);
-                }
-                res.write(remaining);
+            if (!res.writableEnded) {
+                res.end();
             }
+        });
+    }).catch(err => {
+        if (requestClosed) {
+            return;
         }
-    });
 
-    curl.stderr.on('data', (chunk) => {
-        stderr += chunk.toString('utf8');
-    });
-
-    curl.on('error', (err) => {
-        error('curl 启动失败:', err.message);
-        if (!res.headersSent) {
+        error('代理请求失败:', err.message);
+        if (!headersApplied && !res.headersSent) {
             res.status(502).json({
                 error: 'Bad Gateway',
                 message: err.message
             });
-        }
-    });
-
-    curl.on('close', (code) => {
-        responseFinished = true;
-
-        if (!headersParsed) {
-            const message = stderr.trim() || `curl exited with code ${code}`;
-            error('代理请求失败:', message);
-            if (!res.headersSent) {
-                res.status(502).json({
-                    error: 'Bad Gateway',
-                    message
-                });
-            } else {
-                res.end();
-            }
             return;
-        }
-
-        if (shouldLogQuotaUsage) {
-            try {
-                const payloadText = decodeResponseBody(
-                    Buffer.concat(responseBodyChunks),
-                    upstreamResponseHeaders['content-encoding']
-                );
-                const payload = JSON.parse(payloadText);
-                accountManager.applyQuotaPayload(config, payload);
-                log(`额度信息: ${accountManager.getAccountStatus(config).summaryLine}`);
-            } catch (err) {
-                warn(`额度信息解析失败: ${accountManager.getAccountStatus(config).label} (${err.message})`);
-            }
         }
 
         if (!res.writableEnded) {
@@ -744,20 +666,15 @@ function proxyRequest(req, res, config, body, originalUrl) {
         }
     });
 
-    const closeCurl = () => {
-        if (!responseFinished && !curl.killed) {
-            curl.kill('SIGTERM');
+    const closeUpstream = () => {
+        requestClosed = true;
+        if (!responseFinished) {
+            upstream.abort(new Error('client closed request'));
         }
     };
 
-    req.on('aborted', closeCurl);
-    res.on('close', closeCurl);
-
-    if (hasBufferedBody) {
-        curl.stdin.end(body);
-    } else {
-        curl.stdin.end();
-    }
+    req.on('aborted', closeUpstream);
+    res.on('close', closeUpstream);
 }
 
 function createHandler(proxyPath = '') {
@@ -807,11 +724,11 @@ function createHandler(proxyPath = '') {
     };
 }
 
-async function handleConfigMutation(res, mutate, reason, successStatus = 200) {
+async function handleConfigMutation(res, mutate, reason, successStatus = 200, persistOptions = {}) {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
         const nextParsed = mutate(parsed);
-        await persistAndReloadConfig(nextParsed, reason);
+        await persistAndReloadConfig(nextParsed, reason, persistOptions);
         res.status(successStatus).json(buildConfigAdminResponse());
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
@@ -820,6 +737,78 @@ async function handleConfigMutation(res, mutate, reason, successStatus = 200) {
             details: err.message
         });
     }
+}
+
+function shutdownServer(reason) {
+    if (shuttingDown) {
+        return;
+    }
+
+    shuttingDown = true;
+    log(`${reason}，正在关闭服务器...`);
+    stopControlWatcher();
+
+    if (accountManager) {
+        accountManager.stopQuotaMonitor();
+    }
+
+    if (!server) {
+        process.exit(0);
+        return;
+    }
+
+    server.close(closeError => {
+        if (closeError) {
+            error('关闭服务器失败:', closeError.message);
+            process.exit(1);
+            return;
+        }
+
+        process.exit(0);
+    });
+
+    setTimeout(() => {
+        for (const socket of activeSockets) {
+            socket.destroy();
+        }
+    }, 5_000).unref();
+}
+
+function handleControlFileChange() {
+    if (!CONTROL_REQUEST_FILE || !CONTROL_TOKEN || shuttingDown) {
+        return;
+    }
+
+    let payload;
+    try {
+        payload = JSON.parse(fs.readFileSync(CONTROL_REQUEST_FILE, 'utf8'));
+    } catch (error) {
+        return;
+    }
+
+    if (!payload || payload.action !== 'stop' || payload.token !== CONTROL_TOKEN) {
+        return;
+    }
+
+    fs.rmSync(CONTROL_REQUEST_FILE, { force: true });
+    shutdownServer('收到本地停止请求');
+}
+
+function startControlWatcher() {
+    if (!CONTROL_REQUEST_FILE || !CONTROL_TOKEN) {
+        return;
+    }
+
+    fs.watchFile(CONTROL_REQUEST_FILE, { interval: 250 }, handleControlFileChange);
+    handleControlFileChange();
+}
+
+function stopControlWatcher() {
+    if (!CONTROL_REQUEST_FILE) {
+        return;
+    }
+
+    fs.unwatchFile(CONTROL_REQUEST_FILE, handleControlFileChange);
 }
 
 // ==================== 初始化 ====================
@@ -865,9 +854,12 @@ app.post('/admin/api/configs', async (req, res) => {
         const parsed = readParsedConfigFile(CONFIG_FILE);
         const rawItem = parseConfigItemJson(req.body && req.body.raw_json);
         const inputItem = buildImportedConfigItem(parsed.type, rawItem);
-        await validateConfigItemBeforeAdd(parsed.type, inputItem);
+        const validatedRuntimeConfig = await validateConfigItemBeforeAdd(parsed.type, inputItem);
         const nextParsed = addConfigItem(parsed, inputItem);
-        await persistAndReloadConfig(nextParsed, 'admin_create');
+        await persistAndReloadConfig(nextParsed, 'admin_create', {
+            runtimeOverrides: [validatedRuntimeConfig],
+            skipQuotaRefresh: true
+        });
         res.status(201).json(buildConfigAdminResponse());
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
@@ -886,7 +878,7 @@ app.post('/admin/api/apikeys', async (req, res) => {
             apikeys: [...getConfiguredApiKeys(parsed), generatedApiKey]
         });
 
-        await persistAndReloadConfig(nextParsed, 'admin_add_apikey');
+        persistConfigWithoutRuntimeReload(nextParsed);
         res.status(201).json({
             ...buildConfigAdminResponse(),
             generated_apikey: generatedApiKey
@@ -901,29 +893,37 @@ app.post('/admin/api/apikeys', async (req, res) => {
 });
 
 app.delete('/admin/api/apikeys/:index', async (req, res) => {
-    await handleConfigMutation(
-        res,
-        parsed => {
-            const apikeys = getConfiguredApiKeys(parsed);
-            const targetIndex = parseConfigIndex(req.params.index);
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const apikeys = getConfiguredApiKeys(parsed);
+        const targetIndex = parseConfigIndex(req.params.index);
 
-            if (targetIndex >= apikeys.length) {
-                throw new ConfigEditorError('apikey 索引不合法');
-            }
+        if (targetIndex >= apikeys.length) {
+            throw new ConfigEditorError('apikey 索引不合法');
+        }
 
-            return updateConfigSettings(parsed, {
-                apikeys: apikeys.filter((_, index) => index !== targetIndex)
-            });
-        },
-        'admin_delete_apikey'
-    );
+        persistConfigWithoutRuntimeReload(updateConfigSettings(parsed, {
+            apikeys: apikeys.filter((_, index) => index !== targetIndex)
+        }));
+        res.status(200).json(buildConfigAdminResponse());
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? 'apikey 删除失败' : '配置更新失败',
+            details: err.message
+        });
+    }
 });
 
 app.delete('/admin/api/configs/:index', async (req, res) => {
     await handleConfigMutation(
         res,
         parsed => deleteConfigItem(parsed, parseConfigIndex(req.params.index)),
-        'admin_delete'
+        'admin_delete',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
     );
 });
 
@@ -973,13 +973,17 @@ async function startServer() {
     const loadedConfig = loadApiConfigs();
     applyLoadedConfig(loadedConfig);
 
-    app.listen(PORT, () => {
+    server = app.listen(PORT, () => {
+        const localBaseUrl = buildLocalBaseUrl();
+
         log('='.repeat(70));
         log('OpenAI 兼容代理服务器已启动');
         log('='.repeat(70));
-        log(`配置管理: http://localhost:${PORT}${buildAdminPath()}`);
-        log(`OpenAI 代理: http://localhost:${PORT}/v1`);
-        log(`Claude 代理: http://localhost:${PORT}/claude`);
+        log(`本机访问: ${localBaseUrl}`);
+        log(`局域网/外网访问: 请使用当前机器 IP 和端口 ${PORT} 访问`);
+        log(`配置管理: ${localBaseUrl}${buildAdminPath()}`);
+        log(`OpenAI 代理: ${localBaseUrl}/v1`);
+        log(`Claude 代理: ${localBaseUrl}/claude`);
         log('='.repeat(70));
 
         void (async () => {
@@ -1013,6 +1017,15 @@ async function startServer() {
             error('初始化账号信息失败:', err.message);
         });
     });
+
+    server.on('connection', socket => {
+        activeSockets.add(socket);
+        socket.on('close', () => {
+            activeSockets.delete(socket);
+        });
+    });
+
+    startControlWatcher();
 }
 
 startServer().catch(err => {
@@ -1022,17 +1035,9 @@ startServer().catch(err => {
 
 // 优雅关闭
 process.on('SIGINT', () => {
-    log('收到 SIGINT 信号，正在关闭服务器...');
-    if (accountManager) {
-        accountManager.stopQuotaMonitor();
-    }
-    process.exit(0);
+    shutdownServer('收到 SIGINT 信号');
 });
 
 process.on('SIGTERM', () => {
-    log('收到 SIGTERM 信号，正在关闭服务器...');
-    if (accountManager) {
-        accountManager.stopQuotaMonitor();
-    }
-    process.exit(0);
+    shutdownServer('收到 SIGTERM 信号');
 });

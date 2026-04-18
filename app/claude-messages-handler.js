@@ -1,4 +1,4 @@
-const { spawn } = require('child_process');
+const { createUpstreamRequest } = require('./upstream-request');
 const {
     transformClaudeMessagesRequest,
     transformResponsesResponseToClaudeMessage,
@@ -110,97 +110,20 @@ function writeSseEvent(res, entry) {
     res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
 }
 
-function buildCurlArgs(method, targetUrl, headers, hasBody, isStream) {
-    const args = [
-        '--http1.1',
-        '--silent',
-        '--show-error'
-    ];
-
-    if (isStream) {
-        args.push('--no-buffer');
-    }
-
-    args.push(
-        '--include',
-        '--suppress-connect-headers',
-        '-X',
-        method,
-        targetUrl
-    );
-
-    for (const [name, value] of Object.entries(headers)) {
-        if (typeof value === 'undefined') {
-            continue;
-        }
-
-        if (Array.isArray(value)) {
-            for (const item of value) {
-                args.push('-H', `${name}: ${item}`);
-            }
-            continue;
-        }
-
-        args.push('-H', `${name}: ${value}`);
-    }
-
-    if (hasBody) {
-        args.push('--data-binary', '@-');
-    }
-
-    return args;
-}
-
-function findHeaderTerminator(buffer) {
-    const crlfIndex = buffer.indexOf('\r\n\r\n');
-    if (crlfIndex !== -1) {
-        return { index: crlfIndex, length: 4 };
-    }
-
-    const lfIndex = buffer.indexOf('\n\n');
-    if (lfIndex !== -1) {
-        return { index: lfIndex, length: 2 };
-    }
-
-    return null;
-}
-
-function parseRawHeaders(rawHeaderBlock) {
-    const headerLines = rawHeaderBlock.split(/\r?\n/).filter(Boolean);
-    const statusLine = headerLines.shift() || '';
-    const match = statusLine.match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})\s*(.*)$/i);
-
-    if (!match) {
-        throw new Error(`无法解析上游响应头: ${statusLine}`);
-    }
-
-    const statusCode = Number(match[1]);
+function normalizeUpstreamHeaders(rawHeaders) {
     const headers = {};
 
-    for (const line of headerLines) {
-        const separatorIndex = line.indexOf(':');
-        if (separatorIndex === -1) {
+    for (const [name, value] of Object.entries(rawHeaders || {})) {
+        const normalizedName = String(name).toLowerCase();
+
+        if (HOP_BY_HOP_HEADERS.has(normalizedName) || normalizedName === 'content-length' || typeof value === 'undefined') {
             continue;
         }
 
-        const name = line.slice(0, separatorIndex).trim().toLowerCase();
-        const value = line.slice(separatorIndex + 1).trim();
-
-        if (HOP_BY_HOP_HEADERS.has(name) || name === 'content-length') {
-            continue;
-        }
-
-        if (headers[name]) {
-            headers[name] = `${headers[name]}, ${value}`;
-        } else {
-            headers[name] = value;
-        }
+        headers[normalizedName] = value;
     }
 
-    return {
-        statusCode,
-        headers
-    };
+    return headers;
 }
 
 function parseSseChunk(rawEvent) {
@@ -467,15 +390,16 @@ function createClaudeMessagesHandler({
         upstreamHeaders.session_id = sessionId;
         upstreamHeaders['x-client-request-id'] = sessionId;
         const targetUrl = new URL(`${responsesApiPath}?client_version=${encodeURIComponent(clientVersion)}`, config.baseUrl).toString();
-        const curlArgs = buildCurlArgs('POST', targetUrl, upstreamHeaders, true, true);
-        const curl = spawn('curl', curlArgs, {
-            stdio: ['pipe', 'pipe', 'pipe']
+        const upstream = createUpstreamRequest({
+            method: 'POST',
+            targetUrl,
+            headers: upstreamHeaders,
+            body: upstreamBody
         });
 
-        let stderr = '';
-        let headerBuffer = Buffer.alloc(0);
         let headersParsed = false;
         let responseFinished = false;
+        let requestClosed = false;
         let upstreamMeta = null;
         let streamInitialized = false;
         const responseBodyChunks = [];
@@ -493,18 +417,24 @@ function createClaudeMessagesHandler({
             }
         }
 
-        curl.stdout.on('data', (chunk) => {
-            if (headersParsed) {
-                if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
-                    if (isClientStream && !streamInitialized) {
-                        res.status(upstreamMeta.statusCode);
-                        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-                        res.setHeader('cache-control', 'no-cache');
-                        res.setHeader('connection', 'keep-alive');
-                        res.setHeader('x-accel-buffering', 'no');
-                        streamInitialized = true;
-                    }
+        upstream.responsePromise.then(response => {
+            upstreamMeta = {
+                statusCode: Number(response.statusCode || 502),
+                headers: normalizeUpstreamHeaders(response.headers)
+            };
+            headersParsed = true;
 
+            if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300 && isClientStream && !streamInitialized) {
+                res.status(upstreamMeta.statusCode);
+                res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+                res.setHeader('cache-control', 'no-cache');
+                res.setHeader('connection', 'keep-alive');
+                res.setHeader('x-accel-buffering', 'no');
+                streamInitialized = true;
+            }
+
+            response.on('data', chunk => {
+                if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
                     processResponsesSseText(
                         sseState,
                         chunk.toString('utf8'),
@@ -514,133 +444,78 @@ function createClaudeMessagesHandler({
                 } else {
                     responseBodyChunks.push(chunk);
                 }
+            });
+
+            response.on('end', () => {
+                responseFinished = true;
+
+                if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
+                    processResponsesSseText(
+                        sseState,
+                        '',
+                        handleUpstreamSseEvent,
+                        message => error(message),
+                        true
+                    );
+
+                    if (isClientStream) {
+                        if (!res.writableEnded) {
+                            res.end();
+                        }
+                        return;
+                    }
+
+                    const mappedResponse = collector.build();
+                    if (!mappedResponse) {
+                        sendJsonError(res, 502, {
+                            error: 'Bad Gateway',
+                            message: 'Upstream stream completed without enough Claude response events'
+                        });
+                        return;
+                    }
+
+                    res.status(upstreamMeta.statusCode).json(mappedResponse);
+                    return;
+                }
+
+                const responseText = Buffer.concat(responseBodyChunks).toString('utf8');
+                const upstreamContentType = upstreamMeta.headers['content-type'] || '';
+                sendUpstreamError(res, upstreamMeta.statusCode, upstreamContentType, responseText);
+            });
+
+            response.on('error', err => {
+                if (requestClosed) {
+                    return;
+                }
+
+                error(`代理请求失败: ${err.message}`);
+                sendJsonError(res, 502, {
+                    error: 'Bad Gateway',
+                    message: err.message
+                });
+            });
+        }).catch(err => {
+            if (requestClosed) {
                 return;
             }
 
-            headerBuffer = Buffer.concat([headerBuffer, chunk]);
-
-            while (!headersParsed) {
-                const terminator = findHeaderTerminator(headerBuffer);
-                if (!terminator) {
-                    return;
-                }
-
-                const rawHeaderBlock = headerBuffer.slice(0, terminator.index).toString('utf8');
-                const remaining = headerBuffer.slice(terminator.index + terminator.length);
-                const statusMatch = rawHeaderBlock.match(/^HTTP\/\d+(?:\.\d+)?\s+(\d{3})/i);
-                const statusCode = statusMatch ? Number(statusMatch[1]) : 0;
-
-                if (statusCode >= 100 && statusCode < 200) {
-                    headerBuffer = remaining;
-                    continue;
-                }
-
-                try {
-                    upstreamMeta = parseRawHeaders(rawHeaderBlock);
-                } catch (err) {
-                    error(`解析上游响应头失败: ${err.message}`);
-                    sendJsonError(res, 502, {
-                        error: 'Bad Gateway',
-                        message: err.message
-                    });
-                    curl.kill('SIGTERM');
-                    return;
-                }
-
-                headersParsed = true;
-
-                if (remaining.length > 0) {
-                    if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
-                        if (isClientStream && !streamInitialized) {
-                            res.status(upstreamMeta.statusCode);
-                            res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-                            res.setHeader('cache-control', 'no-cache');
-                            res.setHeader('connection', 'keep-alive');
-                            res.setHeader('x-accel-buffering', 'no');
-                            streamInitialized = true;
-                        }
-
-                        processResponsesSseText(
-                            sseState,
-                            remaining.toString('utf8'),
-                            handleUpstreamSseEvent,
-                            message => error(message)
-                        );
-                    } else {
-                        responseBodyChunks.push(remaining);
-                    }
-                }
-            }
-        });
-
-        curl.stderr.on('data', (chunk) => {
-            stderr += chunk.toString('utf8');
-        });
-
-        curl.on('error', (err) => {
-            error(`curl 启动失败: ${err.message}`);
+            const message = err.message || 'upstream request failed';
+            error(`代理请求失败: ${message}`);
             sendJsonError(res, 502, {
                 error: 'Bad Gateway',
-                message: err.message
+                message
             });
         });
 
-        curl.on('close', () => {
-            responseFinished = true;
-
-            if (!headersParsed) {
-                const message = stderr.trim() || 'curl exited before response headers were received';
-                error(`代理请求失败: ${message}`);
-                sendJsonError(res, 502, {
-                    error: 'Bad Gateway',
-                    message
-                });
-                return;
-            }
-
-            if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
-                processResponsesSseText(
-                    sseState,
-                    '',
-                    handleUpstreamSseEvent,
-                    message => error(message),
-                    true
-                );
-
-                if (isClientStream) {
-                    if (!res.writableEnded) {
-                        res.end();
-                    }
-                    return;
-                }
-
-                const mappedResponse = collector.build();
-                if (!mappedResponse) {
-                    sendJsonError(res, 502, {
-                        error: 'Bad Gateway',
-                        message: 'Upstream stream completed without enough Claude response events'
-                    });
-                    return;
-                }
-
-                res.status(upstreamMeta.statusCode).json(mappedResponse);
-                return;
-            }
-
-            const responseText = Buffer.concat(responseBodyChunks).toString('utf8');
-            const upstreamContentType = upstreamMeta.headers['content-type'] || '';
-            sendUpstreamError(res, upstreamMeta.statusCode, upstreamContentType, responseText);
-        });
-
-        const closeCurl = () => {
-            if (!responseFinished && !curl.killed) {
-                curl.kill('SIGTERM');
+        const closeUpstream = () => {
+            requestClosed = true;
+            if (!responseFinished) {
+                upstream.abort(new Error('client closed request'));
             }
         };
 
-        req.on('aborted', closeCurl);
-        res.on('close', closeCurl);
-        curl.stdin.end(upstreamBody);
+        req.on('aborted', closeUpstream);
+        res.on('close', closeUpstream);
     };
 }
 

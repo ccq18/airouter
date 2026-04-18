@@ -2,10 +2,13 @@
   "name": "claude-proxy-router",
   "version": "1.0.0",
   "description": "Claude API proxy router with model-based routing",
-  "main": "server.js",
+  "main": "run.js",
   "scripts": {
-    "start": "node --no-deprecation server.js",
-    "dev": "NODE_ENV=dev node --no-deprecation server.js"
+    "start": "node run.js",
+    "stop": "node run.js stop",
+    "restart": "node run.js restart",
+    "logs": "node run.js logs",
+    "test": "node --test"
   },
   "keywords": [
     "claude",

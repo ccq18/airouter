@@ -481,7 +481,7 @@
   "accessToken": "..."
 }'></textarea>
           <div class="actions">
-            <button class="primary" type="button" id="addButton">验证并新增</button>
+            <button class="primary" type="button" id="addButton">直接新增</button>
           </div>
 	        </div>
 	      </div>
@@ -684,7 +684,7 @@
       rawJsonInput.value = '';
       renderHeader(snapshot);
       renderCards(snapshot);
-      setMessage('info', '配置项已通过校验并写入配置文件。');
+      setMessage('info', '配置项已写入配置文件。');
     }
 
     async function addApiKey() {

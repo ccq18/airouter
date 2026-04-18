@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { EventEmitter } = require('node:events');
 const { createAccountManager } = require('../app/account-manager');
 
 function createRuntime(overrides = {}) {
@@ -34,48 +33,24 @@ function createConfig(index, runtimeOverrides = {}) {
   };
 }
 
-function createSpawnFromBodies(bodies) {
-  let currentIndex = 0;
-
-  return () => {
-    const child = new EventEmitter();
-    child.stdout = new EventEmitter();
-    child.stderr = new EventEmitter();
-    child.stdin = { end() {} };
-
-    process.nextTick(() => {
-      child.stdout.emit('data', `${JSON.stringify(bodies[currentIndex])}\n__CURL_STATUS__:200`);
-      child.emit('close', 0);
-      currentIndex += 1;
-    });
-
-    return child;
-  };
-}
-
-function createSpawnRecorder(bodies) {
+function createBufferedRequestRecorder(bodies) {
   let currentIndex = 0;
   let callCount = 0;
 
   return {
-    spawn() {
+    requestBuffered() {
       if (currentIndex >= bodies.length) {
-        throw new Error(`unexpected spawn call ${currentIndex + 1}`);
+        throw new Error(`unexpected buffered request call ${currentIndex + 1}`);
       }
 
       callCount += 1;
-      const child = new EventEmitter();
-      child.stdout = new EventEmitter();
-      child.stderr = new EventEmitter();
-      child.stdin = { end() {} };
+      const payload = bodies[currentIndex];
+      currentIndex += 1;
 
-      process.nextTick(() => {
-        child.stdout.emit('data', `${JSON.stringify(bodies[currentIndex])}\n__CURL_STATUS__:200`);
-        child.emit('close', 0);
-        currentIndex += 1;
+      return Promise.resolve({
+        statusCode: 200,
+        bodyText: JSON.stringify(payload),
       });
-
-      return child;
     },
     getCallCount() {
       return callCount;
@@ -90,6 +65,7 @@ function createManager(configs, overrides = {}) {
   const manager = createAccountManager({
     configs,
     configType: 'token',
+    initialActiveConfigIndex: overrides.initialActiveConfigIndex,
     quotaCheckPath: '/backend-api/wham/usage',
     quotaCheckIntervalMs: 60 * 1000,
     minRemainingPercent: 3,
@@ -97,10 +73,8 @@ function createManager(configs, overrides = {}) {
       authorization: `Bearer ${config.access_token}`,
       'chatgpt-account-id': config.account_id,
     }),
+    requestBufferedFn: overrides.requestBufferedFn,
     shouldUseQuotaMonitoring: type => type === 'token',
-    spawn: overrides.spawn || (() => {
-      throw new Error('spawn stub not provided');
-    }),
     log: (...args) => logs.push(args.join(' ')),
     warn: (...args) => warnings.push(args.join(' ')),
     now: () => 1713337200000,
@@ -108,6 +82,17 @@ function createManager(configs, overrides = {}) {
 
   return { manager, logs, warnings };
 }
+
+test('createAccountManager honors the initial active config index', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+    createConfig(2, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs, { initialActiveConfigIndex: 2 });
+
+  assert.equal(manager.getActiveConfig(), configs[2]);
+});
 
 test('ensureActiveConfig keeps the current account when it is still available', () => {
   const configs = [
@@ -331,7 +316,7 @@ test('refreshQuotas logs the active account summary after a poll', async () => {
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
   ];
-  const quotaResponses = createSpawnRecorder([
+  const quotaResponses = createBufferedRequestRecorder([
     {
       rate_limit: {
         allowed: true,
@@ -342,7 +327,7 @@ test('refreshQuotas logs the active account summary after a poll', async () => {
     },
   ]);
   const { manager, logs } = createManager(configs, {
-    spawn: quotaResponses.spawn,
+    requestBufferedFn: quotaResponses.requestBuffered,
   });
 
   await manager.refreshQuotas('poll');
@@ -358,7 +343,7 @@ test('refreshQuotas switches to the next available account when the polled accou
     createConfig(1, { available: true, reason: 'ok', remainingPercent: 70 }),
     createConfig(2, { available: false, reason: 'quota_check_failed' }),
   ];
-  const quotaResponses = createSpawnRecorder([
+  const quotaResponses = createBufferedRequestRecorder([
     {
       rate_limit: {
         allowed: true,
@@ -369,7 +354,7 @@ test('refreshQuotas switches to the next available account when the polled accou
     },
   ]);
   const { manager, warnings, logs } = createManager(configs, {
-    spawn: quotaResponses.spawn,
+    requestBufferedFn: quotaResponses.requestBuffered,
   });
 
   await manager.refreshQuotas('poll');
@@ -386,7 +371,7 @@ test('refreshQuotas still checks all accounts during startup', async () => {
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
   ];
-  const quotaResponses = createSpawnRecorder([
+  const quotaResponses = createBufferedRequestRecorder([
     {
       rate_limit: {
         allowed: true,
@@ -405,7 +390,7 @@ test('refreshQuotas still checks all accounts during startup', async () => {
     },
   ]);
   const { manager } = createManager(configs, {
-    spawn: quotaResponses.spawn,
+    requestBufferedFn: quotaResponses.requestBuffered,
   });
 
   await manager.refreshQuotas('startup');

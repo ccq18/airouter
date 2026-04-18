@@ -4,16 +4,21 @@
 ## 配置
 - npm install
 - 可以先复制 [openai.json.example](./openai.json.example) 为 `openai.json`
-- `apikeys` 为可选入口密钥数组；只要数组非空，请求就必须携带其中任意一个 `apikey`
+- `apikeys` 为可选入口密钥数组；只要数组非空，请求就必须携带其中任意一个 `apikey`，默认不校验
 - `auth_token` 用于管理后台访问；留空或缺失时，启动后会自动生成并写回配置文件
 - proxy_port 填本地的代理端口
 - port 填服务监听端口，不填时默认 `3009`
 ## 启动
 ``` 
-bash run.sh
-bash run.sh stop
-bash run.sh logs
+npm start
+npm run stop
+npm run logs
 ```
+
+## 局域网 / 外网访问
+- 当前版本默认监听本机指定端口；如果只是局域网访问，直接用 `http://<当前机器IP>:<port>` 访问
+- 如果要外网访问，需要额外完成端口映射、云防火墙放行或反向代理；仅改代码不等于公网自动可达
+- 建议同时配置 `apikeys`，否则代理接口暴露到公网后任何人都能直接调用
 
 ## 配置账号
 启动后访问启动日志里打印的管理地址，例如 `http://127.0.0.1:3009/admin/configs?auth_token=...`
@@ -24,9 +29,20 @@ bash run.sh logs
 如果你配置了入口 `apikeys`，记得额外加上 `-H "Authorization: Bearer <apikey>"`
 
 ```
+无api_key
 curl http://127.0.0.1:3009/v1/responses \
 -H "Content-Type: application/json" \
 -d '{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}'
+
+
+带api_key
+curl http://127.0.0.1:3009/v1/responses \
+-H "Content-Type: application/json" \
+-H "Authorization: Bearer <api key>" \
+-d '{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}'
+
+
+
 ```
 ## ccs配置
 建议使用 https://github.com/farion1231/cc-switch 管理本地的配置
