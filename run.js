@@ -54,7 +54,8 @@ function readConfigValue(key, fallback) {
     return fallback;
   }
 
-  return String(value);
+  const normalizedValue = String(value).trim();
+  return normalizedValue || fallback;
 }
 
 function getConfiguredPort() {
@@ -257,17 +258,25 @@ async function waitForStartupLogs(port, timeoutMs = STARTUP_LOG_WAIT_MS) {
 function buildChildEnv(controlState) {
   const proxyPort = readConfigValue('proxy_port', '');
   const port = getConfiguredPort();
-  const proxyBase = `127.0.0.1:${proxyPort}`;
-
-  return {
+  const childEnv = {
     ...process.env,
     CONFIG: CONFIG_FILE,
     PORT: port,
+    AIROUTER_CONTROL_TOKEN: controlState.token,
+    AIROUTER_CONTROL_REQUEST_FILE: CONTROL_REQUEST_FILE,
+  };
+
+  if (!proxyPort) {
+    return childEnv;
+  }
+
+  const proxyBase = `127.0.0.1:${proxyPort}`;
+
+  return {
+    ...childEnv,
     https_proxy: `http://${proxyBase}`,
     http_proxy: `http://${proxyBase}`,
     all_proxy: `socks5://${proxyBase}`,
-    AIROUTER_CONTROL_TOKEN: controlState.token,
-    AIROUTER_CONTROL_REQUEST_FILE: CONTROL_REQUEST_FILE,
   };
 }
 

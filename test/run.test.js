@@ -33,6 +33,7 @@ function runCommand(args, options) {
       RUN_STARTUP_CHECK_DELAY_MS: '0',
       RUN_POST_START_SETTLE_DELAY_MS: '250',
       RUN_POLL_INTERVAL_MS: '25',
+      ...options.extraEnv,
     },
     encoding: 'utf8',
   });
@@ -265,6 +266,39 @@ test('start works with a minimal PATH and without Unix helper tools', () => {
   const stopResult = runCommand(['stop'], {
     ...workspace,
     systemPath: path.dirname(process.execPath),
+  });
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start works without proxy_port and preserves inherited proxy env', () => {
+  const workspace = prepareWorkspace(
+    buildManagedAppScript({
+      startupLog: null,
+      extraStartupCode: 'console.log(`https=${process.env.https_proxy} http=${process.env.http_proxy} all=${process.env.all_proxy}`);',
+    }),
+    '',
+    { port: 3456 }
+  );
+
+  const inheritedProxyEnv = {
+    https_proxy: 'http://proxy.example.internal:8080',
+    http_proxy: 'http://proxy.example.internal:8080',
+    all_proxy: 'socks5://proxy.example.internal:1080',
+  };
+
+  const startResult = runCommand(['start'], {
+    ...workspace,
+    extraEnv: inheritedProxyEnv,
+  });
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, /https=http:\/\/proxy\.example\.internal:8080/);
+  assert.match(startResult.stdout, /http=http:\/\/proxy\.example\.internal:8080/);
+  assert.match(startResult.stdout, /all=socks5:\/\/proxy\.example\.internal:1080/);
+
+  const stopResult = runCommand(['stop'], {
+    ...workspace,
+    extraEnv: inheritedProxyEnv,
   });
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });

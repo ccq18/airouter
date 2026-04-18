@@ -5,7 +5,6 @@
   "type":"token",
   "apikeys": [],
   "auth_token": "",
-  "proxy_port":7890,
   "port":3009,
   "claude_code": {
     "model": "gpt-5.4",
@@ -27,7 +26,7 @@
   ![session_json.png](docs/img/session_json.png)
 
 !注意不要退出登录,退出登录token就失效了
-- `proxy_port` 填本地的代理端口
+- `proxy_port` 为可选项；只有在需要通过本地代理访问上游时才填写本地代理端口，例如 `7890`
 - `port` 填服务监听端口，不填时默认 `3009`
 - `apikeys` 为入口请求校验密钥数组，支持 `Authorization: Bearer <apikey>` 或 `x-api-key`
 - `apikeys` 为空时，不校验入口请求；只要数组非空，请求就必须命中其中一个 key

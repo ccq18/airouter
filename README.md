@@ -10,7 +10,7 @@ cp openai.json.example openai.json
 npm start
 ```
 说明：
-- openai.json `proxy_port` 填本地代理端口
+- `proxy_port` 可选；只有在需要通过本地代理访问上游时才填写，例如 `7890`
 
 ## 配置账号
 启动后访问启动日志里打印的管理地址，例如 `http://127.0.0.1:3009/admin/configs?auth_token=...`
