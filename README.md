@@ -39,7 +39,8 @@ curl http://127.0.0.1:3009/v1/responses \
 ```
 ## ccs配置
 建议使用 https://github.com/farion1231/cc-switch 管理本地的配置 
-使用 ccs 配置转发到对应地址即可；如果 airouter 配置了入口 `apikeys`，这里填其中任意一个值，否则可以留空或随便写。也可以自己手动配置 
+
+使用 ccs 配置转发到对应地址即可；如果 airouter 配置了入口 `apikeys`，这里填其中任意一个值，否则可以留空或随便写
 ![ccs_codex.png](docs/img/ccs_codex.png) 
 ![ccs_claude.png](docs/img/ccs_claude.png) 
 
