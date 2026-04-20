@@ -7,11 +7,13 @@
 git clone git@github.com:ccq18/airouter.git
 cd airouter
 npm install
-cp openai.json.example openai.json
 npm start
 ```
 说明：
-- `proxy_port` 可选；只有在需要通过本地代理访问上游时才填写，例如 `7890` 
+- 首次执行 `npm start` 时，如果 `openai.json` 不存在，会自动读取 `openai.json.example` 进入创建配置文件引导
+- 引导会依次询问是否启用本地代理端口、代理端口号（默认 `7890`，可修改）、是否启用入口 `apikey`
+- 若启用入口 `apikey`，会自动生成一个 `sk-airouter-...` 并写入配置文件
+- 非交互终端不会进入引导；这种场景下请先手工创建 `openai.json`
 
 ## 配置账号
 
@@ -47,7 +49,7 @@ curl http://127.0.0.1:3009/v1/responses \
 ## 其他命令
 
 说明：
-- `npm start`：启动服务，首次启动后可以在日志里看到管理后台地址和访问令牌
+- `npm start`：启动服务；首次启动且缺少 `openai.json` 时，会先进入创建配置文件引导，然后继续启动
 - `npm run restart`：重启当前服务进程
 - `npm run stop`：停止当前服务进程
 - `npm run logs`：查看服务运行日志，排查启动问题时优先看这里

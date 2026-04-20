@@ -6,6 +6,8 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const runScript = path.resolve(__dirname, '..', 'run.js');
+const openaiScript = path.resolve(__dirname, '..', 'openai.js');
+const exampleConfigFile = path.resolve(__dirname, '..', 'openai.json.example');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-run-'));
@@ -16,6 +18,19 @@ function prepareWorkspace(appScript, initialLog = '', config = { proxy_port: 789
 
   fs.writeFileSync(path.join(cwd, 'openai.json'), `${JSON.stringify(config)}\n`);
   fs.writeFileSync(path.join(cwd, 'openai.js'), appScript);
+
+  if (initialLog) {
+    fs.writeFileSync(path.join(cwd, 'openai.log'), initialLog);
+  }
+
+  return { cwd };
+}
+
+function prepareWorkspaceWithoutConfig(appScript, initialLog = '') {
+  const cwd = makeTempDir();
+
+  fs.writeFileSync(path.join(cwd, 'openai.js'), appScript);
+  fs.copyFileSync(exampleConfigFile, path.join(cwd, 'openai.json.example'));
 
   if (initialLog) {
     fs.writeFileSync(path.join(cwd, 'openai.log'), initialLog);
@@ -36,6 +51,7 @@ function runCommand(args, options) {
       ...options.extraEnv,
     },
     encoding: 'utf8',
+    input: options.input,
   });
 }
 
@@ -165,6 +181,13 @@ test('run.js keeps the 10 second default startup delay and uses a control file i
   assert.match(script, /port=\$\{port\} is already in use by another process/);
   assert.doesNotMatch(script, /\blsof\b/);
   assert.doesNotMatch(script, /STARTUP_CHECK_DELAY_SECONDS=/);
+});
+
+test('openai.js startup logs do not print local or LAN access hints', () => {
+  const script = fs.readFileSync(openaiScript, 'utf8');
+
+  assert.doesNotMatch(script, /本机访问:/);
+  assert.doesNotMatch(script, /局域网\/外网访问:/);
 });
 
 test('start shows only fresh startup logs when the process stays up', () => {
@@ -301,6 +324,80 @@ test('start works without proxy_port and preserves inherited proxy env', () => {
     extraEnv: inheritedProxyEnv,
   });
   assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start creates openai.json from the example template and continues startup with a custom proxy port', () => {
+  const workspace = prepareWorkspaceWithoutConfig(
+    buildManagedAppScript({
+      startupLog: null,
+      extraStartupCode: 'console.log(`port=${process.env.PORT} proxy=${process.env.https_proxy}`);',
+    })
+  );
+
+  const startResult = runCommand(['start'], {
+    ...workspace,
+    input: 'y\n8899\ny\n',
+    extraEnv: {
+      AIROUTER_FORCE_INTERACTIVE: '1',
+    },
+  });
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, /starting/);
+  assert.match(startResult.stdout, /proxy=http:\/\/127\.0\.0\.1:8899/);
+
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'openai.json'), 'utf8'));
+  assert.equal(savedConfig.proxy_port, 8899);
+  assert.equal(savedConfig.apikeys.length, 1);
+  assert.match(savedConfig.apikeys[0], /^sk-airouter-/);
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start uses the default proxy port when the wizard answer is blank', () => {
+  const workspace = prepareWorkspaceWithoutConfig(
+    buildManagedAppScript({
+      startupLog: null,
+      extraStartupCode: 'console.log(`proxy=${process.env.https_proxy}`);',
+    })
+  );
+
+  const startResult = runCommand(['start'], {
+    ...workspace,
+    input: 'y\n\nn\n',
+    extraEnv: {
+      AIROUTER_FORCE_INTERACTIVE: '1',
+    },
+  });
+
+  assert.equal(startResult.status, 0, startResult.stderr);
+  assert.match(startResult.stdout, /proxy=http:\/\/127\.0\.0\.1:7890/);
+
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'openai.json'), 'utf8'));
+  assert.equal(savedConfig.proxy_port, 7890);
+  assert.deepEqual(savedConfig.apikeys, []);
+
+  const stopResult = runCommand(['stop'], workspace);
+  assert.equal(stopResult.status, 0, stopResult.stderr);
+});
+
+test('start fails with a clear message when config is missing in non-interactive mode', () => {
+  const workspace = prepareWorkspaceWithoutConfig(
+    buildManagedAppScript({ startupLog: 'should not start' })
+  );
+
+  const startResult = runCommand(['start'], {
+    ...workspace,
+    extraEnv: {
+      AIROUTER_FORCE_INTERACTIVE: '0',
+    },
+  });
+
+  assert.notEqual(startResult.status, 0);
+  assert.match(startResult.stdout, /openai\.json 不存在/);
+  assert.match(startResult.stdout, /交互终端/);
+  assert.equal(fs.existsSync(path.join(workspace.cwd, 'openai.json')), false);
 });
 
 test('logs prints the latest 100 lines before following new output', () => {

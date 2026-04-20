@@ -1031,8 +1031,6 @@ async function startServer() {
         log('='.repeat(70));
         log('OpenAI 兼容代理服务器已启动');
         log('='.repeat(70));
-        log(`本机访问: ${localBaseUrl}`);
-        log(`局域网/外网访问: 请使用当前机器 IP 和端口 ${PORT} 访问`);
         log(`配置管理: ${localBaseUrl}${buildAdminPath()}`);
         log(`OpenAI 代理: ${localBaseUrl}/v1`);
         log(`Claude 代理: ${localBaseUrl}/claude`);

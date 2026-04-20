@@ -3,15 +3,20 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const net = require('node:net');
+const readline = require('node:readline/promises');
 const { spawn, spawnSync } = require('node:child_process');
+const { parseOpenAiConfigFile } = require('./app/openai-config');
+const { generateRandomSecret } = require('./app/request-auth');
 
 const PID_FILE = 'openai.pid';
 const LOG_FILE = 'openai.log';
 const CONFIG_FILE = 'openai.json';
+const CONFIG_TEMPLATE_FILE = `${CONFIG_FILE}.example`;
 const CONTROL_FILE = 'openai.control.json';
 const CONTROL_REQUEST_FILE = 'openai.control.request.json';
 
 const DEFAULT_PORT = '3009';
+const DEFAULT_PROXY_PORT = 7890;
 const DEFAULT_STARTUP_CHECK_DELAY_MS = 10_000;
 const DEFAULT_POST_START_SETTLE_DELAY_MS = 250;
 const DEFAULT_STARTUP_LOG_WAIT_MS = 2_000;
@@ -42,6 +47,10 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function configExists() {
+  return fs.existsSync(CONFIG_FILE);
+}
+
 function readConfig() {
   return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
 }
@@ -60,6 +69,187 @@ function readConfigValue(key, fallback) {
 
 function getConfiguredPort() {
   return readConfigValue('port', DEFAULT_PORT);
+}
+
+function readTemplateConfig() {
+  if (!fs.existsSync(CONFIG_TEMPLATE_FILE)) {
+    throw new Error(`${CONFIG_TEMPLATE_FILE} 不存在，无法创建 ${CONFIG_FILE}`);
+  }
+
+  const rawTemplate = fs.readFileSync(CONFIG_TEMPLATE_FILE, 'utf8');
+
+  try {
+    return parseOpenAiConfigFile(rawTemplate);
+  } catch (error) {
+    throw new Error(`${CONFIG_TEMPLATE_FILE} 不是合法模板: ${error.message}`);
+  }
+}
+
+function getForcedInteractiveMode() {
+  const forcedValue = process.env.AIROUTER_FORCE_INTERACTIVE;
+  if (forcedValue === '1') {
+    return true;
+  }
+
+  if (forcedValue === '0') {
+    return false;
+  }
+
+  return null;
+}
+
+function canPromptForConfig() {
+  const forcedInteractiveMode = getForcedInteractiveMode();
+  if (forcedInteractiveMode !== null) {
+    return forcedInteractiveMode;
+  }
+
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+function writeJsonFile(filePath, value) {
+  const tempFile = `${filePath}.tmp`;
+  fs.writeFileSync(tempFile, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  fs.renameSync(tempFile, filePath);
+}
+
+function normalizeYesNoAnswer(answer, defaultValue = false) {
+  const normalizedAnswer = String(answer || '').trim().toLowerCase();
+  if (!normalizedAnswer) {
+    return defaultValue;
+  }
+
+  if (['y', 'yes', '1', 'true', '是'].includes(normalizedAnswer)) {
+    return true;
+  }
+
+  if (['n', 'no', '0', 'false', '否'].includes(normalizedAnswer)) {
+    return false;
+  }
+
+  return null;
+}
+
+async function promptYesNo(rl, message, defaultValue = false) {
+  const hint = defaultValue ? 'Y/n' : 'y/N';
+
+  while (true) {
+    const answer = await rl.ask(`${message} (${hint}) `);
+    const normalized = normalizeYesNoAnswer(answer, defaultValue);
+    if (normalized !== null) {
+      return normalized;
+    }
+
+    console.log('请输入 y 或 n');
+  }
+}
+
+function normalizeProxyPortInput(value, fallback = DEFAULT_PROXY_PORT) {
+  const normalizedValue = String(value || '').trim();
+  if (!normalizedValue) {
+    return fallback;
+  }
+
+  if (!/^\d+$/.test(normalizedValue)) {
+    return null;
+  }
+
+  const parsedPort = Number.parseInt(normalizedValue, 10);
+  if (parsedPort < 1 || parsedPort > 65535) {
+    return null;
+  }
+
+  return parsedPort;
+}
+
+async function promptProxyPort(rl, fallback = DEFAULT_PROXY_PORT) {
+  while (true) {
+    const answer = await rl.ask(`请输入本地代理端口（默认 ${fallback}） `);
+    const port = normalizeProxyPortInput(answer, fallback);
+    if (port !== null) {
+      return port;
+    }
+
+    console.log('请输入 1-65535 之间的端口号');
+  }
+}
+
+function createPromptSession() {
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    return {
+      ask(message) {
+        return rl.question(message);
+      },
+      close() {
+        rl.close();
+      },
+    };
+  }
+
+  const scriptedAnswers = fs.readFileSync(0, 'utf8').split(/\r?\n/);
+  let answerIndex = 0;
+
+  return {
+    async ask(message) {
+      process.stdout.write(`${message}\n`);
+      const answer = scriptedAnswers[answerIndex];
+      answerIndex += 1;
+      return answer === undefined ? '' : answer;
+    },
+    close() {},
+  };
+}
+
+async function runConfigWizard() {
+  const templateConfig = readTemplateConfig();
+  const defaultProxyPort = normalizeProxyPortInput(templateConfig.proxy_port, DEFAULT_PROXY_PORT) ?? DEFAULT_PROXY_PORT;
+  const rl = createPromptSession();
+
+  try {
+    console.log(`检测到 ${CONFIG_FILE} 不存在，进入创建配置文件引导。`);
+
+    const shouldEnableProxy = await promptYesNo(rl, '是否启用本地代理端口？', false);
+    const proxyPort = shouldEnableProxy ? await promptProxyPort(rl, defaultProxyPort) : null;
+    const enableApiKey = await promptYesNo(rl, '是否启用入口 apikey 校验？', false);
+
+    const nextConfig = {
+      ...templateConfig,
+      apikeys: enableApiKey ? [generateRandomSecret('sk-airouter-')] : [],
+    };
+
+    if (proxyPort === null) {
+      delete nextConfig.proxy_port;
+    } else {
+      nextConfig.proxy_port = proxyPort;
+    }
+
+    writeJsonFile(CONFIG_FILE, nextConfig);
+    console.log(`已创建 ${CONFIG_FILE}`);
+    if (enableApiKey) {
+      console.log(`已生成入口 apikey: ${nextConfig.apikeys[0]}`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function ensureConfigExists() {
+  if (configExists()) {
+    return;
+  }
+
+  if (!canPromptForConfig()) {
+    throw new Error(
+      `${CONFIG_FILE} 不存在，当前不是交互终端，无法进入创建配置文件引导。请在交互终端执行 npm start，或先手工创建 ${CONFIG_FILE}。`
+    );
+  }
+
+  await runConfigWizard();
 }
 
 function generateControlToken() {
@@ -349,6 +539,13 @@ async function stopExistingTrackedProcess() {
 }
 
 async function start() {
+  try {
+    await ensureConfigExists();
+  } catch (error) {
+    console.log(error.message);
+    return 1;
+  }
+
   const previousState = await stopExistingTrackedProcess();
   if (fs.existsSync(PID_FILE)) {
     return 1;
