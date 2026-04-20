@@ -40,8 +40,6 @@ const {
 const PORT = process.env.PORT || 3009;
 let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
-const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
-const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const MIN_REMAINING_PERCENT = 3;
@@ -798,7 +796,6 @@ function shutdownServer(reason) {
 
     shuttingDown = true;
     log(`${reason}，正在关闭服务器...`);
-    stopControlWatcher();
 
     if (accountManager) {
         accountManager.stopQuotaMonitor();
@@ -824,43 +821,6 @@ function shutdownServer(reason) {
             socket.destroy();
         }
     }, 5_000).unref();
-}
-
-function handleControlFileChange() {
-    if (!CONTROL_REQUEST_FILE || !CONTROL_TOKEN || shuttingDown) {
-        return;
-    }
-
-    let payload;
-    try {
-        payload = JSON.parse(fs.readFileSync(CONTROL_REQUEST_FILE, 'utf8'));
-    } catch (error) {
-        return;
-    }
-
-    if (!payload || payload.action !== 'stop' || payload.token !== CONTROL_TOKEN) {
-        return;
-    }
-
-    fs.rmSync(CONTROL_REQUEST_FILE, { force: true });
-    shutdownServer('收到本地停止请求');
-}
-
-function startControlWatcher() {
-    if (!CONTROL_REQUEST_FILE || !CONTROL_TOKEN) {
-        return;
-    }
-
-    fs.watchFile(CONTROL_REQUEST_FILE, { interval: 250 }, handleControlFileChange);
-    handleControlFileChange();
-}
-
-function stopControlWatcher() {
-    if (!CONTROL_REQUEST_FILE) {
-        return;
-    }
-
-    fs.unwatchFile(CONTROL_REQUEST_FILE, handleControlFileChange);
 }
 
 // ==================== 初始化 ====================
@@ -1076,8 +1036,6 @@ async function startServer() {
             activeSockets.delete(socket);
         });
     });
-
-    startControlWatcher();
 }
 
 if (require.main === module) {

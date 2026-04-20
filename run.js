@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const net = require('node:net');
 const readline = require('node:readline/promises');
@@ -12,8 +11,6 @@ const PID_FILE = 'openai.pid';
 const LOG_FILE = 'openai.log';
 const CONFIG_FILE = 'openai.json';
 const CONFIG_TEMPLATE_FILE = `${CONFIG_FILE}.example`;
-const CONTROL_FILE = 'openai.control.json';
-const CONTROL_REQUEST_FILE = 'openai.control.request.json';
 
 const DEFAULT_PORT = '3009';
 const DEFAULT_PROXY_PORT = 7890;
@@ -252,35 +249,8 @@ async function ensureConfigExists() {
   await runConfigWizard();
 }
 
-function generateControlToken() {
-  return crypto.randomBytes(24).toString('hex');
-}
-
-function readControlState() {
-  if (!fs.existsSync(CONTROL_FILE)) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(CONTROL_FILE, 'utf8'));
-    if (!parsed || typeof parsed !== 'object') {
-      return null;
-    }
-
-    return parsed;
-  } catch (error) {
-    return null;
-  }
-}
-
-function writeControlState(controlState) {
-  fs.writeFileSync(CONTROL_FILE, `${JSON.stringify(controlState, null, 2)}\n`);
-}
-
 function removeRunStateFiles() {
   fs.rmSync(PID_FILE, { force: true });
-  fs.rmSync(CONTROL_FILE, { force: true });
-  fs.rmSync(CONTROL_REQUEST_FILE, { force: true });
 }
 
 function currentPid() {
@@ -445,15 +415,13 @@ async function waitForStartupLogs(port, timeoutMs = STARTUP_LOG_WAIT_MS) {
   return false;
 }
 
-function buildChildEnv(controlState) {
+function buildChildEnv() {
   const proxyPort = readConfigValue('proxy_port', '');
   const port = getConfiguredPort();
   const childEnv = {
     ...process.env,
     CONFIG: CONFIG_FILE,
     PORT: port,
-    AIROUTER_CONTROL_TOKEN: controlState.token,
-    AIROUTER_CONTROL_REQUEST_FILE: CONTROL_REQUEST_FILE,
   };
 
   if (!proxyPort) {
@@ -470,12 +438,12 @@ function buildChildEnv(controlState) {
   };
 }
 
-function spawnApp(controlState) {
+function spawnApp() {
   const logFd = fs.openSync(LOG_FILE, 'w');
   const child = spawn(process.execPath, ['openai.js'], {
     cwd: process.cwd(),
     detached: true,
-    env: buildChildEnv(controlState),
+    env: buildChildEnv(),
     stdio: ['ignore', logFd, logFd],
   });
 
@@ -484,34 +452,9 @@ function spawnApp(controlState) {
   return child.pid;
 }
 
-async function requestControlledShutdown(controlState) {
-  if (!controlState || !controlState.token || !controlState.commandFile) {
-    return false;
-  }
-
-  try {
-    fs.writeFileSync(controlState.commandFile, `${JSON.stringify({
-      action: 'stop',
-      token: controlState.token,
-      requestedAt: Date.now(),
-    }, null, 2)}\n`);
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
-async function stopTrackedProcess(pid, controlState) {
+async function stopTrackedProcess(pid) {
   if (!isPidRunning(pid)) {
     return true;
-  }
-
-  const controlMatchesPid = controlState && String(controlState.pid) === String(pid);
-  if (controlMatchesPid && await requestControlledShutdown(controlState)) {
-    const exited = await waitForPidExit(pid, STOP_WAIT_TIMEOUT_MS);
-    if (exited) {
-      return true;
-    }
   }
 
   return terminatePid(pid);
@@ -519,23 +462,21 @@ async function stopTrackedProcess(pid, controlState) {
 
 async function stopExistingTrackedProcess() {
   if (!fs.existsSync(PID_FILE)) {
-    return { stoppedAny: false, port: null };
+    return false;
   }
 
   const existingPid = currentPid();
-  const controlState = readControlState();
-  const controlPort = controlState && controlState.port ? String(controlState.port) : null;
 
   if (isPidRunning(existingPid)) {
     console.log(`stopping existing pid=${existingPid}`);
-    if (!await stopTrackedProcess(existingPid, controlState)) {
+    if (!await stopTrackedProcess(existingPid)) {
       console.log(`failed to stop existing pid=${existingPid}`);
-      return { stoppedAny: false, port: controlPort };
+      return false;
     }
   }
 
   removeRunStateFiles();
-  return { stoppedAny: true, port: controlPort };
+  return true;
 }
 
 async function start() {
@@ -546,14 +487,14 @@ async function start() {
     return 1;
   }
 
-  const previousState = await stopExistingTrackedProcess();
+  const stoppedExisting = await stopExistingTrackedProcess();
   if (fs.existsSync(PID_FILE)) {
     return 1;
   }
 
   const port = getConfiguredPort();
-  if (!(await waitForPortAvailable(previousState.port || port, STOP_WAIT_TIMEOUT_MS))) {
-    console.log(`port=${previousState.port || port} is still in use`);
+  if (stoppedExisting && !(await waitForPortAvailable(port, STOP_WAIT_TIMEOUT_MS))) {
+    console.log(`port=${port} is still in use`);
     return 1;
   }
 
@@ -562,18 +503,9 @@ async function start() {
     return 1;
   }
 
-  const controlState = {
-    pid: null,
-    port,
-    commandFile: CONTROL_REQUEST_FILE,
-    token: generateControlToken(),
-  };
-
   console.log('starting');
-  const pid = spawnApp(controlState);
-  controlState.pid = pid;
+  const pid = spawnApp();
   fs.writeFileSync(PID_FILE, `${pid}\n`);
-  writeControlState(controlState);
 
   await sleep(STARTUP_CHECK_DELAY_MS);
   await sleep(POST_START_SETTLE_DELAY_MS);
@@ -657,15 +589,12 @@ function logs() {
 
 async function stop() {
   let stoppedAny = false;
-  let trackedPort = null;
 
   if (fs.existsSync(PID_FILE)) {
     const existingPid = currentPid();
-    const controlState = readControlState();
-    trackedPort = controlState && controlState.port ? String(controlState.port) : null;
 
     if (isPidRunning(existingPid)) {
-      if (!await stopTrackedProcess(existingPid, controlState)) {
+      if (!await stopTrackedProcess(existingPid)) {
         console.log(`failed to stop pid=${existingPid}`);
         return 1;
       }
@@ -674,11 +603,6 @@ async function stop() {
     }
 
     removeRunStateFiles();
-  }
-
-  if (trackedPort && !(await waitForPortAvailable(trackedPort, STOP_WAIT_TIMEOUT_MS))) {
-    console.log(`port=${trackedPort} is still in use`);
-    return 1;
   }
 
   console.log(stoppedAny ? 'stopped' : 'not running');

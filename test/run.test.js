@@ -145,41 +145,30 @@ function buildManagedAppScript({
 
   return [
     'const fs = require("node:fs");',
-    'const controlRequestFile = process.env.AIROUTER_CONTROL_REQUEST_FILE;',
-    'const controlToken = process.env.AIROUTER_CONTROL_TOKEN;',
     'let shuttingDown = false;',
-    'function checkControlFile() {',
-    '  if (shuttingDown || !controlRequestFile || !controlToken || !fs.existsSync(controlRequestFile)) {',
+    'function beginShutdown() {',
+    '  if (shuttingDown) {',
     '    return;',
     '  }',
-    '  try {',
-    '    const payload = JSON.parse(fs.readFileSync(controlRequestFile, "utf8"));',
-    '    if (payload.action !== "stop" || payload.token !== controlToken) {',
-    '      return;',
-    '    }',
-    '    shuttingDown = true;',
-    '    fs.rmSync(controlRequestFile, { force: true });',
-    `    ${shutdownBody}`,
-    '  } catch (error) {',
-    '    // Ignore transient file-write races.',
-    '  }',
+    '  shuttingDown = true;',
+    `  ${shutdownBody}`,
     '}',
     ...startupStatements,
-    'setInterval(checkControlFile, 50);',
+    'process.on("SIGTERM", beginShutdown);',
+    'process.on("SIGINT", beginShutdown);',
     'setInterval(() => {}, 1000);',
   ].join('\n');
 }
 
-test('run.js keeps the 10 second default startup delay and uses a control file instead of lsof', () => {
+test('run.js keeps the 10 second default startup delay and does not depend on lsof or control files', () => {
   const script = fs.readFileSync(runScript, 'utf8');
 
   assert.match(script, /const DEFAULT_STARTUP_CHECK_DELAY_MS = 10_000;/);
   assert.match(script, /const DEFAULT_LOG_TAIL_LINES = 100;/);
-  assert.match(script, /const CONTROL_REQUEST_FILE = 'openai\.control\.request\.json';/);
-  assert.match(script, /AIROUTER_CONTROL_TOKEN/);
-  assert.match(script, /AIROUTER_CONTROL_REQUEST_FILE/);
   assert.match(script, /port=\$\{port\} is already in use by another process/);
   assert.doesNotMatch(script, /\blsof\b/);
+  assert.doesNotMatch(script, /openai\.control/);
+  assert.doesNotMatch(script, /AIROUTER_CONTROL_/);
   assert.doesNotMatch(script, /STARTUP_CHECK_DELAY_SECONDS=/);
 });
 
@@ -249,9 +238,12 @@ test('start shows all fresh startup logs instead of truncating to the last 20 li
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 
-test('start passes the configured port from openai.json', () => {
+test('start passes the configured port from openai.json without creating control files', () => {
   const workspace = prepareWorkspace(
-    buildManagedAppScript({ startupLog: null }),
+    buildManagedAppScript({
+      startupLog: null,
+      extraStartupCode: 'console.log(`port=${process.env.PORT}`);',
+    }),
     '',
     { proxy_port: 7890, port: 3456 }
   );
@@ -260,9 +252,9 @@ test('start passes the configured port from openai.json', () => {
 
   assert.equal(startResult.status, 0, startResult.stderr);
   assert.match(startResult.stdout, /^starting\nstarted pid=\d+/);
-
-  const controlState = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'openai.control.json'), 'utf8'));
-  assert.equal(controlState.port, '3456');
+  assert.match(startResult.stdout, /port=3456/);
+  assert.equal(fs.existsSync(path.join(workspace.cwd, 'openai.control.json')), false);
+  assert.equal(fs.existsSync(path.join(workspace.cwd, 'openai.control.request.json')), false);
 
   const stopResult = runCommand(['stop'], workspace);
   assert.equal(stopResult.status, 0, stopResult.stderr);
