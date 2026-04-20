@@ -213,7 +213,7 @@ async function runConfigWizard() {
   try {
     console.log(`检测到 ${CONFIG_FILE} 不存在，进入创建配置文件引导。`);
 
-    const shouldEnableProxy = await promptYesNo(rl, '是否启用本地代理端口？', false);
+    const shouldEnableProxy = await promptYesNo(rl, '是否启用本地代理端口？', true);
     const proxyPort = shouldEnableProxy ? await promptProxyPort(rl, defaultProxyPort) : null;
     const enableApiKey = await promptYesNo(rl, '是否启用入口 apikey 校验？', false);
 

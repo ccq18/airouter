@@ -355,7 +355,7 @@ test('start creates openai.json from the example template and continues startup 
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 
-test('start uses the default proxy port when the wizard answer is blank', () => {
+test('start enables the proxy by default and uses the default proxy port when the first two wizard answers are blank', () => {
   const workspace = prepareWorkspaceWithoutConfig(
     buildManagedAppScript({
       startupLog: null,
@@ -365,7 +365,7 @@ test('start uses the default proxy port when the wizard answer is blank', () => 
 
   const startResult = runCommand(['start'], {
     ...workspace,
-    input: 'y\n\nn\n',
+    input: '\n\nn\n',
     extraEnv: {
       AIROUTER_FORCE_INTERACTIVE: '1',
     },
