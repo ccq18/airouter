@@ -432,6 +432,7 @@
   <main class="page">
     <div class="toolbar">
       <button class="secondary" type="button" id="refreshButton">刷新</button>
+      <button class="secondary" type="button" id="testResponseButton">测试请求</button>
     </div>
 
     <section class="composer">
@@ -489,16 +490,25 @@
 	    <section id="cards"></section>
   </main>
 
+  <script src="/config-admin.js"></script>
   <script>
     const cardsEl = document.getElementById('cards');
     const messageEl = document.getElementById('message');
     const rawJsonInput = document.getElementById('rawJsonInput');
     const addButton = document.getElementById('addButton');
     const refreshButton = document.getElementById('refreshButton');
+    const testResponseButton = document.getElementById('testResponseButton');
     const addApiKeyButton = document.getElementById('addApiKeyButton');
     const apiKeysListEl = document.getElementById('apiKeysList');
     const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
     const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
+    const {
+      buildJsonRequestOptions,
+      parseResponsesApiResponse,
+      buildHelloTestRequest,
+      extractResponseSummary,
+      getPreferredApiKey,
+    } = window.AirouterConfigAdmin;
 
     let snapshot = null;
 
@@ -552,16 +562,6 @@
           <button class="danger" type="button" data-action="delete-apikey" data-index="${index}">删除</button>
         </div>
       `).join('');
-    }
-
-    function withAuthToken(url) {
-      const resolved = new URL(url, window.location.origin);
-
-      if (adminAuthToken) {
-        resolved.searchParams.set('auth_token', adminAuthToken);
-      }
-
-      return `${resolved.pathname}${resolved.search}`;
     }
 
     function runtimeBadges(item) {
@@ -631,17 +631,22 @@
       `;
     }
 
+    function withAuthToken(url) {
+      const resolved = new URL(url, window.location.origin);
+
+      if (adminAuthToken) {
+        resolved.searchParams.set('auth_token', adminAuthToken);
+      }
+
+      return `${resolved.pathname}${resolved.search}`;
+    }
+
     async function requestJson(url, options = {}) {
-      const response = await fetch(withAuthToken(url), {
-        headers: {
-          'Content-Type': 'application/json',
-          ...(options.headers || {}),
-        },
-        ...options,
-      });
+      const response = await fetch(withAuthToken(url), buildJsonRequestOptions(options));
+      const contentType = response.headers.get('content-type') || '';
 
       const text = await response.text();
-      const payload = text ? JSON.parse(text) : null;
+      const payload = parseResponsesApiResponse(text, contentType);
 
       if (!response.ok) {
         const error = new Error(payload?.details || payload?.message || payload?.error || `HTTP ${response.status}`);
@@ -728,6 +733,24 @@
       setMessage('info', '配置项已删除并热重载。');
     }
 
+    async function sendHelloTestRequest() {
+      const preferredApiKey = getPreferredApiKey(snapshot || {});
+      const responsePayload = await requestJson('/v1/responses', {
+        method: 'POST',
+        headers: preferredApiKey ? {
+          Authorization: `Bearer ${preferredApiKey}`,
+        } : {},
+        body: JSON.stringify(buildHelloTestRequest(snapshot || {})),
+      });
+      const responseSummary = extractResponseSummary(responsePayload);
+
+      if (!responseSummary) {
+        throw new Error('测试请求失败：未返回可展示的文本内容');
+      }
+
+      setMessage('info', `测试请求成功：${responseSummary}`);
+    }
+
     addButton.addEventListener('click', async () => {
       addButton.disabled = true;
       try {
@@ -747,6 +770,17 @@
         setMessage('error', error.message);
       } finally {
         addApiKeyButton.disabled = false;
+      }
+    });
+
+    testResponseButton.addEventListener('click', async () => {
+      testResponseButton.disabled = true;
+      try {
+        await sendHelloTestRequest();
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        testResponseButton.disabled = false;
       }
     });
 

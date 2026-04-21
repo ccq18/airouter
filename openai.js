@@ -883,6 +883,10 @@ app.use((req, res, next) => {
     next();
 });
 
+app.get('/config-admin.js', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'config-admin.js'));
+});
+
 app.use('/admin', requireAdminAuthToken);
 app.use('/admin/api', express.json({ limit: '1mb' }));
 

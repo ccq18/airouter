@@ -20,10 +20,8 @@ npm start
 启动后访问启动日志里打印的管理地址，例如 `http://127.0.0.1:3009/admin/configs?auth_token=...`
 ![config_account.png](docs/img/config_account.png) 
 管理页里可以新增随机 `apikey`，配置了apikey则会校验，若所有apikey为空则不校验
-
-执行以下curl,有正常内容返回，就表示airouter已经成功配置 
-
-!注意不要退出登录,退出登录token就失效了，建议在无痕窗口登录gpt后获取登录态
+管理页还提供了一个“测试请求”按钮，点击按钮请求测试即可，有正常内容返回，就表示airouter已经成功配置
+> **注意：** chatgpt 不要退出登录，退出登录后 token 会失效，建议在无痕窗口登录 GPT 后获取登录态
 
 ```
 无api_key
