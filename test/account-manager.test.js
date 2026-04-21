@@ -359,6 +359,14 @@ test('refreshQuotas switches to the next available account when the polled accou
         secondary_window: { used_percent: 20, reset_at: 1713360000 },
       },
     },
+    {
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 30, reset_at: 1713351000 },
+        secondary_window: { used_percent: 35, reset_at: 1713361000 },
+      },
+    },
   ]);
   const { manager, warnings, logs } = createManager(configs, {
     requestBufferedFn: quotaResponses.requestBuffered,
@@ -366,10 +374,61 @@ test('refreshQuotas switches to the next available account when the polled accou
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 1);
+  assert.equal(quotaResponses.getCallCount(), 2);
+  assert.deepEqual(
+    quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
+    ['account-0', 'account-1'],
+  );
   assert.equal(manager.getActiveConfig(), configs[1]);
   assert.match(warnings[0], /账号不可用: #1 account-1 \(remaining_below_3%\)/);
   assert.match(warnings[1], /账号切换: #1 account-1 -> #2 account-2 \(poll\)/);
+  assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
+});
+
+test('refreshQuotas switches away from the active account when the quota check fails', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: false, reason: 'quota_check_failed' }),
+  ];
+  const calls = [];
+  let requestIndex = 0;
+  const requestBufferedFn = requestOptions => {
+    calls.push(requestOptions);
+
+    if (requestIndex === 0) {
+      requestIndex += 1;
+      return Promise.reject(new Error('network down'));
+    }
+
+    requestIndex += 1;
+    return Promise.resolve({
+      statusCode: 200,
+      bodyText: JSON.stringify({
+        rate_limit: {
+          allowed: true,
+          limit_reached: false,
+          primary_window: { used_percent: 25, reset_at: 1713351000 },
+          secondary_window: { used_percent: 30, reset_at: 1713361000 },
+        },
+      }),
+    });
+  };
+  const { manager, warnings, logs } = createManager(configs, {
+    requestBufferedFn,
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.deepEqual(
+    calls.map(call => call.headers['chatgpt-account-id']),
+    ['account-0', 'account-1'],
+  );
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'quota_check_failed');
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(quota_check_failed: network down\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=70%\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
   assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });
 
@@ -407,49 +466,7 @@ test('refreshQuotas still checks all accounts during startup', async () => {
   assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
 });
 
-test('refreshQuotas rechecks one unavailable inactive account during poll and marks it recovered', async () => {
-  const configs = [
-    createConfig(0, { available: true, reason: 'ok' }),
-    createConfig(1, { available: false, reason: 'quota_check_failed' }),
-    createConfig(2, { available: true, reason: 'ok' }),
-  ];
-  const quotaResponses = createBufferedRequestRecorder([
-    {
-      rate_limit: {
-        allowed: true,
-        limit_reached: false,
-        primary_window: { used_percent: 25, reset_at: 1713350000 },
-        secondary_window: { used_percent: 40, reset_at: 1713360000 },
-      },
-    },
-    {
-      rate_limit: {
-        allowed: true,
-        limit_reached: false,
-        primary_window: { used_percent: 20, reset_at: 1713351000 },
-        secondary_window: { used_percent: 30, reset_at: 1713361000 },
-      },
-    },
-  ]);
-  const { manager, warnings, logs } = createManager(configs, {
-    requestBufferedFn: quotaResponses.requestBuffered,
-  });
-
-  await manager.refreshQuotas('poll');
-
-  assert.equal(quotaResponses.getCallCount(), 2);
-  assert.deepEqual(
-    quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-1'],
-  );
-  assert.equal(configs[1].runtime.available, true);
-  assert.equal(configs[1].runtime.reason, 'ok');
-  assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
-  assert.match(warnings[0], /账号恢复可用: #2 account-2 \(remaining=70%\)/);
-  assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
-});
-
-test('refreshQuotas rotates unavailable inactive accounts across polls', async () => {
+test('refreshQuotas only checks the active account when it remains available', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: false, reason: 'quota_check_failed' }),
@@ -464,42 +481,134 @@ test('refreshQuotas rotates unavailable inactive accounts across polls', async (
         secondary_window: { used_percent: 40, reset_at: 1713360000 },
       },
     },
+  ]);
+  const { manager, warnings, logs } = createManager(configs, {
+    requestBufferedFn: quotaResponses.requestBuffered,
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(quotaResponses.getCallCount(), 1);
+  assert.deepEqual(
+    quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
+    ['account-0'],
+  );
+  assert.equal(configs[1].runtime.available, false);
+  assert.equal(configs[1].runtime.reason, 'quota_check_failed');
+  assert.equal(configs[1].runtime.lastCheckedAt, null);
+  assert.equal(configs[2].runtime.available, false);
+  assert.equal(configs[2].runtime.reason, 'quota_check_failed');
+  assert.equal(configs[2].runtime.lastCheckedAt, null);
+  assert.equal(warnings.length, 0);
+  assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
+});
+
+test('refreshQuotas checks candidates in order and stops at the first recovered account', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: false, reason: 'quota_check_failed' }),
+    createConfig(2, { available: false, reason: 'quota_check_failed' }),
+  ];
+  const quotaResponses = createBufferedRequestRecorder([
     {
       rate_limit: {
-        allowed: false,
+        allowed: true,
         limit_reached: false,
-        primary_window: { used_percent: 90, reset_at: 1713351000 },
-        secondary_window: { used_percent: 30, reset_at: 1713361000 },
+        primary_window: { used_percent: 98, reset_at: 1713350000 },
+        secondary_window: { used_percent: 40, reset_at: 1713360000 },
       },
     },
     {
       rate_limit: {
         allowed: true,
         limit_reached: false,
-        primary_window: { used_percent: 24, reset_at: 1713352000 },
-        secondary_window: { used_percent: 41, reset_at: 1713362000 },
+        primary_window: { used_percent: 20, reset_at: 1713351000 },
+        secondary_window: { used_percent: 30, reset_at: 1713361000 },
       },
     },
     {
       rate_limit: {
         allowed: false,
         limit_reached: false,
-        primary_window: { used_percent: 85, reset_at: 1713353000 },
-        secondary_window: { used_percent: 35, reset_at: 1713363000 },
+        primary_window: { used_percent: 85, reset_at: 1713352000 },
+        secondary_window: { used_percent: 35, reset_at: 1713362000 },
       },
     },
   ]);
-  const { manager } = createManager(configs, {
+  const { manager, warnings, logs } = createManager(configs, {
     requestBufferedFn: quotaResponses.requestBuffered,
   });
 
   await manager.refreshQuotas('poll');
-  await manager.refreshQuotas('poll');
 
+  assert.equal(quotaResponses.getCallCount(), 2);
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-1', 'account-0', 'account-2'],
+    ['account-0', 'account-1'],
   );
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'remaining_below_3%');
+  assert.equal(configs[1].runtime.available, true);
+  assert.equal(configs[1].runtime.reason, 'ok');
+  assert.equal(configs[2].runtime.available, false);
+  assert.equal(configs[2].runtime.reason, 'quota_check_failed');
+  assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(remaining_below_3%\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=70%\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
+  assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
+});
+
+test('refreshQuotas checks all accounts when no available account can be found after the current one fails', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: false, reason: 'quota_check_failed' }),
+    createConfig(2, { available: false, reason: 'quota_check_failed' }),
+  ];
+  const quotaResponses = createBufferedRequestRecorder([
+    {
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 98, reset_at: 1713350000 },
+        secondary_window: { used_percent: 40, reset_at: 1713360000 },
+      },
+    },
+    {
+      rate_limit: {
+        allowed: false,
+        limit_reached: false,
+        primary_window: { used_percent: 20, reset_at: 1713351000 },
+        secondary_window: { used_percent: 30, reset_at: 1713361000 },
+      },
+    },
+    {
+      rate_limit: {
+        allowed: false,
+        limit_reached: false,
+        primary_window: { used_percent: 25, reset_at: 1713352000 },
+        secondary_window: { used_percent: 35, reset_at: 1713362000 },
+      },
+    },
+  ]);
+  const { manager, warnings, logs } = createManager(configs, {
+    requestBufferedFn: quotaResponses.requestBuffered,
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(quotaResponses.getCallCount(), 3);
+  assert.deepEqual(
+    quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
+    ['account-0', 'account-1', 'account-2'],
+  );
+  assert.equal(manager.getActiveConfig(), configs[0]);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[1].runtime.available, false);
+  assert.equal(configs[2].runtime.available, false);
+  assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(remaining_below_3%\)/.test(line)), true);
+  assert.equal(warnings.some(line => /没有可用账号，继续使用当前账号 #1 account-1 \(poll\)/.test(line)), true);
+  assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=否/);
 });
 
 test('refreshQuotas releases the monitor lock after a quota timeout', async () => {
@@ -534,6 +643,7 @@ test('refreshQuotas releases the monitor lock after a quota timeout', async () =
 
   await manager.refreshQuotas('poll');
 
+  assert.equal(configs[0].runtime.available, false);
   assert.equal(configs[0].runtime.reason, 'quota_check_failed');
   assert.match(configs[0].runtime.lastError, /quota check timeout after 30ms/);
   assert.equal(calls[0].timeoutMs, 30);

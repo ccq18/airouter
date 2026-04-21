@@ -25,7 +25,6 @@ function createAccountManager(options) {
     : 0;
   let quotaMonitorRunning = false;
   let quotaMonitorTimer = null;
-  let unavailableProbeCursor = -1;
 
   /**
    * 生成日志里使用的账号标识。
@@ -240,42 +239,6 @@ function createAccountManager(options) {
     return configs[activeConfigIndex] || null;
   }
 
-  /**
-   * 轮转选择一个非活动且当前不可用的账号做补充复查，避免永久漏检。
-   */
-  function getNextUnavailableProbeConfig() {
-    if (configs.length <= 1) {
-      return null;
-    }
-
-    const activeConfig = getActiveConfig();
-    const startIndex = unavailableProbeCursor >= 0
-      ? (unavailableProbeCursor + 1) % configs.length
-      : (activeConfigIndex + 1) % configs.length;
-
-    for (let offset = 0; offset < configs.length; offset += 1) {
-      const index = (startIndex + offset) % configs.length;
-      const config = configs[index];
-
-      if (!config || config === activeConfig) {
-        continue;
-      }
-
-      if (!shouldUseQuotaMonitoring(config.type) || !config.runtime.enabled) {
-        continue;
-      }
-
-      if (config.runtime.available !== false) {
-        continue;
-      }
-
-      unavailableProbeCursor = index;
-      return config;
-    }
-
-    return null;
-  }
-
   function withQuotaCheckTimeout(promise) {
     if (!Number.isFinite(quotaCheckTimeoutMs) || quotaCheckTimeoutMs <= 0) {
       return promise;
@@ -362,7 +325,7 @@ function createAccountManager(options) {
 
       applyQuotaPayload(config, JSON.parse(result.bodyText), { allowSwitch });
     } catch (err) {
-      config.runtime.available = Boolean(config.runtime.available);
+      config.runtime.available = false;
       config.runtime.reason = 'quota_check_failed';
       config.runtime.lastCheckedAt = now();
       config.runtime.lastError = err.message;
@@ -372,7 +335,50 @@ function createAccountManager(options) {
   }
 
   /**
-   * 轮询额度；后台轮询检查当前账号并轮转复查一个不可用的非活动账号，启动阶段仍会全量刷新。
+   * 刷新单个账号并按状态变化输出日志。
+   */
+  async function refreshSingleConfigWithLogging(config, reason) {
+    const previousAvailability = config.runtime.available;
+    const previousReason = config.runtime.reason;
+
+    await checkSingleAccountQuota(config, { allowSwitch: false });
+
+    const availabilityChanged = previousAvailability !== config.runtime.available || previousReason !== config.runtime.reason;
+    if (availabilityChanged && !config.runtime.available && reason !== 'startup') {
+      warn(`账号不可用: ${getAccountLabel(config)} (${config.runtime.reason}${config.runtime.lastError ? `: ${config.runtime.lastError}` : ''})`);
+    } else if (availabilityChanged && config.runtime.available && previousAvailability === false && reason !== 'startup') {
+      warn(`账号恢复可用: ${getAccountLabel(config)} (remaining=${config.runtime.remainingPercent ?? 'unknown'}%)`);
+    }
+  }
+
+  /**
+   * 从当前账号之后按顺序刷新后续账号，找到第一个可用账号即停止。
+   */
+  async function refreshNextAvailableConfigWithLogging(reason) {
+    if (configs.length <= 1) {
+      return null;
+    }
+
+    for (let offset = 1; offset < configs.length; offset += 1) {
+      const index = (activeConfigIndex + offset) % configs.length;
+      const config = configs[index];
+
+      if (!config) {
+        continue;
+      }
+
+      await refreshSingleConfigWithLogging(config, reason);
+
+      if (isConfigAvailable(config)) {
+        return config;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 轮询额度；后台轮询优先检查当前活动账号，当前失效后再按顺序刷新后续账号，直到找到下一个可用账号；若找不到，则本轮会把所有账号都刷新一遍。启动阶段仍会全量刷新。
    */
   async function refreshQuotas(reason = 'poll') {
     if (!shouldUseQuotaMonitoring(configType)) {
@@ -385,22 +391,20 @@ function createAccountManager(options) {
 
     quotaMonitorRunning = true;
     const previousActiveIndex = activeConfigIndex;
-    const configsToCheck = reason === 'poll'
-      ? [getActiveConfig(), getNextUnavailableProbeConfig()].filter((config, index, array) => config && array.indexOf(config) === index)
-      : configs;
 
     try {
-      for (const config of configsToCheck) {
-        const previousAvailability = config.runtime.available;
-        const previousReason = config.runtime.reason;
+      if (reason === 'poll') {
+        const currentConfig = getActiveConfig();
 
-        await checkSingleAccountQuota(config, { allowSwitch: false });
-
-        const availabilityChanged = previousAvailability !== config.runtime.available || previousReason !== config.runtime.reason;
-        if (availabilityChanged && !config.runtime.available && reason !== 'startup') {
-          warn(`账号不可用: ${getAccountLabel(config)} (${config.runtime.reason}${config.runtime.lastError ? `: ${config.runtime.lastError}` : ''})`);
-        } else if (availabilityChanged && config.runtime.available && previousAvailability === false && reason !== 'startup') {
-          warn(`账号恢复可用: ${getAccountLabel(config)} (remaining=${config.runtime.remainingPercent ?? 'unknown'}%)`);
+        if (currentConfig) {
+          await refreshSingleConfigWithLogging(currentConfig, reason);
+          if (!isConfigAvailable(currentConfig)) {
+            await refreshNextAvailableConfigWithLogging(reason);
+          }
+        }
+      } else {
+        for (const config of configs) {
+          await refreshSingleConfigWithLogging(config, reason);
         }
       }
 
