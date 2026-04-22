@@ -115,6 +115,22 @@
     };
   }
 
+  function buildConfigSnapshotRequest(forceRefresh = false) {
+    if (forceRefresh) {
+      return {
+        url: '/admin/api/configs/refresh',
+        options: {
+          method: 'POST',
+        },
+      };
+    }
+
+    return {
+      url: '/admin/api/configs',
+      options: {},
+    };
+  }
+
   function getPreferredApiKey(snapshot) {
     const apikeys = Array.isArray(snapshot && snapshot.apikeys) ? snapshot.apikeys : [];
     return typeof apikeys[0] === 'string' ? apikeys[0] : '';
@@ -164,6 +180,7 @@
   }
 
   const exported = {
+    buildConfigSnapshotRequest,
     buildJsonRequestOptions,
     parseResponsesApiResponse,
     getPreferredApiKey,

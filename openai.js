@@ -406,6 +406,18 @@ function buildConfigAdminResponse() {
     };
 }
 
+async function refreshConfigAdminResponse(options = {}) {
+    const manager = options.accountManager || accountManager;
+    const resolvedConfigType = options.configType || configType;
+    const buildResponse = options.buildResponse || buildConfigAdminResponse;
+
+    if (manager && shouldUseQuotaMonitoring(resolvedConfigType)) {
+        await manager.refreshQuotas('admin_refresh');
+    }
+
+    return buildResponse();
+}
+
 function parseConfigIndex(value) {
     const index = Number(value);
 
@@ -905,6 +917,17 @@ app.get('/admin/api/configs', (req, res) => {
     }
 });
 
+app.post('/admin/api/configs/refresh', async (req, res) => {
+    try {
+        res.json(await refreshConfigAdminResponse());
+    } catch (err) {
+        res.status(500).json({
+            error: '刷新额度失败',
+            details: err.message
+        });
+    }
+});
+
 app.post('/admin/api/configs', async (req, res) => {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
@@ -1107,5 +1130,6 @@ module.exports = {
     LOCAL_ONLY_AUTH_HEADERS,
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
+    refreshConfigAdminResponse,
     startServer
 };

@@ -503,6 +503,7 @@
     const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
     const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
     const {
+      buildConfigSnapshotRequest,
       buildJsonRequestOptions,
       parseResponsesApiResponse,
       buildHelloTestRequest,
@@ -657,9 +658,10 @@
       return payload;
     }
 
-    async function loadSnapshot(message = '') {
+    async function loadSnapshot(message = '', options = {}) {
       try {
-        snapshot = await requestJson('/admin/api/configs');
+        const request = buildConfigSnapshotRequest(Boolean(options.forceRefresh));
+        snapshot = await requestJson(request.url, request.options);
         renderHeader(snapshot);
         renderCards(snapshot);
         setMessage(message ? 'info' : '', message);
@@ -787,7 +789,7 @@
     refreshButton.addEventListener('click', async () => {
       refreshButton.disabled = true;
       try {
-        await loadSnapshot('已刷新配置状态。');
+        await loadSnapshot('已刷新所有账号额度状态。', { forceRefresh: true });
       } finally {
         refreshButton.disabled = false;
       }

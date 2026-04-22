@@ -2,12 +2,35 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildConfigSnapshotRequest,
   buildHelloTestRequest,
   buildJsonRequestOptions,
   parseResponsesApiResponse,
   getPreferredApiKey,
   extractResponseSummary,
 } = require('../public/config-admin.js');
+
+test('buildConfigSnapshotRequest uses GET when only loading the latest snapshot', () => {
+  assert.deepEqual(
+    buildConfigSnapshotRequest(),
+    {
+      url: '/admin/api/configs',
+      options: {},
+    },
+  );
+});
+
+test('buildConfigSnapshotRequest uses POST refresh endpoint when forcing a full quota refresh', () => {
+  assert.deepEqual(
+    buildConfigSnapshotRequest(true),
+    {
+      url: '/admin/api/configs/refresh',
+      options: {
+        method: 'POST',
+      },
+    },
+  );
+});
 
 test('buildHelloTestRequest uses the configured Claude Code model and fixed hello input', () => {
   const requestBody = buildHelloTestRequest({
