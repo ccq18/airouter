@@ -172,6 +172,7 @@ test('account manager does not expose internal helper methods', () => {
   const { manager } = createManager([createConfig(0)]);
 
   assert.equal(manager.selectConfig, undefined);
+  assert.equal(manager.findNextAvailableConfig, undefined);
   assert.equal(manager.getRuntimeSummary, undefined);
   assert.equal(manager.evaluateQuotaPayload, undefined);
   assert.equal(manager.applyQuotaState, undefined);
@@ -297,6 +298,30 @@ test('applyQuotaPayload marks remaining below threshold as unavailable', () => {
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
+test('applyQuotaPayload does not mark the account unavailable when only weekly quota is below threshold', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  manager.applyQuotaPayload(configs[0], {
+    rate_limit: {
+      allowed: true,
+      limit_reached: false,
+      primary_window: { used_percent: 50, reset_at: 1713350000 },
+      secondary_window: { used_percent: 98, reset_at: 1713360000 },
+    },
+  });
+
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.remainingPercent, 50);
+  assert.equal(configs[0].runtime.primaryRemainingPercent, 50);
+  assert.equal(configs[0].runtime.secondaryRemainingPercent, 2);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
 test('applyQuotaPayload switches away from the active account when it becomes unavailable', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
@@ -315,6 +340,47 @@ test('applyQuotaPayload switches away from the active account when it becomes un
 
   assert.equal(manager.getActiveConfig(), configs[1]);
   assert.match(warnings[0], /账号切换: #1 account-1 -> #2 account-2 \(quota_update\)/);
+});
+
+test('markConfigUnavailable switches away from the active account', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager, warnings } = createManager(configs);
+
+  const selected = manager.markConfigUnavailable(configs[0], 'responses_usage_limit_reached', {
+    lastError: 'usage_limit_reached',
+    switchReason: 'responses_failover',
+  });
+
+  assert.equal(selected, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'responses_usage_limit_reached');
+  assert.equal(configs[0].runtime.lastError, 'usage_limit_reached');
+  assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
+  assert.match(warnings[0], /账号切换: #1 account-1 -> #2 account-2 \(responses_failover\)/);
+});
+
+test('markConfigUnavailable keeps the current account when no alternative is available', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+  ];
+  const { manager, warnings } = createManager(configs);
+
+  const selected = manager.markConfigUnavailable(configs[0], 'responses_insufficient_quota', {
+    lastError: 'insufficient_quota',
+    switchReason: 'responses_failover',
+  });
+
+  assert.equal(selected, configs[0]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'responses_insufficient_quota');
+  assert.equal(configs[0].runtime.lastError, 'insufficient_quota');
+  assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
+  assert.match(warnings[0], /没有可用账号，继续使用当前账号 #1 account-1 \(responses_failover\)/);
 });
 
 test('refreshQuotas logs the active account summary after a poll', async () => {
@@ -427,7 +493,7 @@ test('refreshQuotas switches away from the active account when the quota check f
   assert.equal(configs[0].runtime.reason, 'quota_check_failed');
   assert.equal(manager.getActiveConfig(), configs[1]);
   assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(quota_check_failed: network down\)/.test(line)), true);
-  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=70%\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=75%\)/.test(line)), true);
   assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
   assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });
@@ -554,7 +620,7 @@ test('refreshQuotas checks candidates in order and stops at the first recovered 
   assert.equal(configs[2].runtime.available, false);
   assert.equal(configs[2].runtime.reason, 'quota_check_failed');
   assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(remaining_below_3%\)/.test(line)), true);
-  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=70%\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=80%\)/.test(line)), true);
   assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
   assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });

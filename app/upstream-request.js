@@ -537,5 +537,6 @@ async function requestBuffered(
 
 module.exports = {
   createUpstreamRequest,
+  consumeResponseBody,
   requestBuffered,
 };

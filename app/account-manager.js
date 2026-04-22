@@ -72,6 +72,9 @@ function createAccountManager(options) {
       missing_credentials: '缺少凭证',
       rate_limit_not_allowed: '额度不可用',
       rate_limit_reached: '额度已用尽',
+      responses_insufficient_quota: 'responses 配额不足',
+      responses_usage_limit_reached: 'responses 窗口额度已用尽',
+      responses_usage_not_included: 'responses 套餐不支持',
       [`remaining_below_${minRemainingPercent}%`]: `剩余额度低于 ${minRemainingPercent}%`,
       quota_check_failed: '额度检查失败',
     };
@@ -145,8 +148,10 @@ function createAccountManager(options) {
     const rateLimit = payload && typeof payload === 'object' ? payload.rate_limit || {} : {};
     const primaryRemainingPercent = computeRemainingPercent(rateLimit.primary_window);
     const secondaryRemainingPercent = computeRemainingPercent(rateLimit.secondary_window);
-    const remainingValues = [primaryRemainingPercent, secondaryRemainingPercent].filter(value => value !== null);
-    const remainingPercent = remainingValues.length > 0 ? Math.min(...remainingValues) : null;
+    // 3% 阈值和对外汇总口径都跟随主额度窗口；周额度仅用于展示。
+    const remainingPercent = primaryRemainingPercent !== null
+      ? primaryRemainingPercent
+      : secondaryRemainingPercent;
 
     let available = true;
     let reason = 'ok';
@@ -157,7 +162,7 @@ function createAccountManager(options) {
     } else if (rateLimit.limit_reached === true) {
       available = false;
       reason = 'rate_limit_reached';
-    } else if (remainingPercent !== null && remainingPercent < minRemainingPercent) {
+    } else if (primaryRemainingPercent !== null && primaryRemainingPercent < minRemainingPercent) {
       available = false;
       reason = `remaining_below_${minRemainingPercent}%`;
     }
@@ -202,6 +207,32 @@ function createAccountManager(options) {
 
     if (allowSwitch && config === getActiveConfig()) {
       return ensureActiveConfig('quota_update');
+    }
+
+    return config;
+  }
+
+  /**
+   * 在非额度查询场景下，将账号直接标记为不可用，并按需切换活动账号。
+   */
+  function markConfigUnavailable(config, reason, options = {}) {
+    const {
+      allowSwitch = config === getActiveConfig(),
+      lastError = null,
+      switchReason = 'runtime_unavailable',
+    } = options;
+
+    if (!config || !config.runtime) {
+      return getActiveConfig();
+    }
+
+    config.runtime.available = false;
+    config.runtime.reason = reason;
+    config.runtime.lastCheckedAt = now();
+    config.runtime.lastError = lastError;
+
+    if (allowSwitch && config === getActiveConfig()) {
+      return ensureActiveConfig(switchReason);
     }
 
     return config;
@@ -457,6 +488,7 @@ function createAccountManager(options) {
     getActiveConfig,
     getAccountStatus,
     applyQuotaPayload,
+    markConfigUnavailable,
   };
 }
 

@@ -6,11 +6,19 @@ const fs = require('node:fs');
 const path = require('path');
 const zlib = require('zlib');
 const express = require('express');
-const { createUpstreamRequest } = require('./app/upstream-request');
+const { createUpstreamRequest, consumeResponseBody } = require('./app/upstream-request');
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
-const { normalizeResponsesRequestBody } = require('./app/responses-defaults');
+const { normalizeResponsesRequestBody, isResponsesPath } = require('./app/responses-defaults');
 const { createClaudeMessagesHandler } = require('./app/claude-messages-handler');
 const { createAccountManager } = require('./app/account-manager');
+const {
+    applyResponsesFailoverRequestHeaders,
+    classifyRetryableResponsesHttpError,
+    createResponsesEventStreamInspector,
+    drainAbandonedResponse,
+    isInspectableResponsesEventStream,
+    normalizeContentEncoding,
+} = require('./app/responses-failover');
 const {
     resolveClaudeCodeOptions,
     createRuntimeConfigs,
@@ -255,6 +263,232 @@ function getCurrentTimestamp() {
 
 function getGatewayStatusCode(err) {
     return err && err.code === 'ETIMEDOUT' ? 504 : 502;
+}
+
+function getHeaderValue(headers, headerName) {
+    const normalizedTarget = String(headerName || '').toLowerCase();
+
+    for (const [name, value] of Object.entries(headers || {})) {
+        if (String(name).toLowerCase() === normalizedTarget) {
+            if (Array.isArray(value)) {
+                return value.join(', ');
+            }
+
+            return typeof value === 'undefined' ? '' : String(value);
+        }
+    }
+
+    return '';
+}
+
+function canAttemptResponsesFailover(config, requestUrl, attempt) {
+    return Boolean(
+        accountManager &&
+        config &&
+        config.type === 'token' &&
+        Number(attempt || 0) < 1 &&
+        isResponsesPath(requestUrl)
+    );
+}
+
+function isResponsesFailoverInspectionCandidate(statusCode, headers) {
+    return Number(statusCode) === 429 || isInspectableResponsesEventStream(headers);
+}
+
+function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) {
+    const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders);
+    res.flushHeaders();
+
+    if (!res.writableEnded) {
+        res.end(bodyBuffer);
+    }
+
+    return responseMeta;
+}
+
+async function inspectResponsesEventStream(response) {
+    const inspector = createResponsesEventStreamInspector();
+    const bufferedChunks = [];
+    const contentEncoding = normalizeContentEncoding(getHeaderValue(response.headers, 'content-encoding'));
+    let decoder = null;
+
+    if (contentEncoding === 'br') {
+        decoder = zlib.createBrotliDecompress();
+    } else if (contentEncoding === 'gzip') {
+        decoder = zlib.createGunzip();
+    } else if (contentEncoding === 'deflate') {
+        decoder = zlib.createInflate();
+    }
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+
+        function cleanup() {
+            response.removeListener('data', handleData);
+            response.removeListener('end', handleEnd);
+            response.removeListener('error', handleError);
+            response.removeListener('close', handleClose);
+
+            if (decoder) {
+                decoder.removeListener('data', handleDecodedData);
+                decoder.removeListener('end', handleDecodedEnd);
+                decoder.removeListener('error', handleDecodedError);
+                decoder.destroy();
+                decoder = null;
+            }
+        }
+
+        function settle(result) {
+            if (settled) {
+                return;
+            }
+
+            settled = true;
+            cleanup();
+            response.pause();
+            resolve(result);
+        }
+
+        function rejectWith(error) {
+            if (settled) {
+                return;
+            }
+
+            settled = true;
+            cleanup();
+            reject(error);
+        }
+
+        function handleData(chunk) {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            bufferedChunks.push(buffer);
+
+            if (decoder) {
+                decoder.write(buffer);
+                return;
+            }
+
+            handleDecodedData(buffer);
+        }
+
+        function handleEnd() {
+            if (decoder) {
+                decoder.end();
+                return;
+            }
+
+            handleDecodedEnd();
+        }
+
+        function handleDecodedData(chunk) {
+            const decision = inspector.push(chunk);
+
+            if (decision.action === 'pending') {
+                return;
+            }
+
+            settle({
+                decision,
+                bufferedChunks,
+                ended: false,
+            });
+        }
+
+        function handleDecodedEnd() {
+            settle({
+                decision: inspector.finish(),
+                bufferedChunks,
+                ended: true,
+            });
+        }
+
+        function handleDecodedError() {
+            settle({
+                decision: { action: 'pass' },
+                bufferedChunks,
+                ended: false,
+            });
+        }
+
+        function handleError(err) {
+            rejectWith(err);
+        }
+
+        function handleClose() {
+            if (!response.complete) {
+                rejectWith(response.errored || new Error('response closed before completion'));
+            }
+        }
+
+        response.pause();
+        response.on('data', handleData);
+        response.on('end', handleEnd);
+        response.on('error', handleError);
+        response.on('close', handleClose);
+
+        if (decoder) {
+            decoder.on('data', handleDecodedData);
+            decoder.on('end', handleDecodedEnd);
+            decoder.on('error', handleDecodedError);
+        }
+
+        response.resume();
+    });
+}
+
+async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders) {
+    if (Number(statusCode) === 429) {
+        const bodyBuffer = await consumeResponseBody(response);
+        const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
+        const classification = classifyRetryableResponsesHttpError({
+            statusCode,
+            bodyText,
+        });
+
+        if (classification) {
+            return {
+                action: 'retry',
+                classification,
+                forwardMode: 'buffered',
+                bodyBuffer,
+            };
+        }
+
+        return {
+            action: 'forward-buffered',
+            bodyBuffer,
+        };
+    }
+
+    if (isInspectableResponsesEventStream(rawHeaders)) {
+        const streamInspection = await inspectResponsesEventStream(response);
+
+        if (streamInspection.decision.action === 'retry') {
+            return {
+                action: 'retry',
+                classification: streamInspection.decision,
+                forwardMode: streamInspection.ended ? 'buffered' : 'stream',
+                bodyBuffer: streamInspection.ended ? Buffer.concat(streamInspection.bufferedChunks) : null,
+                initialChunks: streamInspection.bufferedChunks,
+            };
+        }
+
+        if (streamInspection.ended) {
+            return {
+                action: 'forward-buffered',
+                bodyBuffer: Buffer.concat(streamInspection.bufferedChunks),
+            };
+        }
+
+        return {
+            action: 'forward-stream',
+            initialChunks: streamInspection.bufferedChunks,
+        };
+    }
+
+    return {
+        action: 'skip',
+    };
 }
 
 function createClaudeMessagesRequestHandler() {
@@ -632,9 +866,13 @@ function applyResponseHeaders(res, statusCode, rawHeaders) {
     };
 }
 
-function proxyRequest(req, res, config, body, originalUrl) {
+function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
-    const headers = buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined);
+    const failoverAttempt = Number(options.failoverAttempt || 0);
+    const headers = applyResponsesFailoverRequestHeaders(
+        buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined),
+        req.url
+    );
     logProxyRequestSnapshot(req, originalUrl, req.url, config, headers, hasBufferedBody ? body : Buffer.alloc(0));
     req.headers = headers;
     const targetUrl = new URL(req.url, config.baseUrl).toString();
@@ -654,37 +892,46 @@ function proxyRequest(req, res, config, body, originalUrl) {
     let upstreamResponseHeaders = {};
     let upstreamResponse = null;
 
-    upstream.responsePromise.then(response => {
-        upstreamResponse = response;
-        const statusCode = Number(response.statusCode || 502);
-        const responseMeta = applyResponseHeaders(res, statusCode, response.headers);
+    function handleQuotaUsageResponseComplete() {
+        if (!shouldLogQuotaUsage) {
+            return;
+        }
+
+        try {
+            const payloadText = decodeResponseBody(
+                Buffer.concat(responseBodyChunks),
+                upstreamResponseHeaders['content-encoding']
+            );
+            const payload = JSON.parse(payloadText);
+            accountManager.applyQuotaPayload(config, payload);
+            log(`额度信息: ${accountManager.getAccountStatus(config).summaryLine}`);
+        } catch (err) {
+            warn(`额度信息解析失败: ${accountManager.getAccountStatus(config).label} (${err.message})`);
+        }
+    }
+
+    function startForwardingResponse(response, statusCode, rawHeaders, initialChunks = []) {
+        const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders);
         upstreamResponseHeaders = responseMeta.headers;
         headersApplied = true;
         res.flushHeaders();
 
-        response.on('data', chunk => {
+        const writeChunk = chunk => {
             if (shouldLogQuotaUsage) {
                 responseBodyChunks.push(chunk);
             }
             res.write(chunk);
-        });
+        };
+
+        for (const chunk of initialChunks) {
+            writeChunk(chunk);
+        }
+
+        response.on('data', writeChunk);
 
         response.on('end', () => {
             responseFinished = true;
-
-            if (shouldLogQuotaUsage) {
-                try {
-                    const payloadText = decodeResponseBody(
-                        Buffer.concat(responseBodyChunks),
-                        upstreamResponseHeaders['content-encoding']
-                    );
-                    const payload = JSON.parse(payloadText);
-                    accountManager.applyQuotaPayload(config, payload);
-                    log(`额度信息: ${accountManager.getAccountStatus(config).summaryLine}`);
-                } catch (err) {
-                    warn(`额度信息解析失败: ${accountManager.getAccountStatus(config).label} (${err.message})`);
-                }
-            }
+            handleQuotaUsageResponseComplete();
 
             if (!res.writableEnded) {
                 res.end();
@@ -698,9 +945,9 @@ function proxyRequest(req, res, config, body, originalUrl) {
 
             error('代理请求失败:', err.message);
             if (!res.headersSent) {
-                const statusCode = getGatewayStatusCode(err);
-                res.status(statusCode).json({
-                    error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
+                const gatewayStatusCode = getGatewayStatusCode(err);
+                res.status(gatewayStatusCode).json({
+                    error: gatewayStatusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                     message: err.message
                 });
                 return;
@@ -710,6 +957,70 @@ function proxyRequest(req, res, config, body, originalUrl) {
                 res.end();
             }
         });
+
+        response.resume();
+    }
+
+    upstream.responsePromise.then(async response => {
+        upstreamResponse = response;
+        const statusCode = Number(response.statusCode || 502);
+        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url, failoverAttempt)
+            && isResponsesFailoverInspectionCandidate(statusCode, response.headers);
+
+        if (shouldInspectResponses) {
+            const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers);
+
+            if (inspection.action === 'retry') {
+                warn(`responses 自动切号: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
+                const nextConfig = accountManager.markConfigUnavailable(config, inspection.classification.reason, {
+                    lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                    switchReason: 'responses_failover',
+                });
+
+                if (!requestClosed && nextConfig && nextConfig !== config) {
+                    responseFinished = true;
+                    void drainAbandonedResponse(response);
+                    proxyRequest(req, res, nextConfig, body, originalUrl, {
+                        failoverAttempt: failoverAttempt + 1,
+                    });
+                    return;
+                }
+
+                if (inspection.forwardMode === 'buffered') {
+                    upstreamResponseHeaders = writeBufferedUpstreamResponse(
+                        res,
+                        statusCode,
+                        response.headers,
+                        inspection.bodyBuffer || Buffer.alloc(0)
+                    ).headers;
+                    headersApplied = true;
+                    responseFinished = true;
+                    return;
+                }
+
+                startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
+                return;
+            }
+
+            if (inspection.action === 'forward-buffered') {
+                upstreamResponseHeaders = writeBufferedUpstreamResponse(
+                    res,
+                    statusCode,
+                    response.headers,
+                    inspection.bodyBuffer || Buffer.alloc(0)
+                ).headers;
+                headersApplied = true;
+                responseFinished = true;
+                return;
+            }
+
+            if (inspection.action === 'forward-stream') {
+                startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
+                return;
+            }
+        }
+
+        startForwardingResponse(response, statusCode, response.headers);
     }).catch(err => {
         if (requestClosed) {
             return;
