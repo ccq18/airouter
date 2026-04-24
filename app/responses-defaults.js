@@ -8,6 +8,10 @@ const RESPONSES_DEFAULTS = {
     include: []
 };
 
+const RESPONSES_MODEL_ALIASES = {
+    'gpt-5.4-mini': 'gpt-5.5'
+};
+
 function isResponsesPath(requestPath) {
     if (typeof requestPath !== 'string' || requestPath.length === 0) {
         return false;
@@ -22,14 +26,21 @@ function normalizeResponsesRequestBody(requestPath, body) {
         return body;
     }
 
-    return {
+    const normalizedBody = {
         ...RESPONSES_DEFAULTS,
         ...body
     };
+
+    if (RESPONSES_MODEL_ALIASES[body.model]) {
+        normalizedBody.model = RESPONSES_MODEL_ALIASES[body.model];
+    }
+
+    return normalizedBody;
 }
 
 module.exports = {
     RESPONSES_DEFAULTS,
+    RESPONSES_MODEL_ALIASES,
     isResponsesPath,
     normalizeResponsesRequestBody
 };
