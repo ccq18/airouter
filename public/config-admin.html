@@ -469,6 +469,22 @@
             <div id="apiKeysList" class="key-list"></div>
           </div>
 
+          <div class="composer-head">
+            <div class="composer-title">Responses 设置</div>
+          </div>
+          <p>这里可以配置 `/v1/responses` 的模型别名映射。键匹配时忽略大小写，保存后会立即热重载。</p>
+          <div class="settings-panel">
+            <div class="field">
+              <label class="field-label" for="responsesModelAliasesInput">responses.model_aliases</label>
+              <textarea id="responsesModelAliasesInput" spellcheck="false" placeholder='{
+  "gpt-5.2": "gpt-5.5"
+}'></textarea>
+            </div>
+            <div class="actions">
+              <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
+            </div>
+          </div>
+
 	          <div class="composer-head">
 	            <div class="composer-title">新增配置项</div>
 	          </div>
@@ -499,8 +515,10 @@
     const refreshButton = document.getElementById('refreshButton');
     const testResponseButton = document.getElementById('testResponseButton');
     const addApiKeyButton = document.getElementById('addApiKeyButton');
+    const saveResponsesSettingsButton = document.getElementById('saveResponsesSettingsButton');
     const apiKeysListEl = document.getElementById('apiKeysList');
     const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
+    const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
     const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
     const {
       buildConfigSnapshotRequest,
@@ -508,6 +526,8 @@
       parseResponsesApiResponse,
       buildHelloTestRequest,
       extractResponseSummary,
+      formatResponsesModelAliasesInput,
+      parseResponsesModelAliasesInput,
       getPreferredApiKey,
     } = window.AirouterConfigAdmin;
 
@@ -546,6 +566,7 @@
       }
 
       renderApiKeys(apikeys);
+      responsesModelAliasesInput.value = formatResponsesModelAliasesInput(data);
     }
 
     function renderApiKeys(apikeys) {
@@ -705,6 +726,22 @@
       setMessage('info', `已新增 apikey: ${result.generated_apikey}`);
     }
 
+    async function saveResponsesSettings() {
+      const result = await requestJson('/admin/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          responses: {
+            model_aliases: parseResponsesModelAliasesInput(responsesModelAliasesInput.value),
+          },
+        }),
+      });
+
+      snapshot = result;
+      renderHeader(snapshot);
+      renderCards(snapshot);
+      setMessage('info', 'Responses 模型映射已保存并热重载。');
+    }
+
     async function deleteApiKey(index) {
       if (!window.confirm('确认删除这个 apikey 吗？')) {
         return;
@@ -772,6 +809,17 @@
         setMessage('error', error.message);
       } finally {
         addApiKeyButton.disabled = false;
+      }
+    });
+
+    saveResponsesSettingsButton.addEventListener('click', async () => {
+      saveResponsesSettingsButton.disabled = true;
+      try {
+        await saveResponsesSettings();
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        saveResponsesSettingsButton.disabled = false;
       }
     });
 

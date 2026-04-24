@@ -317,6 +317,7 @@ function createClaudeMessagesHandler({
     log = () => {},
     error = () => {},
     logRequestSnapshot = null,
+    responsesOptions = { modelAliases: {} },
     upstreamModel = 'gpt-5.4',
     reasoningEffort = 'high',
     clientVersion = '0.0.1',
@@ -371,6 +372,7 @@ function createClaudeMessagesHandler({
             responsesRequest = transformClaudeMessagesRequest(claudeRequest, {
                 model: upstreamModel,
                 reasoningEffort,
+                responsesOptions,
                 stream: true,
                 includeMaxOutputTokens: false
             });

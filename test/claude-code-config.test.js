@@ -2,7 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { transformClaudeMessagesRequest } = require('../app/claude-responses-compat');
-const { parseOpenAiConfigFile, resolveClaudeCodeOptions, createRuntimeConfigs } = require('../app/openai-config');
+const {
+  parseOpenAiConfigFile,
+  resolveClaudeCodeOptions,
+  resolveResponsesOptions,
+  createRuntimeConfigs,
+} = require('../app/openai-config');
 
 function createBaseConfig(extra = {}) {
   return {
@@ -57,6 +62,38 @@ test('parseOpenAiConfigFile accepts none and minimal reasoning_effort values', (
 
   assert.equal(resolveClaudeCodeOptions(parsedWithNone).reasoningEffort, 'none');
   assert.equal(resolveClaudeCodeOptions(parsedWithMinimal).reasoningEffort, 'minimal');
+});
+
+test('resolveResponsesOptions normalizes configured model aliases for case-insensitive lookup', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+    responses: {
+      model_aliases: {
+        'GPT-5.4-MINI': 'gpt-5.5',
+        '  O3-MINI  ': 'gpt-5.4',
+      },
+    },
+  })));
+
+  assert.deepEqual(resolveResponsesOptions(parsed), {
+    modelAliases: {
+      'gpt-5.4-mini': 'gpt-5.5',
+      'o3-mini': 'gpt-5.4',
+    },
+  });
+});
+
+test('parseOpenAiConfigFile rejects a non-object responses.model_aliases field', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify(createBaseConfig({
+      responses: {
+        model_aliases: 'gpt-5.4-mini=gpt-5.5',
+      },
+    })));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /responses\.model_aliases 必须是对象/);
+    return true;
+  });
 });
 
 test('transformClaudeMessagesRequest force overrides client model and reasoning for Claude Code', () => {

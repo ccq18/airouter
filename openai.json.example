@@ -8,5 +8,10 @@
     "model": "gpt-5.4",
     "reasoning_effort": "high"
   },
+  "responses": {
+    "model_aliases": {
+      "gpt-5.2": "gpt-5.5"
+    }
+  },
   "configs": []
 }

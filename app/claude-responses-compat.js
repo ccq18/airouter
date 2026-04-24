@@ -312,7 +312,7 @@ function transformClaudeMessagesRequest(body, options = {}) {
         responsesBody.max_output_tokens = body.max_tokens;
     }
 
-    return normalizeResponsesRequestBody('/responses', responsesBody);
+    return normalizeResponsesRequestBody('/responses', responsesBody, options.responsesOptions);
 }
 
 function safeParseJson(text) {

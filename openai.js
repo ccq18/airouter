@@ -21,6 +21,7 @@ const {
 } = require('./app/responses-failover');
 const {
     resolveClaudeCodeOptions,
+    resolveResponsesOptions,
     createRuntimeConfigs,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring
@@ -108,7 +109,8 @@ function buildLoadedConfig(parsed) {
         parsed,
         type: parsed.type,
         configs: createRuntimeConfigs(parsed),
-        claudeCode: resolveClaudeCodeOptions(parsed)
+        claudeCode: resolveClaudeCodeOptions(parsed),
+        responses: resolveResponsesOptions(parsed)
     };
 }
 
@@ -150,6 +152,10 @@ let currentParsedConfig = null;
 let configType = null;
 let apiConfigs = [];
 let claudeCodeConfig = resolveClaudeCodeOptions({
+    type: 'token',
+    configs: [{}]
+});
+let responsesConfig = resolveResponsesOptions({
     type: 'token',
     configs: [{}]
 });
@@ -518,6 +524,7 @@ function createClaudeMessagesRequestHandler() {
                 payload.bodyBuffer
             );
         },
+        responsesOptions: responsesConfig,
         upstreamModel: process.env.CLAUDE_PROXY_MODEL || claudeCodeConfig.model,
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
         clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1',
@@ -530,6 +537,7 @@ function applyLoadedConfig(loadedConfig) {
     configType = loadedConfig.type;
     apiConfigs = loadedConfig.configs;
     claudeCodeConfig = loadedConfig.claudeCode;
+    responsesConfig = loadedConfig.responses;
 
     if (accountManager) {
         accountManager.stopQuotaMonitor();
@@ -630,6 +638,7 @@ function buildConfigAdminResponse() {
         apikeys: configuredApiKeys,
         apikey_required: configuredApiKeys.length > 0,
         claude_code: currentParsedConfig.claude_code ?? null,
+        responses: currentParsedConfig.responses ?? null,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
@@ -1079,7 +1088,7 @@ function createHandler(proxyPath = '') {
                 if (body.length > 0 && contentType.includes('application/json')) {
                     try {
                         const jsonBody = JSON.parse(body.toString('utf8'));
-                        const normalizedBody = normalizeResponsesRequestBody(req.url, jsonBody);
+                        const normalizedBody = normalizeResponsesRequestBody(req.url, jsonBody, responsesConfig);
                         body = Buffer.from(JSON.stringify(normalizedBody));
                     } catch (err) {
                         error('处理请求体时出错:', err.message);
@@ -1300,6 +1309,26 @@ app.delete('/admin/api/apikeys/:index', async (req, res) => {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
             error: statusCode === 400 ? 'apikey 删除失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/settings', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const nextParsed = updateConfigSettings(parsed, {
+            responses: req.body && req.body.responses ? req.body.responses : {}
+        });
+
+        await persistAndReloadConfig(nextParsed, 'admin_update_settings', {
+            skipQuotaRefresh: true
+        });
+        res.status(200).json(buildConfigAdminResponse());
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置设置更新失败' : '配置更新失败',
             details: err.message
         });
     }

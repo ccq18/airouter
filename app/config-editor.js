@@ -34,6 +34,31 @@ function normalizeStringArray(values) {
         .filter(Boolean);
 }
 
+function normalizeResponsesModelAliases(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ConfigEditorError('配置设置 responses.model_aliases 必须是对象');
+    }
+
+    const normalized = {};
+
+    for (const [sourceModel, targetModel] of Object.entries(value)) {
+        const normalizedSource = normalizeString(sourceModel);
+        const normalizedTarget = normalizeString(targetModel);
+
+        if (!normalizedSource) {
+            throw new ConfigEditorError('配置设置 responses.model_aliases 的键必须是非空字符串');
+        }
+
+        if (!normalizedTarget) {
+            throw new ConfigEditorError('配置设置 responses.model_aliases 的值必须是非空字符串');
+        }
+
+        normalized[normalizedSource] = normalizedTarget;
+    }
+
+    return normalized;
+}
+
 function getEditableFields(type) {
     if (type === 'api_key') {
         return ['api_key', 'base_url', 'description'];
@@ -161,6 +186,24 @@ function updateConfigSettings(parsed, settings) {
 
     if (Object.prototype.hasOwnProperty.call(settings, 'auth_token')) {
         nextParsed.auth_token = normalizeString(settings.auth_token);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(settings, 'responses')) {
+        const nextResponses = settings.responses;
+
+        if (!nextResponses || typeof nextResponses !== 'object' || Array.isArray(nextResponses)) {
+            throw new ConfigEditorError('配置设置 responses 必须是对象');
+        }
+
+        const mergedResponses = {
+            ...(parsed.responses && typeof parsed.responses === 'object' && !Array.isArray(parsed.responses) ? parsed.responses : {}),
+        };
+
+        if (Object.prototype.hasOwnProperty.call(nextResponses, 'model_aliases')) {
+            mergedResponses.model_aliases = normalizeResponsesModelAliases(nextResponses.model_aliases);
+        }
+
+        nextParsed.responses = mergedResponses;
     }
 
     return validateParsedConfig(nextParsed);

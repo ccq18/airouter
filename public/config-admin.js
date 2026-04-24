@@ -159,6 +159,54 @@
     };
   }
 
+  function getResponsesModelAliases(snapshot) {
+    const aliases = snapshot && snapshot.responses && snapshot.responses.model_aliases;
+    return aliases && typeof aliases === 'object' && !Array.isArray(aliases) ? aliases : {};
+  }
+
+  function formatResponsesModelAliasesInput(snapshot) {
+    return JSON.stringify(getResponsesModelAliases(snapshot), null, 2);
+  }
+
+  function parseResponsesModelAliasesInput(rawText) {
+    const normalizedText = String(rawText || '').trim();
+
+    if (!normalizedText) {
+      return {};
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(normalizedText);
+    } catch (error) {
+      throw new Error(`模型映射配置解析失败: ${error.message}`);
+    }
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('模型映射配置必须是 JSON 对象');
+    }
+
+    const normalized = {};
+    for (const [sourceModel, targetModel] of Object.entries(parsed)) {
+      const normalizedSource = String(sourceModel || '').trim();
+      const normalizedTarget = typeof targetModel === 'string'
+        ? targetModel.trim()
+        : String(targetModel ?? '').trim();
+
+      if (!normalizedSource) {
+        throw new Error('模型映射配置的键必须是非空字符串');
+      }
+
+      if (!normalizedTarget) {
+        throw new Error('模型映射配置的值必须是非空字符串');
+      }
+
+      normalized[normalizedSource] = normalizedTarget;
+    }
+
+    return normalized;
+  }
+
   function extractResponseSummary(payload) {
     if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
       return payload.output_text.trim();
@@ -185,6 +233,8 @@
     parseResponsesApiResponse,
     getPreferredApiKey,
     buildHelloTestRequest,
+    formatResponsesModelAliasesInput,
+    parseResponsesModelAliasesInput,
     extractResponseSummary,
   };
 

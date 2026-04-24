@@ -5,6 +5,8 @@ const {
   buildConfigSnapshotRequest,
   buildHelloTestRequest,
   buildJsonRequestOptions,
+  formatResponsesModelAliasesInput,
+  parseResponsesModelAliasesInput,
   parseResponsesApiResponse,
   getPreferredApiKey,
   extractResponseSummary,
@@ -59,6 +61,42 @@ test('buildHelloTestRequest uses the configured Claude Code model and fixed hell
 
 test('buildHelloTestRequest falls back to gpt-5.4 when no Claude Code model is configured', () => {
   assert.equal(buildHelloTestRequest({}).model, 'gpt-5.4');
+});
+
+test('formatResponsesModelAliasesInput serializes configured responses aliases', () => {
+  assert.equal(
+    formatResponsesModelAliasesInput({
+      responses: {
+        model_aliases: {
+          'gpt-5.2': 'gpt-5.5',
+        },
+      },
+    }),
+    '{\n  "gpt-5.2": "gpt-5.5"\n}',
+  );
+});
+
+test('parseResponsesModelAliasesInput parses alias JSON and trims keys and values', () => {
+  assert.deepEqual(
+    parseResponsesModelAliasesInput('{\n  "  GPT-5.2  ": "  gpt-5.5  "\n}'),
+    {
+      'GPT-5.2': 'gpt-5.5',
+    },
+  );
+});
+
+test('parseResponsesModelAliasesInput returns an empty object for blank input', () => {
+  assert.deepEqual(parseResponsesModelAliasesInput('   '), {});
+});
+
+test('parseResponsesModelAliasesInput rejects non-object JSON', () => {
+  assert.throws(() => {
+    parseResponsesModelAliasesInput('["gpt-5.2", "gpt-5.5"]');
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /必须是 JSON 对象/);
+    return true;
+  });
 });
 
 test('getPreferredApiKey returns the first configured apikey', () => {

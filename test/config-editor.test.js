@@ -168,6 +168,40 @@ test('updateConfigSettings normalizes top-level apikeys and auth_token', () => {
   assert.equal(cleared.configs[0].description, 'primary');
 });
 
+test('updateConfigSettings normalizes responses.model_aliases and preserves other settings', () => {
+  const next = updateConfigSettings(createTokenConfig(), {
+    responses: {
+      model_aliases: {
+        '  GPT-5.2  ': '  gpt-5.5  ',
+        'o3-mini': ' gpt-5.4 ',
+      },
+    },
+  });
+
+  assert.deepEqual(next.responses, {
+    model_aliases: {
+      'GPT-5.2': 'gpt-5.5',
+      'o3-mini': 'gpt-5.4',
+    },
+  });
+  assert.equal(next.claude_code.model, 'gpt-5.4');
+  assert.equal(next.configs.length, 1);
+});
+
+test('updateConfigSettings rejects non-object responses.model_aliases', () => {
+  assert.throws(() => {
+    updateConfigSettings(createTokenConfig(), {
+      responses: {
+        model_aliases: 'gpt-5.2=gpt-5.5',
+      },
+    });
+  }, err => {
+    assert.equal(err instanceof ConfigEditorError, true);
+    assert.match(err.message, /responses\.model_aliases 必须是对象/);
+    return true;
+  });
+});
+
 test('writeParsedConfigFile persists a validated config file', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
   const configPath = path.join(tempDir, 'openai.json');

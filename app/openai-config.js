@@ -4,6 +4,10 @@ const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.4';
 const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
 const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
+function isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function createDefaultTokenRuntime(isEnabled) {
     return {
         enabled: isEnabled,
@@ -68,7 +72,7 @@ function parseOpenAiConfigFile(raw) {
     }
 
     if (parsed.claude_code !== undefined) {
-        if (!parsed.claude_code || typeof parsed.claude_code !== 'object' || Array.isArray(parsed.claude_code)) {
+        if (!isPlainObject(parsed.claude_code)) {
             throw new Error('配置文件 claude_code 必须是对象');
         }
 
@@ -89,11 +93,33 @@ function parseOpenAiConfigFile(raw) {
         }
     }
 
+    if (parsed.responses !== undefined) {
+        if (!isPlainObject(parsed.responses)) {
+            throw new Error('配置文件 responses 必须是对象');
+        }
+
+        if (parsed.responses.model_aliases !== undefined) {
+            if (!isPlainObject(parsed.responses.model_aliases)) {
+                throw new Error('配置文件 responses.model_aliases 必须是对象');
+            }
+
+            for (const [sourceModel, targetModel] of Object.entries(parsed.responses.model_aliases)) {
+                if (typeof sourceModel !== 'string' || sourceModel.trim().length === 0) {
+                    throw new Error('配置文件 responses.model_aliases 的键必须是非空字符串');
+                }
+
+                if (typeof targetModel !== 'string' || targetModel.trim().length === 0) {
+                    throw new Error('配置文件 responses.model_aliases 的值必须是非空字符串');
+                }
+            }
+        }
+    }
+
     return parsed;
 }
 
 function resolveClaudeCodeOptions(parsed) {
-    const claudeCode = parsed && parsed.claude_code && typeof parsed.claude_code === 'object'
+    const claudeCode = parsed && isPlainObject(parsed.claude_code)
         ? parsed.claude_code
         : {};
 
@@ -104,6 +130,23 @@ function resolveClaudeCodeOptions(parsed) {
         reasoningEffort: typeof claudeCode.reasoning_effort === 'string' && claudeCode.reasoning_effort.length > 0
             ? claudeCode.reasoning_effort
             : DEFAULT_CLAUDE_CODE_REASONING_EFFORT
+    };
+}
+
+function resolveResponsesOptions(parsed) {
+    const responses = parsed && isPlainObject(parsed.responses)
+        ? parsed.responses
+        : {};
+    const modelAliases = {};
+
+    if (isPlainObject(responses.model_aliases)) {
+        for (const [sourceModel, targetModel] of Object.entries(responses.model_aliases)) {
+            modelAliases[sourceModel.trim().toLowerCase()] = targetModel.trim();
+        }
+    }
+
+    return {
+        modelAliases
     };
 }
 
@@ -170,6 +213,7 @@ module.exports = {
     DEFAULT_CLAUDE_CODE_REASONING_EFFORT,
     parseOpenAiConfigFile,
     resolveClaudeCodeOptions,
+    resolveResponsesOptions,
     createRuntimeConfigs,
     createTokenRuntimeConfig,
     createApiKeyRuntimeConfig,

@@ -8,10 +8,6 @@ const RESPONSES_DEFAULTS = {
     include: []
 };
 
-const RESPONSES_MODEL_ALIASES = {
-    'gpt-5.4-mini': 'gpt-5.5'
-};
-
 function isResponsesPath(requestPath) {
     if (typeof requestPath !== 'string' || requestPath.length === 0) {
         return false;
@@ -21,7 +17,23 @@ function isResponsesPath(requestPath) {
     return pathname === '/responses' || pathname.endsWith('/responses');
 }
 
-function normalizeResponsesRequestBody(requestPath, body) {
+function normalizeModelAlias(model, options = {}) {
+    if (typeof model !== 'string') {
+        return model;
+    }
+
+    const normalizedModel = model.trim();
+    if (!normalizedModel) {
+        return model;
+    }
+
+    const aliasKey = normalizedModel.toLowerCase();
+    return options.modelAliases && options.modelAliases[aliasKey]
+        ? options.modelAliases[aliasKey]
+        : model;
+}
+
+function normalizeResponsesRequestBody(requestPath, body, options = {}) {
     if (!isResponsesPath(requestPath) || !body || Array.isArray(body) || typeof body !== 'object') {
         return body;
     }
@@ -30,17 +42,14 @@ function normalizeResponsesRequestBody(requestPath, body) {
         ...RESPONSES_DEFAULTS,
         ...body
     };
-
-    if (RESPONSES_MODEL_ALIASES[body.model]) {
-        normalizedBody.model = RESPONSES_MODEL_ALIASES[body.model];
-    }
+    normalizedBody.model = normalizeModelAlias(body.model, options);
 
     return normalizedBody;
 }
 
 module.exports = {
     RESPONSES_DEFAULTS,
-    RESPONSES_MODEL_ALIASES,
+    normalizeModelAlias,
     isResponsesPath,
     normalizeResponsesRequestBody
 };

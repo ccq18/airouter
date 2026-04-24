@@ -10,6 +10,11 @@
     "model": "gpt-5.4",
     "reasoning_effort": "high"
   },
+  "responses": {
+    "model_aliases": {
+      "gpt-5.2": "gpt-5.5"
+    }
+  },
   "configs":[
       {
         "access_token": "",
@@ -35,6 +40,10 @@
 - `claude_code.model` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时上游实际使用的模型
 - `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/claude/v1/messages` 时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
 - 以上 `claude_code` 配置只作用于 `/claude/v1/messages`，不会影响普通 `/v1/*` OpenAI 兼容接口
+- `responses.model_aliases` 用来给 `/v1/responses` 请求里的 `model` 做别名替换，键和值都必须是非空字符串
+- `responses.model_aliases` 的键比较时忽略大小写，例如配置 `GPT-5.2` 也会匹配请求里的 `gpt-5.2`
+- 默认示例配置里包含 `gpt-5.2 -> gpt-5.5`
+- 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
 - `/claude/v1/messages` 仅支持 `token` 模式；`api_key` 模式下该路由会明确返回不支持
 
 
