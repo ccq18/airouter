@@ -581,7 +581,7 @@
     }
 
     .action-cell {
-      width: 150px;
+      width: 220px;
       white-space: nowrap;
     }
 
@@ -1070,6 +1070,7 @@
                   <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
                   <td>${renderSummary(item.runtime)}</td>
                   <td class="action-cell">
+                    <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>上移</button>
                     <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${item.is_active ? '当前' : '切换'}</button>
                     <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
                   </td>
@@ -1329,6 +1330,19 @@
       setMessage('info', '当前账号已临时切换。');
     }
 
+    async function moveConfigUp(index) {
+      const result = await requestJson(`/admin/api/configs/${index}/move-up`, {
+        method: 'POST',
+      });
+
+      snapshot = result;
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '配置项顺序已上移。');
+    }
+
     async function deleteConfig(index) {
       const result = await requestJson(`/admin/api/configs/${index}`, {
         method: 'DELETE',
@@ -1473,6 +1487,19 @@
           setMessage('error', error.message);
         } finally {
           activateButton.disabled = false;
+        }
+        return;
+      }
+
+      const moveUpButton = event.target.closest('[data-action="move-up"]');
+      if (moveUpButton) {
+        moveUpButton.disabled = true;
+        try {
+          await moveConfigUp(moveUpButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          moveUpButton.disabled = false;
         }
         return;
       }

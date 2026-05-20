@@ -36,6 +36,7 @@ const {
     addConfigItem,
     buildImportedConfigItem,
     deleteConfigItem,
+    moveConfigItem,
     readParsedConfigFile,
     updateConfigSettings,
     writeParsedConfigFile
@@ -407,6 +408,39 @@ function canAttemptResponsesFailover(config, requestUrl, attempt) {
         Number(attempt || 0) < 1 &&
         isResponsesPath(requestUrl)
     );
+}
+
+function classifyApiKeyUpstreamFailure(config, statusCode) {
+    if (!config || config.type !== 'apikey') {
+        return null;
+    }
+
+    const normalizedStatusCode = Number(statusCode);
+    if (normalizedStatusCode === 401 || normalizedStatusCode === 403) {
+        return {
+            reason: 'apikey_auth_failed',
+            retryKey: String(normalizedStatusCode),
+            retrySource: 'http',
+        };
+    }
+
+    if (normalizedStatusCode === 429) {
+        return {
+            reason: 'apikey_rate_limited',
+            retryKey: '429',
+            retrySource: 'http',
+        };
+    }
+
+    if (normalizedStatusCode >= 500 && normalizedStatusCode <= 599) {
+        return {
+            reason: 'apikey_upstream_5xx',
+            retryKey: String(normalizedStatusCode),
+            retrySource: 'http',
+        };
+    }
+
+    return null;
 }
 
 function isResponsesFailoverInspectionCandidate(statusCode, headers) {
@@ -1143,6 +1177,21 @@ function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions) {
     });
 }
 
+function prepareFailoverRequest(req, nextConfig, body, originalUrl) {
+    req.url = rewriteProxyUrl(originalUrl, nextConfig);
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    if (!Buffer.isBuffer(body) || !contentType.includes('application/json')) {
+        return body;
+    }
+
+    try {
+        const jsonBody = JSON.parse(body.toString('utf8'));
+        return Buffer.from(JSON.stringify(normalizeProxyJsonBody(nextConfig, req.url, jsonBody, responsesConfig)));
+    } catch (err) {
+        return body;
+    }
+}
+
 function deleteHeadersCaseInsensitive(headers, namesToDelete) {
     for (const headerName of Object.keys(headers)) {
         if (namesToDelete.has(String(headerName).toLowerCase())) {
@@ -1313,6 +1362,25 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     upstream.responsePromise.then(async response => {
         upstreamResponse = response;
         const statusCode = Number(response.statusCode || 502);
+        const apiKeyFailure = classifyApiKeyUpstreamFailure(config, statusCode);
+        if (apiKeyFailure) {
+            warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey})`);
+            const nextConfig = accountManager.markConfigUnavailable(config, apiKeyFailure.reason, {
+                lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
+                switchReason: 'apikey_upstream_failover',
+            });
+
+            if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
+                responseFinished = true;
+                void drainAbandonedResponse(response);
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                    failoverAttempt: failoverAttempt + 1,
+                });
+                return;
+            }
+        }
+
         const shouldInspectResponses = canAttemptResponsesFailover(config, req.url, failoverAttempt)
             && isResponsesFailoverInspectionCandidate(statusCode, response.headers);
 
@@ -1329,7 +1397,8 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 if (!requestClosed && nextConfig && nextConfig !== config) {
                     responseFinished = true;
                     void drainAbandonedResponse(response);
-                    proxyRequest(req, res, nextConfig, body, originalUrl, {
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
                     });
                     return;
@@ -1376,6 +1445,22 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
 
         error('代理请求失败:', err.message);
+        if (config && config.type === 'apikey') {
+            warn(`apikey 上游请求失败: #${config.index + 1} ${config.description} (${err.message})`);
+            const nextConfig = accountManager.markConfigUnavailable(config, 'apikey_upstream_error', {
+                lastError: err.message,
+                switchReason: 'apikey_upstream_failover',
+            });
+
+            if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                    failoverAttempt: failoverAttempt + 1,
+                });
+                return;
+            }
+        }
+
         if (!headersApplied && !res.headersSent) {
             const statusCode = getGatewayStatusCode(err);
             res.status(statusCode).json({
@@ -1629,6 +1714,25 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
     }
 });
 
+app.post('/admin/api/configs/:index/move-up', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => {
+            const targetIndex = parseConfigIndex(req.params.index);
+            if (targetIndex === 0) {
+                throw new ConfigEditorError('第一个配置项不能继续上移');
+            }
+
+            return moveConfigItem(parsed, targetIndex, targetIndex - 1);
+        },
+        'admin_move_config',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
+});
+
 app.post('/admin/api/configs', async (req, res) => {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
@@ -1846,7 +1950,7 @@ async function startServer() {
             log(`  - 模式: ${configType}`);
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
-            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动切号` : '关闭（无 token 配置项）'}`);
+            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
             log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
@@ -1864,6 +1968,7 @@ async function startServer() {
             }
             log('');
             log('路由规则:');
+            log('  - 可用配置按管理页顺序选择；可通过上移调整优先级');
             log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
             log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');
@@ -1895,6 +2000,7 @@ if (require.main === module) {
 
 module.exports = {
     buildProxyHeaders,
+    classifyApiKeyUpstreamFailure,
     deleteHeadersCaseInsensitive,
     deleteLocalOnlyHeaders,
     LOCAL_ONLY_AUTH_HEADERS,

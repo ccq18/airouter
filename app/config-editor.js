@@ -265,6 +265,16 @@ function deleteConfigItem(parsed, index) {
     return validateParsedConfig(nextParsed);
 }
 
+function moveConfigItem(parsed, fromIndex, toIndex) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const sourceIndex = getConfigIndex(fromIndex, nextParsed);
+    const targetIndex = getConfigIndex(toIndex, nextParsed);
+    const [item] = nextParsed.configs.splice(sourceIndex, 1);
+
+    nextParsed.configs.splice(targetIndex, 0, item);
+    return validateParsedConfig(nextParsed);
+}
+
 function updateConfigSettings(parsed, settings) {
     assertPlainObject(settings, '配置设置必须是对象');
 
@@ -327,6 +337,7 @@ module.exports = {
     addConfigItem,
     buildImportedConfigItem,
     updateConfigItem,
+    moveConfigItem,
     updateConfigSettings,
     deleteConfigItem,
     readParsedConfigFile,

@@ -42,6 +42,35 @@ function configSupportsClaudeMessages(config) {
         config.support.includes('claude');
 }
 
+function classifyApiKeyUpstreamStatus(statusCode) {
+    const normalizedStatusCode = Number(statusCode);
+    if (normalizedStatusCode === 401 || normalizedStatusCode === 403) {
+        return {
+            reason: 'apikey_auth_failed',
+            retryKey: String(normalizedStatusCode),
+            retrySource: 'http'
+        };
+    }
+
+    if (normalizedStatusCode === 429) {
+        return {
+            reason: 'apikey_rate_limited',
+            retryKey: '429',
+            retrySource: 'http'
+        };
+    }
+
+    if (normalizedStatusCode >= 500 && normalizedStatusCode <= 599) {
+        return {
+            reason: 'apikey_upstream_5xx',
+            retryKey: String(normalizedStatusCode),
+            retrySource: 'http'
+        };
+    }
+
+    return null;
+}
+
 function buildIncomingUrl(req, proxyPath = '') {
     const combinedUrl = `${req.baseUrl || ''}${req.url || ''}`;
     if (!proxyPath || !combinedUrl.startsWith(proxyPath)) {
@@ -373,6 +402,7 @@ function forwardClaudeApiKeyMessagesRequest({
     logRequestSnapshot,
     createUpstreamRequestImpl,
     upstreamRequestTimeoutMs,
+    handleRetryableUpstreamError,
     error
 }) {
     const upstreamHeaders = buildClaudeApiKeyUpstreamHeaders(req.headers, config, rawBody.length, isClientStream);
@@ -407,6 +437,10 @@ function forwardClaudeApiKeyMessagesRequest({
         const statusCode = Number(response.statusCode || 502);
         const upstreamHeaders = normalizeUpstreamHeaders(response.headers);
         const contentType = upstreamHeaders['content-type'] || '';
+        const apiKeyFailure = classifyApiKeyUpstreamStatus(statusCode);
+        if (apiKeyFailure && typeof handleRetryableUpstreamError === 'function') {
+            handleRetryableUpstreamError(config, apiKeyFailure);
+        }
 
         if (isClientStream) {
             res.status(statusCode);
@@ -563,6 +597,7 @@ function createClaudeMessagesHandler({
                     logRequestSnapshot,
                     createUpstreamRequestImpl,
                     upstreamRequestTimeoutMs,
+                    handleRetryableUpstreamError,
                     error
                 });
                 return;

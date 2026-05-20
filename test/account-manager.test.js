@@ -117,6 +117,25 @@ test('ensureActiveConfig keeps the current account when it is still available', 
   assert.equal(warnings.length, 0);
 });
 
+test('ensureActiveConfig uses config order instead of preferring token over apikey', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  const selected = manager.ensureActiveConfig('select');
+
+  assert.equal(selected, configs[0]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
 test('ensureActiveConfig returns null when there are no configs', () => {
   const { manager, warnings } = createManager([]);
 
@@ -551,6 +570,33 @@ test('markConfigUnavailable keeps the current account when no alternative is ava
   assert.match(warnings[0], /没有可用账号，继续使用当前账号 #1 account-1 \(responses_failover\)/);
 });
 
+test('activateConfig restores an unavailable apikey config before switching to it', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, {
+      available: false,
+      reason: 'apikey_auth_failed',
+      lastError: 'http:401',
+      lastCheckedAt: 1713337100000,
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  const selected = manager.activateConfig(1, 'admin_manual_activate');
+
+  assert.equal(selected, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(configs[1].runtime.available, true);
+  assert.equal(configs[1].runtime.reason, 'apikey');
+  assert.equal(configs[1].runtime.lastError, null);
+});
+
 test('refreshQuotas logs the active account summary after a poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
@@ -908,7 +954,7 @@ test('refreshQuotas checks every token account during poll', async () => {
   assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
 });
 
-test('ensureActiveConfig prefers an available token config over an available apikey config', () => {
+test('ensureActiveConfig keeps an earlier apikey ahead of a later token config', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
       type: 'apikey',
@@ -924,7 +970,7 @@ test('ensureActiveConfig prefers an available token config over an available api
 
   const selected = manager.ensureActiveConfig('select');
 
-  assert.equal(selected.index, 1);
+  assert.equal(selected.index, 0);
 });
 
 test('refreshQuotas switches back from apikey fallback when a token account is available', async () => {

@@ -7,6 +7,7 @@ const { PassThrough } = require('node:stream');
 
 const {
   buildProxyHeaders,
+  classifyApiKeyUpstreamFailure,
   isResponsesFailoverInspectionCandidate,
   normalizeProxyJsonBody,
   shouldForceResponsesStoreFalse,
@@ -120,6 +121,30 @@ test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses re
   assert.equal(shouldForceResponsesStoreFalse({
     type: 'token',
   }, '/backend-api/codex/chat/completions'), false);
+});
+
+test('classifyApiKeyUpstreamFailure marks auth, rate limit, and server failures only for apikey configs', () => {
+  const apiKeyConfig = {
+    type: 'apikey',
+  };
+
+  assert.deepEqual(classifyApiKeyUpstreamFailure(apiKeyConfig, 401), {
+    reason: 'apikey_auth_failed',
+    retryKey: '401',
+    retrySource: 'http',
+  });
+  assert.deepEqual(classifyApiKeyUpstreamFailure(apiKeyConfig, 429), {
+    reason: 'apikey_rate_limited',
+    retryKey: '429',
+    retrySource: 'http',
+  });
+  assert.deepEqual(classifyApiKeyUpstreamFailure(apiKeyConfig, 503), {
+    reason: 'apikey_upstream_5xx',
+    retryKey: '503',
+    retrySource: 'http',
+  });
+  assert.equal(classifyApiKeyUpstreamFailure(apiKeyConfig, 400), null);
+  assert.equal(classifyApiKeyUpstreamFailure({ type: 'token' }, 503), null);
 });
 
 test('normalizeProxyJsonBody adapts store true for token-backed Codex responses requests', () => {
@@ -237,6 +262,57 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
       text: 'hello',
     },
   ]);
+});
+
+test('createClaudeMessagesHandler marks direct claude apikey upstream failures unavailable', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'claude upstream',
+    apiKey: 'upstream-claude-key',
+    baseUrl: 'https://claude.example.com',
+    support: ['claude'],
+  };
+  const classifications = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    handleRetryableUpstreamError: (failedConfig, classification) => {
+      classifications.push({ failedConfig, classification });
+      return null;
+    },
+    createUpstreamRequest: () => ({
+      responsePromise: Promise.resolve(createUpstreamResponse(429, {
+        'content-type': 'application/json',
+      }, JSON.stringify({
+        error: {
+          message: 'rate limited',
+        },
+      }))),
+      abort() {},
+    }),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(res.statusCode, 429);
+  assert.equal(classifications.length, 1);
+  assert.equal(classifications[0].failedConfig, config);
+  assert.deepEqual(classifications[0].classification, {
+    reason: 'apikey_rate_limited',
+    retryKey: '429',
+    retrySource: 'http',
+  });
 });
 
 test('createClaudeMessagesHandler retries retryable upstream usage-limit errors with the next config', async () => {

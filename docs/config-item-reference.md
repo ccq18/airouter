@@ -68,7 +68,8 @@
 - 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
 - `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时使用 `token` 配置项走 responses 兼容转换
 - 每分钟额度轮询会检查所有 `token` 配置项
-- 调度优先级：只要有可用 `token` 配置项，就优先使用 `token`；只有所有 `token` 都不可用时才使用 `apikey`；当轮询发现 `token` 恢复可用时，会切回 `token`
+- 调度优先级：使用 `configs[]` 的配置顺序，越靠前优先级越高；管理页可通过“上移”调整顺序
+- 手动切换到 `apikey` 配置项时，会把该 `apikey` 的运行态恢复为可用
 
 
 - 原始配置项字段说明
@@ -128,6 +129,7 @@
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
+- `apikey` 配置项在直连上游时收到 401/403、429 或 5xx，会被临时标记为不可用；普通 `/v1/*` 链路会尝试切到下一个可用配置
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
 

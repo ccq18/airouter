@@ -78,6 +78,10 @@ function createAccountManager(options) {
       responses_insufficient_quota: 'responses 配额不足',
       responses_usage_limit_reached: 'responses 窗口额度已用尽',
       responses_usage_not_included: 'responses 套餐不支持',
+      apikey_auth_failed: 'API Key 鉴权失败',
+      apikey_rate_limited: 'API Key 被限流',
+      apikey_upstream_5xx: 'API Key 上游服务错误',
+      apikey_upstream_error: 'API Key 上游请求失败',
       [`remaining_below_${minRemainingPercent}%`]: `剩余额度低于 ${minRemainingPercent}%`,
       [`secondary_remaining_not_above_${minWeeklyRemainingPercent}%`]: `周额度不高于 ${minWeeklyRemainingPercent}%`,
       quota_check_failed: '额度检查失败',
@@ -361,39 +365,17 @@ function createAccountManager(options) {
     return Boolean(config && config.runtime && config.runtime.enabled && config.runtime.available);
   }
 
-  function getConfigPriority(config) {
-    if (config && config.type === 'token') {
-      return 0;
-    }
-
-    if (config && config.type === 'apikey') {
-      return 1;
-    }
-
-    return 2;
-  }
-
   function findHighestPriorityAvailableConfigIndex(predicate = () => true) {
-    let selectedIndex = -1;
-    let selectedConfig = null;
-
     for (let index = 0; index < configs.length; index += 1) {
       const config = configs[index];
       if (!predicate(config) || !isConfigAvailable(config)) {
         continue;
       }
 
-      if (
-        selectedIndex === -1 ||
-        getConfigPriority(config) < getConfigPriority(selectedConfig) ||
-        (getConfigPriority(config) === getConfigPriority(selectedConfig) && index === activeConfigIndex)
-      ) {
-        selectedIndex = index;
-        selectedConfig = config;
-      }
+      return index;
     }
 
-    return selectedIndex;
+    return -1;
   }
 
   /**
@@ -411,6 +393,12 @@ function createAccountManager(options) {
 
     const previousConfig = configs[activeConfigIndex] || null;
     const nextConfig = configs[index];
+    if (nextConfig.type === 'apikey') {
+      nextConfig.runtime.available = true;
+      nextConfig.runtime.reason = 'apikey';
+      nextConfig.runtime.lastCheckedAt = now();
+      nextConfig.runtime.lastError = null;
+    }
     activeConfigIndex = index;
 
     if (previousConfig !== nextConfig && reason !== 'startup') {
@@ -603,7 +591,7 @@ function createAccountManager(options) {
   }
 
   /**
-   * 轮询所有 token 账号额度；token 永远优先于 apikey，token 全部不可用时才使用 apikey 兜底。
+   * 轮询所有 token 账号额度；活动配置统一按 configs[] 顺序选择。
    */
   async function refreshQuotas(reason = 'poll') {
     if (!configs.some(config => shouldUseQuotaMonitoring(config.type))) {

@@ -67,7 +67,7 @@ test('config admin keeps the upstream config column compact after adding activat
   assert.match(html, /min-width:\s*1040px;/);
   assert.match(html, /\.account-id-col,\s*\.account-id-cell\s*\{\s*width:\s*240px;\s*min-width:\s*240px;/);
   assert.match(html, /\.account-id-cell\s*\{\s*white-space:\s*normal;\s*word-break:\s*break-word;\s*overflow-wrap:\s*anywhere;/);
-  assert.match(html, /\.action-cell\s*\{\s*width:\s*150px;\s*white-space:\s*nowrap;/);
+  assert.match(html, /\.action-cell\s*\{\s*width:\s*220px;\s*white-space:\s*nowrap;/);
 });
 
 test('config admin keeps all console controls after UI refresh', () => {
@@ -111,6 +111,8 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /name="apiKeySupport" value="gpt"/);
   assert.match(html, /name="apiKeySupport" value="claude"/);
   assert.match(html, /data-action="activate"/);
+  assert.match(html, /data-action="move-up"/);
+  assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
   assert.match(html, /data-action="delete"/);
   assert.match(html, /data-action="delete-apikey"/);
   assert.match(html, /可刷新/);

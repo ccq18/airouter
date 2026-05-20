@@ -8,6 +8,7 @@ const {
   ConfigEditorError,
   addConfigItem,
   buildImportedConfigItem,
+  moveConfigItem,
   updateConfigItem,
   updateConfigSettings,
   deleteConfigItem,
@@ -232,6 +233,31 @@ test('deleteConfigItem allows removing the last remaining config', () => {
   const next = deleteConfigItem(createTokenConfig(), 0);
 
   assert.deepEqual(next.configs, []);
+});
+
+test('moveConfigItem moves a config earlier while preserving top-level settings', () => {
+  const parsed = createTokenConfig({
+    configs: [
+      {
+        access_token: 'token-1',
+        account_id: 'account-1',
+        description: 'first',
+      },
+      {
+        type: 'apikey',
+        apikey: 'sk-backup',
+        base_url: 'https://api.example.com/v1',
+        description: 'second',
+      },
+    ],
+  });
+
+  const next = moveConfigItem(parsed, 1, 0);
+
+  assert.equal(next.port, 3009);
+  assert.equal(next.proxy_port, 7890);
+  assert.deepEqual(next.configs.map(item => item.description), ['second', 'first']);
+  assert.equal(parsed.configs[0].description, 'first');
 });
 
 test('updateConfigSettings normalizes top-level apikeys and auth_token', () => {
