@@ -500,6 +500,10 @@ function createAccountManager(options) {
     }
 
     const currentConfig = configs[activeConfigIndex] || null;
+    if (currentConfig && predicate(currentConfig) && isConfigAvailable(currentConfig)) {
+      return currentConfig;
+    }
+
     const priorityIndex = findHighestPriorityAvailableConfigIndex(predicate);
     if (priorityIndex !== -1) {
       const nextConfig = configs[priorityIndex];

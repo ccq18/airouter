@@ -136,6 +136,28 @@ test('ensureActiveConfig uses config order instead of preferring token over apik
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
+test('ensureActiveConfig keeps the current available account even when an earlier config is available', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager, warnings } = createManager(configs, {
+    initialActiveConfigIndex: 1,
+  });
+
+  const selected = manager.ensureActiveConfig('admin_move_config');
+
+  assert.equal(selected, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(warnings.length, 0);
+});
+
 test('ensureActiveConfig returns null when there are no configs', () => {
   const { manager, warnings } = createManager([]);
 
@@ -205,7 +227,7 @@ test('activateConfig switches the active config without changing availability', 
   assert.match(warnings[0], /账号切换: #1 account-1 -> #2 account-2 \(manual\)/);
 });
 
-test('ensureActiveConfig can switch away after a manual activation', () => {
+test('ensureActiveConfig keeps a manually activated config while it remains available', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }, {
@@ -220,8 +242,8 @@ test('ensureActiveConfig can switch away after a manual activation', () => {
   manager.activateConfig(1, 'manual');
   const selected = manager.ensureActiveConfig('poll');
 
-  assert.equal(selected, configs[0]);
-  assert.equal(manager.getActiveConfig(), configs[0]);
+  assert.equal(selected, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[1]);
 });
 
 test('ensureActiveConfig can prefer configs matching a route-specific predicate', () => {
@@ -973,7 +995,7 @@ test('ensureActiveConfig keeps an earlier apikey ahead of a later token config',
   assert.equal(selected.index, 0);
 });
 
-test('refreshQuotas switches back from apikey fallback when a token account is available', async () => {
+test('refreshQuotas keeps the current apikey when it is available even if a token recovers', async () => {
   const configs = [
     createConfig(0, { available: false, reason: 'quota_check_failed' }),
     createConfig(1, { reason: 'apikey' }, {
@@ -1001,7 +1023,8 @@ test('refreshQuotas switches back from apikey fallback when a token account is a
   await manager.refreshQuotas('poll');
 
   assert.equal(quotaResponses.getCallCount(), 1);
-  assert.equal(manager.getActiveConfig().index, 0);
+  assert.equal(manager.getActiveConfig().index, 1);
+  assert.equal(configs[0].runtime.available, true);
 });
 
 test('refreshQuotas checks all token accounts and selects the first recovered account', async () => {
