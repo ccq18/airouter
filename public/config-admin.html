@@ -146,6 +146,23 @@
       gap: 10px;
     }
 
+    .runtime-sync {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: nowrap;
+    }
+
+    .runtime-sync.refreshing {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .runtime-sync.error {
+      color: var(--danger);
+      font-weight: 700;
+    }
+
     .key-toolbar {
       display: flex;
       justify-content: flex-end;
@@ -659,6 +676,9 @@
           <h2 class="panel-title">上游配置</h2>
           <p class="panel-note">查看运行态、手动切换当前配置，或删除不再使用的上游。</p>
         </div>
+        <div class="panel-tools">
+          <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
+        </div>
       </div>
       <section id="cards"></section>
     </section>
@@ -829,7 +849,9 @@
     const proxyPortInput = document.getElementById('proxyPortInput');
     const proxyV1Url = document.getElementById('proxyV1Url');
     const proxyEndpointMeta = document.getElementById('proxyEndpointMeta');
+    const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
+    const RUNTIME_SYNC_INTERVAL_MS = 5000;
     const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
     const {
       buildConfigSnapshotRequest,
@@ -851,9 +873,12 @@
       hasRefreshTokenConfig,
       normalizePortValue,
       buildProxyAccessInfo,
+      buildRuntimeSyncText,
     } = window.AirouterConfigAdmin;
 
     let snapshot = null;
+    let runtimeSyncTimer = null;
+    let runtimeSyncInFlight = false;
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -873,6 +898,14 @@
 
       messageEl.className = `message show ${type}`;
       messageEl.textContent = text;
+    }
+
+    function setRuntimeSyncState(state, options = {}) {
+      runtimeSyncStatus.className = `runtime-sync ${state || ''}`.trim();
+      runtimeSyncStatus.textContent = buildRuntimeSyncText({
+        state,
+        ...options,
+      });
     }
 
     function renderProxySettings(data) {
@@ -907,6 +940,14 @@
       renderProxySettings(data);
       responsesModelAliasesInput.value = formatResponsesModelAliasesInput(data);
       rawJsonInput.placeholder = getConfigGuideContent(data).rawJsonPlaceholder;
+    }
+
+    function renderSnapshot(data, options = {}) {
+      snapshot = data;
+      if (options.refreshStatic !== false) {
+        renderHeader(data);
+      }
+      renderCards(data);
     }
 
     function getSelectedConfigMode() {
@@ -1106,11 +1147,26 @@
     async function loadSnapshot(message = '', options = {}) {
       try {
         const request = buildConfigSnapshotRequest(Boolean(options.forceRefresh));
+        if (options.forceRefresh) {
+          setRuntimeSyncState('refreshing');
+        }
         snapshot = await requestJson(request.url, request.options);
-        renderHeader(snapshot);
-        renderCards(snapshot);
-        setMessage(message ? 'info' : '', message);
+        renderSnapshot(snapshot, {
+          refreshStatic: options.refreshStatic !== false,
+        });
+        setRuntimeSyncState('synced', {
+          syncedAt: new Date(),
+        });
+        if (!options.silent) {
+          setMessage(message ? 'info' : '', message);
+        }
       } catch (error) {
+        setRuntimeSyncState('error', {
+          error: error.message,
+        });
+        if (options.silent) {
+          return;
+        }
         if (error.status === 401) {
           apiKeyStatusBadge.className = 'badge warn';
           apiKeyStatusBadge.textContent = 'auth_token 无效';
@@ -1123,6 +1179,32 @@
         setMessage('error', error.message);
         cardsEl.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
       }
+    }
+
+    async function refreshRuntimeSnapshot() {
+      if (runtimeSyncInFlight || document.visibilityState !== 'visible') {
+        return;
+      }
+
+      runtimeSyncInFlight = true;
+      try {
+        await loadSnapshot('', {
+          refreshStatic: false,
+          silent: true,
+        });
+      } finally {
+        runtimeSyncInFlight = false;
+      }
+    }
+
+    function startRuntimeSyncPolling() {
+      if (runtimeSyncTimer) {
+        window.clearInterval(runtimeSyncTimer);
+      }
+
+      runtimeSyncTimer = window.setInterval(() => {
+        refreshRuntimeSnapshot();
+      }, RUNTIME_SYNC_INTERVAL_MS);
     }
 
     async function addConfig() {
@@ -1138,8 +1220,10 @@
       snapshot = result;
       clearConfigForm();
       updateConfigMode();
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
       setMessage('info', '配置项已写入配置文件。');
     }
 
@@ -1149,8 +1233,10 @@
       });
 
       snapshot = result;
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
       setMessage('info', `已新增 apikey: ${result.generated_apikey}`);
     }
 
@@ -1165,8 +1251,10 @@
       });
 
       snapshot = result;
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
       setMessage('info', 'Responses 模型映射已保存并热重载。');
     }
 
@@ -1196,8 +1284,10 @@
       });
 
       snapshot = result;
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
 
       const networkSettings = result && result.network_settings ? result.network_settings : {};
       if (networkSettings.port_changed && networkSettings.next_port) {
@@ -1219,8 +1309,10 @@
       });
 
       snapshot = result;
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
       setMessage('info', 'apikey 已删除。');
     }
 
@@ -1230,8 +1322,10 @@
       });
 
       snapshot = result;
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
       setMessage('info', '当前账号已临时切换。');
     }
 
@@ -1241,8 +1335,10 @@
       });
 
       snapshot = result;
-      renderHeader(snapshot);
-      renderCards(snapshot);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
       setMessage('info', '配置项已删除并热重载。');
     }
 
@@ -1334,6 +1430,12 @@
       }
     });
 
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        refreshRuntimeSnapshot();
+      }
+    });
+
     document.querySelectorAll('input[name="configMode"]').forEach(input => {
       input.addEventListener('change', updateConfigMode);
     });
@@ -1395,6 +1497,7 @@
 
     updateConfigMode();
     loadSnapshot();
+    startRuntimeSyncPolling();
   </script>
 </body>
 </html>

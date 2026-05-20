@@ -25,6 +25,7 @@ const {
   extractResponseSummary,
   normalizePortValue,
   buildProxyAccessInfo,
+  buildRuntimeSyncText,
 } = require('../public/config-admin.js');
 
 test('config admin hides the responses settings module', () => {
@@ -90,6 +91,13 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /即时生效/);
   assert.doesNotMatch(html, /重启 App 后完整生效/);
   assert.match(html, /id="refreshButton"/);
+  assert.match(html, /id="runtimeSyncStatus"/);
+  assert.match(html, /RUNTIME_SYNC_INTERVAL_MS\s*=\s*5000/);
+  assert.match(html, /refreshRuntimeSnapshot\(\)/);
+  assert.match(html, /document\.visibilityState === 'visible'/);
+  assert.match(html, /refreshStatic:\s*false/);
+  assert.match(html, /silent:\s*true/);
+  assert.match(html, /if \(!options\.silent\) \{/);
   assert.match(html, /id="testResponseButton"/);
   assert.match(html, /id="addButton"/);
   assert.match(html, /config_type:\s*getSelectedConfigMode\(\)/);
@@ -110,6 +118,27 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /window\.confirm/);
   assert.ok(accessControlSection, 'access control section should be present');
   assert.match(accessControlSection, /id="addApiKeyButton"/);
+});
+
+test('buildRuntimeSyncText describes idle, polling, and synced runtime states', () => {
+  assert.equal(buildRuntimeSyncText(), '运行态尚未同步');
+  assert.equal(buildRuntimeSyncText({ state: 'refreshing' }), '正在刷新额度...');
+  assert.equal(
+    buildRuntimeSyncText({
+      state: 'synced',
+      syncedAt: new Date('2026-05-20T06:30:08.000Z'),
+      locale: 'en-US',
+      timeZone: 'UTC',
+    }),
+    '运行态已同步: 06:30:08',
+  );
+  assert.equal(
+    buildRuntimeSyncText({
+      state: 'error',
+      error: 'HTTP 500',
+    }),
+    '运行态同步失败: HTTP 500',
+  );
 });
 
 test('buildProxyAccessInfo builds displayed proxy URLs from runtime and configured ports', () => {

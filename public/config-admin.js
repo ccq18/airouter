@@ -540,6 +540,38 @@
     };
   }
 
+  function buildRuntimeSyncText(options = {}) {
+    const state = normalizeText(options.state || 'idle');
+
+    if (state === 'refreshing') {
+      return '正在刷新额度...';
+    }
+
+    if (state === 'error') {
+      const errorText = normalizeText(options.error);
+      return errorText ? `运行态同步失败: ${errorText}` : '运行态同步失败';
+    }
+
+    if (state === 'synced' && options.syncedAt) {
+      const syncedAt = options.syncedAt instanceof Date ? options.syncedAt : new Date(options.syncedAt);
+      if (!Number.isNaN(syncedAt.getTime())) {
+        const formatOptions = {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        };
+        if (options.timeZone) {
+          formatOptions.timeZone = options.timeZone;
+        }
+
+        return `运行态已同步: ${syncedAt.toLocaleTimeString(options.locale || 'zh-CN', formatOptions)}`;
+      }
+    }
+
+    return '运行态尚未同步';
+  }
+
   function formatResponsesModelAliasesInput(snapshot) {
     return JSON.stringify(getResponsesModelAliases(snapshot), null, 2);
   }
@@ -625,6 +657,7 @@
     extractResponseSummary,
     normalizePortValue,
     buildProxyAccessInfo,
+    buildRuntimeSyncText,
   };
 
   if (typeof module !== 'undefined' && module.exports) {
