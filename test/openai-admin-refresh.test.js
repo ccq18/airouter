@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { EventEmitter } = require('node:events');
 
@@ -106,6 +108,13 @@ test('selectReloadedActiveConfig preserves active config during reorder reloads'
 
   assert.equal(selected, activeConfig);
   assert.deepEqual(calls, ['getActiveConfig']);
+});
+
+test('admin reorder route moves the selected config to the top', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+
+  assert.match(source, /moveConfigItem\(parsed,\s*targetIndex,\s*0\)/);
+  assert.doesNotMatch(source, /moveConfigItem\(parsed,\s*targetIndex,\s*targetIndex - 1\)/);
 });
 
 test('openExternalUrl reports opener spawn errors without leaving an unhandled child error', async () => {

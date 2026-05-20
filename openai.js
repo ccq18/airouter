@@ -1732,10 +1732,10 @@ app.post('/admin/api/configs/:index/move-up', async (req, res) => {
         parsed => {
             const targetIndex = parseConfigIndex(req.params.index);
             if (targetIndex === 0) {
-                throw new ConfigEditorError('第一个配置项不能继续上移');
+                throw new ConfigEditorError('第一个配置项已经在最前');
             }
 
-            return moveConfigItem(parsed, targetIndex, targetIndex - 1);
+            return moveConfigItem(parsed, targetIndex, 0);
         },
         'admin_move_config',
         200,
@@ -1981,7 +1981,7 @@ async function startServer() {
             }
             log('');
             log('路由规则:');
-            log('  - 可用配置按管理页顺序选择；可通过上移调整优先级');
+            log('  - 可用配置按管理页顺序选择；可通过置顶调整优先级');
             log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
             log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');

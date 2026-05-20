@@ -1070,7 +1070,7 @@
                   <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
                   <td>${renderSummary(item.runtime)}</td>
                   <td class="action-cell">
-                    <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>上移</button>
+                    <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
                     <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${item.is_active ? '当前' : '切换'}</button>
                     <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
                   </td>
@@ -1340,7 +1340,7 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      setMessage('info', '配置项顺序已上移。');
+      setMessage('info', '配置项已置顶，当前使用账号未改变。');
     }
 
     async function deleteConfig(index) {

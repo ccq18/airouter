@@ -113,6 +113,9 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /data-action="activate"/);
   assert.match(html, /data-action="move-up"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
+  assert.match(html, />置顶<\/button>/);
+  assert.doesNotMatch(html, />上移<\/button>/);
+  assert.match(html, /配置项已置顶，当前使用账号未改变/);
   assert.match(html, /data-action="delete"/);
   assert.match(html, /data-action="delete-apikey"/);
   assert.match(html, /可刷新/);
