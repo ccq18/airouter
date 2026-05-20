@@ -448,6 +448,10 @@ function createAccountManager(options) {
     return evaluateQuotaPayload(payload).reason === 'missing_credentials';
   }
 
+  function isRefreshableQuotaAuthFailure(result, payload) {
+    return Number(result && result.statusCode) === 401 || isMissingCredentialsPayload(payload);
+  }
+
   async function requestQuotaPayload(config, targetUrl) {
     const result = await withQuotaCheckTimeout(requestBufferedFn({
       method: 'GET',
@@ -550,7 +554,8 @@ function createAccountManager(options) {
     try {
       let { result, payload } = await requestQuotaPayload(config, targetUrl);
       if (result.statusCode < 200 || result.statusCode >= 300) {
-        if (isMissingCredentialsPayload(payload)) {
+        const missingCredentials = isMissingCredentialsPayload(payload);
+        if (isRefreshableQuotaAuthFailure(result, payload)) {
           const refreshed = await refreshConfigAccessToken(config);
           if (refreshed) {
             ({ result, payload } = await requestQuotaPayload(config, targetUrl));
@@ -560,8 +565,10 @@ function createAccountManager(options) {
             }
           }
 
-          applyQuotaPayload(config, payload, { allowSwitch });
-          return config.runtime;
+          if (missingCredentials) {
+            applyQuotaPayload(config, payload, { allowSwitch });
+            return config.runtime;
+          }
         }
 
         throw new Error(`quota check status ${result.statusCode}`);

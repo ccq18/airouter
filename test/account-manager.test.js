@@ -740,6 +740,63 @@ test('refreshQuotas refreshes an expired token with refresh_token and retries qu
   assert.equal(configs[0].runtime.remainingPercent, 75);
 });
 
+test('refreshQuotas refreshes token on quota check 401 even when payload is not recognized', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      access_token: 'bad-access-token',
+      refresh_token: 'refresh-token',
+    }),
+  ];
+  const requestCalls = [];
+  let quotaCallIndex = 0;
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async requestOptions => {
+      requestCalls.push(requestOptions);
+      quotaCallIndex += 1;
+
+      if (quotaCallIndex === 1) {
+        return {
+          statusCode: 401,
+          bodyText: JSON.stringify({
+            error: {
+              message: 'Unauthorized',
+            },
+          }),
+        };
+      }
+
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 15, reset_at: 1713350000 },
+            secondary_window: { used_percent: 20, reset_at: 1713360000 },
+          },
+        }),
+      };
+    },
+    refreshTokenFn: async payload => {
+      assert.equal(payload.refreshToken, 'refresh-token');
+      return {
+        access_token: 'fresh-access-token',
+      };
+    },
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(requestCalls.length, 2);
+  assert.equal(requestCalls[0].headers.authorization, 'Bearer bad-access-token');
+  assert.equal(requestCalls[1].headers.authorization, 'Bearer fresh-access-token');
+  assert.equal(configs[0].access_token, 'fresh-access-token');
+  assert.equal(configs[0].refresh_token, 'refresh-token');
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.remainingPercent, 85);
+});
+
 test('refreshQuotas keeps missing_credentials when refresh_token is unavailable', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
