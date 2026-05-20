@@ -748,9 +748,21 @@ async function reloadRuntime(loadedConfig, reason, options = {}) {
         await accountManager.refreshQuotas(reason);
     }
 
-    const currentConfig = accountManager.ensureActiveConfig(reason);
+    const currentConfig = selectReloadedActiveConfig(accountManager, reason, options);
     accountManager.startQuotaMonitor();
     return currentConfig;
+}
+
+function selectReloadedActiveConfig(manager, reason, options = {}) {
+    if (!manager) {
+        return null;
+    }
+
+    if (options.preserveActiveConfig) {
+        return manager.getActiveConfig();
+    }
+
+    return manager.ensureActiveConfig(reason);
 }
 
 async function persistAndReloadConfig(nextParsed, reason, options = {}) {
@@ -1728,6 +1740,7 @@ app.post('/admin/api/configs/:index/move-up', async (req, res) => {
         'admin_move_config',
         200,
         {
+            preserveActiveConfig: true,
             skipQuotaRefresh: true
         }
     );
@@ -2014,5 +2027,6 @@ module.exports = {
     reportBusinessRequestError,
     registerProcessSafetyHandlers,
     refreshConfigAdminResponse,
+    selectReloadedActiveConfig,
     startServer
 };

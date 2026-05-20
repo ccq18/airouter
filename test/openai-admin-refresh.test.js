@@ -9,6 +9,7 @@ const {
   refreshConfigAdminResponse,
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
+  selectReloadedActiveConfig,
 } = require('../openai');
 
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
@@ -76,6 +77,35 @@ test('activateConfigAdminResponse switches the active runtime config without ref
 
   assert.deepEqual(calls, [['activate', 1, 'admin_manual_activate']]);
   assert.equal(response, expectedResponse);
+});
+
+test('selectReloadedActiveConfig preserves active config during reorder reloads', () => {
+  const calls = [];
+  const activeConfig = {
+    index: 2,
+    runtime: {
+      available: false,
+    },
+  };
+  const manager = {
+    getActiveConfig: () => {
+      calls.push('getActiveConfig');
+      return activeConfig;
+    },
+    ensureActiveConfig: reason => {
+      calls.push(['ensureActiveConfig', reason]);
+      return {
+        index: 0,
+      };
+    },
+  };
+
+  const selected = selectReloadedActiveConfig(manager, 'admin_move_config', {
+    preserveActiveConfig: true,
+  });
+
+  assert.equal(selected, activeConfig);
+  assert.deepEqual(calls, ['getActiveConfig']);
 });
 
 test('openExternalUrl reports opener spawn errors without leaving an unhandled child error', async () => {
