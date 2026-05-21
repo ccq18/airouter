@@ -251,7 +251,7 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
   await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(upstreamRequests.length, 1);
-  assert.equal(upstreamRequests[0].targetUrl, 'https://claude.example.com/v1/messages');
+  assert.equal(upstreamRequests[0].targetUrl, 'https://claude.example.com/v1/messages?client_version=1');
   assert.equal(upstreamRequests[0].headers.authorization, 'Bearer upstream-claude-key');
   assert.equal(upstreamRequests[0].headers['chatgpt-account-id'], undefined);
   assert.deepEqual(JSON.parse(upstreamRequests[0].body.toString('utf8')), body);

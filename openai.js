@@ -818,6 +818,32 @@ function persistTokenRefreshForConfig(update) {
     return savedItem;
 }
 
+function triggerServiceCommand(command, options = {}) {
+    const spawnImpl = options.spawnImpl || spawn;
+    const cwd = options.cwd || __dirname;
+    const normalizedCommand = command === 'restart' ? 'restart' : 'start';
+    const child = spawnImpl('npm', [normalizedCommand], {
+        cwd,
+        detached: true,
+        stdio: 'ignore',
+        env: process.env
+    });
+
+    if (child && typeof child.unref === 'function') {
+        child.unref();
+    }
+
+    return child && child.pid ? child.pid : null;
+}
+
+function triggerServiceStart(options = {}) {
+    return triggerServiceCommand('start', options);
+}
+
+function triggerServiceRestart(options = {}) {
+    return triggerServiceCommand('restart', options);
+}
+
 function listenOnPort(port) {
     return new Promise((resolve, reject) => {
         server = app.listen(port, () => {
@@ -954,8 +980,12 @@ async function refreshConfigAdminResponse(options = {}) {
 }
 
 async function activateConfigAdminResponse(index, options = {}) {
-    const manager = options.accountManager || accountManager;
+    let manager = options.accountManager || accountManager;
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
+    const readParsed = options.readParsedConfigFile || readParsedConfigFile;
+    const moveConfig = options.moveConfigItem || moveConfigItem;
+    const persistReload = options.persistAndReloadConfig || persistAndReloadConfig;
+    const configFile = options.configFile || CONFIG_FILE;
 
     if (!manager || typeof manager.activateConfig !== 'function') {
         throw new ConfigEditorError('账号管理器未初始化');
@@ -963,9 +993,61 @@ async function activateConfigAdminResponse(index, options = {}) {
 
     try {
         manager.activateConfig(index, 'admin_manual_activate');
+        if (index > 0) {
+            const parsed = readParsed(configFile);
+            const nextParsed = moveConfig(parsed, index, 0);
+            await persistReload(nextParsed, 'admin_manual_activate', {
+                skipQuotaRefresh: true,
+                preserveActiveConfig: true
+            });
+        }
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
+
+    return buildResponse();
+}
+
+async function refreshConfigTokenAdminResponse(index, options = {}) {
+    const readParsed = options.readParsedConfigFile || readParsedConfigFile;
+    const refreshTokenRequest = options.refreshOpenAIToken || refreshOpenAIToken;
+    const persistRefresh = options.persistTokenRefreshForConfig || persistTokenRefreshForConfig;
+    const buildResponse = options.buildResponse || buildConfigAdminResponse;
+    const configFile = options.configFile || CONFIG_FILE;
+    const timeoutMs = Object.prototype.hasOwnProperty.call(options, 'timeoutMs')
+        ? options.timeoutMs
+        : QUOTA_CHECK_TIMEOUT_MS;
+
+    const parsed = readParsed(configFile);
+    const targetItem = parsed.configs[index];
+
+    if (!targetItem) {
+        throw new ConfigEditorError('配置项索引不合法');
+    }
+
+    if (getConfigItemType(targetItem) !== 'token') {
+        throw new ConfigEditorError('只有 token 配置项支持刷新 token');
+    }
+
+    const refreshToken = typeof targetItem.refresh_token === 'string' ? targetItem.refresh_token.trim() : '';
+    const clientId = typeof targetItem.client_id === 'string' ? targetItem.client_id.trim() : '';
+
+    if (!refreshToken) {
+        throw new ConfigEditorError('当前配置项没有 refresh_token');
+    }
+
+    const refreshed = await refreshTokenRequest({
+        refreshToken,
+        clientId,
+        timeoutMs,
+    });
+
+    persistRefresh({
+        config: { index },
+        accessToken: refreshed.access_token || refreshed.accessToken,
+        refreshToken: refreshed.refresh_token || refreshed.refreshToken || refreshToken,
+        clientId: refreshed.client_id || refreshed.clientId || clientId,
+    });
 
     return buildResponse();
 }
@@ -1158,6 +1240,9 @@ function buildIncomingUrl(req, proxyPath = '') {
 function rewriteProxyUrl(incomingUrl, config) {
     const parsedUrl = new URL(incomingUrl, 'http://localhost');
     if (config.type === 'apikey') {
+        if (!parsedUrl.searchParams.has('client_version')) {
+            parsedUrl.searchParams.set('client_version', '1');
+        }
         return `${parsedUrl.pathname}${parsedUrl.search}`;
     }
 
@@ -1727,23 +1812,39 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
 });
 
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
-    await handleConfigMutation(
-        res,
-        parsed => {
-            const targetIndex = parseConfigIndex(req.params.index);
-            if (targetIndex === 0) {
-                throw new ConfigEditorError('第一个配置项已经在最前');
-            }
-
-            return moveConfigItem(parsed, targetIndex, 0);
-        },
-        'admin_move_config',
-        200,
-        {
-            preserveActiveConfig: true,
-            skipQuotaRefresh: true
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const targetIndex = parseConfigIndex(req.params.index);
+        if (targetIndex === 0) {
+            throw new ConfigEditorError('第一个配置项已经在最前');
         }
-    );
+
+        const nextParsed = moveConfigItem(parsed, targetIndex, 0);
+        await persistAndReloadConfig(nextParsed, 'admin_move_config', {
+            skipQuotaRefresh: true
+        });
+        accountManager.activateConfig(0, 'admin_move_config');
+        res.status(200).json(buildConfigAdminResponse());
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置置顶失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
+    try {
+        const targetIndex = parseConfigIndex(req.params.index);
+        res.json(await refreshConfigTokenAdminResponse(targetIndex));
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 502;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '刷新 token 失败' : 'OpenAI token 刷新失败',
+            details: err.message
+        });
+    }
 });
 
 app.post('/admin/api/configs', async (req, res) => {
@@ -1756,8 +1857,12 @@ app.post('/admin/api/configs', async (req, res) => {
         const inputItem = configType
             ? buildImportedConfigItem(configType, rawItem)
             : buildImportedConfigItem(rawItem);
-        const validatedRuntimeConfig = await validateConfigItemBeforeAdd(null, inputItem);
-        const nextParsed = addConfigItem(parsed, inputItem);
+        const itemWithCreatedAt = {
+            ...inputItem,
+            created_at: inputItem.created_at || new Date().toISOString()
+        };
+        const validatedRuntimeConfig = await validateConfigItemBeforeAdd(null, itemWithCreatedAt);
+        const nextParsed = addConfigItem(parsed, itemWithCreatedAt);
         await persistAndReloadConfig(nextParsed, 'admin_create', {
             runtimeOverrides: [validatedRuntimeConfig],
             skipQuotaRefresh: true
@@ -1879,6 +1984,38 @@ app.post('/admin/api/open-external', async (req, res) => {
     }
 });
 
+app.post('/admin/api/start-service', (req, res) => {
+    try {
+        const pid = triggerServiceStart();
+        res.status(202).json({
+            ok: true,
+            pid,
+            command: 'npm start'
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: '启动服务失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/restart-service', (req, res) => {
+    try {
+        const pid = triggerServiceRestart();
+        res.status(202).json({
+            ok: true,
+            pid,
+            command: 'npm restart'
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: '重启服务失败',
+            details: err.message
+        });
+    }
+});
+
 app.delete('/admin/api/configs/:index', async (req, res) => {
     await handleConfigMutation(
         res,
@@ -1983,7 +2120,7 @@ async function startServer() {
             log('路由规则:');
             log('  - 可用配置按管理页顺序选择；可通过置顶调整优先级');
             log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
-            log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url');
+            log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');
         })().catch(err => {
             error('初始化账号信息失败:', err.message);
@@ -2028,5 +2165,9 @@ module.exports = {
     registerProcessSafetyHandlers,
     refreshConfigAdminResponse,
     selectReloadedActiveConfig,
-    startServer
+    refreshConfigTokenAdminResponse,
+    startServer,
+    triggerServiceCommand,
+    triggerServiceRestart,
+    triggerServiceStart
 };

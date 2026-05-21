@@ -337,9 +337,9 @@ module.exports = {
     addConfigItem,
     buildImportedConfigItem,
     updateConfigItem,
-    moveConfigItem,
     updateConfigSettings,
     deleteConfigItem,
+    moveConfigItem,
     readParsedConfigFile,
     writeParsedConfigFile,
 };

@@ -1327,7 +1327,7 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      setMessage('info', '当前账号已临时切换。');
+      setMessage('info', '当前账号已切换，并已置顶。');
     }
 
     async function moveConfigUp(index) {
@@ -1340,7 +1340,7 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      setMessage('info', '配置项已置顶，当前使用账号未改变。');
+      setMessage('info', '配置项已置顶，并已设为当前使用。');
     }
 
     async function deleteConfig(index) {

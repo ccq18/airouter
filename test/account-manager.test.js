@@ -77,11 +77,15 @@ function createManager(configs, overrides = {}) {
     quotaCheckIntervalMs: 60 * 1000,
     minRemainingPercent: 3,
     buildAuthHeadersForConfig: config => ({
-      authorization: `Bearer ${config.access_token}`,
-      'chatgpt-account-id': config.account_id,
+      ...(config.type === 'apikey'
+        ? { authorization: `Bearer ${config.apiKey}` }
+        : {
+          authorization: `Bearer ${config.access_token}`,
+          'chatgpt-account-id': config.account_id,
+        }),
     }),
     requestBufferedFn: overrides.requestBufferedFn,
-    shouldUseQuotaMonitoring: type => type === 'token',
+    shouldUseQuotaMonitoring: overrides.shouldUseQuotaMonitoring || (type => type === 'token'),
     refreshTokenFn: overrides.refreshTokenFn,
     persistTokenRefreshFn: overrides.persistTokenRefreshFn,
     log: (...args) => logs.push(args.join(' ')),
@@ -976,6 +980,34 @@ test('refreshQuotas checks every token account during poll', async () => {
   assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
 });
 
+test('refreshQuotas skips apikey configs during poll', async () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+    }),
+  ];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => {
+      calls.push('called');
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ object: 'list', data: [] }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.deepEqual(calls, []);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+  assert.equal(configs[0].runtime.lastCheckedAt, null);
+});
+
 test('ensureActiveConfig keeps an earlier apikey ahead of a later token config', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
@@ -993,9 +1025,10 @@ test('ensureActiveConfig keeps an earlier apikey ahead of a later token config',
   const selected = manager.ensureActiveConfig('select');
 
   assert.equal(selected.index, 0);
+  assert.equal(manager.getActiveConfig().index, 0);
 });
 
-test('refreshQuotas keeps the current apikey when it is available even if a token recovers', async () => {
+test('refreshQuotas keeps the current apikey when an earlier token config recovers', async () => {
   const configs = [
     createConfig(0, { available: false, reason: 'quota_check_failed' }),
     createConfig(1, { reason: 'apikey' }, {
@@ -1025,6 +1058,7 @@ test('refreshQuotas keeps the current apikey when it is available even if a toke
   assert.equal(quotaResponses.getCallCount(), 1);
   assert.equal(manager.getActiveConfig().index, 1);
   assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[1].runtime.available, true);
 });
 
 test('refreshQuotas checks all token accounts and selects the first recovered account', async () => {
@@ -1119,6 +1153,10 @@ test('refreshQuotas keeps using apikey fallback when all token accounts are unav
         primary_window: { used_percent: 25, reset_at: 1713352000 },
         secondary_window: { used_percent: 35, reset_at: 1713362000 },
       },
+    },
+    {
+      object: 'list',
+      data: [],
     },
   ]);
   const { manager, warnings, logs } = createManager(configs, {
