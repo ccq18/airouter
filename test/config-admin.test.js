@@ -58,7 +58,7 @@ test('config admin exposes manual runtime config activation controls', () => {
 
   assert.match(html, /data-action="activate"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
-  assert.match(html, /当前账号已切换，并已置顶/);
+  assert.match(html, /当前账号已临时切换/);
 });
 
 test('config admin keeps the upstream config column compact after adding activation controls', () => {
@@ -115,7 +115,7 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
   assert.match(html, />置顶<\/button>/);
   assert.doesNotMatch(html, />上移<\/button>/);
-  assert.match(html, /配置项已置顶，并已设为当前使用/);
+  assert.match(html, /配置项已置顶，当前使用账号未改变/);
   assert.match(html, /data-action="delete"/);
   assert.match(html, /data-action="delete-apikey"/);
   assert.match(html, /可刷新/);

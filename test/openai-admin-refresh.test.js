@@ -60,7 +60,7 @@ test('refreshConfigAdminResponse skips quota refresh when no token configs exist
   assert.equal(response, expectedResponse);
 });
 
-test('activateConfigAdminResponse promotes the selected config before activating it', async () => {
+test('activateConfigAdminResponse switches the active runtime config without refreshing quotas', async () => {
   const calls = [];
   const manager = {
     activateConfig: (index, reason) => {
@@ -71,41 +71,45 @@ test('activateConfigAdminResponse promotes the selected config before activating
     },
   };
   const expectedResponse = {
-    active_config_index: 0,
+    active_config_index: 1,
   };
 
   const response = await activateConfigAdminResponse(1, {
     accountManager: manager,
-    configFile: '/tmp/openai.json',
-    readParsedConfigFile: configFile => {
-      calls.push(['read', configFile]);
-      return {
-        configs: [
-          { account_id: 'account-0', access_token: 'token-0' },
-          { account_id: 'account-1', access_token: 'token-1' },
-        ],
-      };
-    },
-    moveConfigItem: (parsed, fromIndex, toIndex) => {
-      calls.push(['move', fromIndex, toIndex]);
-      return {
-        ...parsed,
-        configs: [parsed.configs[1], parsed.configs[0]],
-      };
-    },
-    persistAndReloadConfig: async (nextParsed, reason, options) => {
-      calls.push(['persist', nextParsed.configs[0].account_id, reason, options]);
-    },
     buildResponse: () => expectedResponse,
   });
 
-  assert.deepEqual(calls, [
-    ['activate', 1, 'admin_manual_activate'],
-    ['read', '/tmp/openai.json'],
-    ['move', 1, 0],
-    ['persist', 'account-1', 'admin_manual_activate', { skipQuotaRefresh: true, preserveActiveConfig: true }],
-  ]);
+  assert.deepEqual(calls, [['activate', 1, 'admin_manual_activate']]);
   assert.equal(response, expectedResponse);
+});
+
+test('selectReloadedActiveConfig preserves active config during reorder reloads', () => {
+  const calls = [];
+  const activeConfig = {
+    index: 2,
+    runtime: {
+      available: false,
+    },
+  };
+  const manager = {
+    getActiveConfig: () => {
+      calls.push('getActiveConfig');
+      return activeConfig;
+    },
+    ensureActiveConfig: reason => {
+      calls.push(['ensureActiveConfig', reason]);
+      return {
+        index: 0,
+      };
+    },
+  };
+
+  const selected = selectReloadedActiveConfig(manager, 'admin_move_config', {
+    preserveActiveConfig: true,
+  });
+
+  assert.equal(selected, activeConfig);
+  assert.deepEqual(calls, ['getActiveConfig']);
 });
 
 test('switchRuntimeConfigAdminResponse switches the selected config without reordering it', async () => {
@@ -162,8 +166,8 @@ test('admin reorder route moves the selected config to the top', () => {
     : '';
 
   assert.match(routeSource, /moveConfigItem\(parsed,\s*targetIndex,\s*0\)/);
-  assert.match(routeSource, /accountManager\.activateConfig\(0,\s*'admin_move_config'\)/);
-  assert.doesNotMatch(routeSource, /preserveActiveConfig:\s*true/);
+  assert.match(routeSource, /preserveActiveConfig:\s*true/);
+  assert.doesNotMatch(routeSource, /accountManager\.activateConfig\(0,\s*'admin_move_config'\)/);
 });
 
 test('refreshConfigTokenAdminResponse refreshes and persists a token config', async () => {

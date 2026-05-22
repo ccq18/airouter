@@ -980,12 +980,8 @@ async function refreshConfigAdminResponse(options = {}) {
 }
 
 async function activateConfigAdminResponse(index, options = {}) {
-    let manager = options.accountManager || accountManager;
+    const manager = options.accountManager || accountManager;
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
-    const readParsed = options.readParsedConfigFile || readParsedConfigFile;
-    const moveConfig = options.moveConfigItem || moveConfigItem;
-    const persistReload = options.persistAndReloadConfig || persistAndReloadConfig;
-    const configFile = options.configFile || CONFIG_FILE;
 
     if (!manager || typeof manager.activateConfig !== 'function') {
         throw new ConfigEditorError('账号管理器未初始化');
@@ -993,14 +989,6 @@ async function activateConfigAdminResponse(index, options = {}) {
 
     try {
         manager.activateConfig(index, 'admin_manual_activate');
-        if (index > 0) {
-            const parsed = readParsed(configFile);
-            const nextParsed = moveConfig(parsed, index, 0);
-            await persistReload(nextParsed, 'admin_manual_activate', {
-                skipQuotaRefresh: true,
-                preserveActiveConfig: true
-            });
-        }
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
@@ -1842,26 +1830,23 @@ app.post('/admin/api/configs/:index/switch-runtime', async (req, res) => {
 });
 
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
-    try {
-        const parsed = readParsedConfigFile(CONFIG_FILE);
-        const targetIndex = parseConfigIndex(req.params.index);
-        if (targetIndex === 0) {
-            throw new ConfigEditorError('第一个配置项已经在最前');
-        }
+    await handleConfigMutation(
+        res,
+        parsed => {
+            const targetIndex = parseConfigIndex(req.params.index);
+            if (targetIndex === 0) {
+                throw new ConfigEditorError('第一个配置项已经在最前');
+            }
 
-        const nextParsed = moveConfigItem(parsed, targetIndex, 0);
-        await persistAndReloadConfig(nextParsed, 'admin_move_config', {
+            return moveConfigItem(parsed, targetIndex, 0);
+        },
+        'admin_move_config',
+        200,
+        {
+            preserveActiveConfig: true,
             skipQuotaRefresh: true
-        });
-        accountManager.activateConfig(0, 'admin_move_config');
-        res.status(200).json(buildConfigAdminResponse());
-    } catch (err) {
-        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
-        res.status(statusCode).json({
-            error: statusCode === 400 ? '配置置顶失败' : '配置更新失败',
-            details: err.message
-        });
-    }
+        }
+    );
 });
 
 app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
