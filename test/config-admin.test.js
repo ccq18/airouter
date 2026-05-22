@@ -58,7 +58,7 @@ test('config admin exposes manual runtime config activation controls', () => {
 
   assert.match(html, /data-action="activate"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
-  assert.match(html, /当前账号已切换。/);
+  assert.match(html, /当前账号已切换，并已置顶/);
 });
 
 test('config admin keeps the upstream config column compact after adding activation controls', () => {

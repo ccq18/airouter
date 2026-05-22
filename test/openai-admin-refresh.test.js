@@ -13,6 +13,7 @@ const {
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
   selectReloadedActiveConfig,
+  switchRuntimeConfigAdminResponse,
 } = require('../openai');
 
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
@@ -59,7 +60,7 @@ test('refreshConfigAdminResponse skips quota refresh when no token configs exist
   assert.equal(response, expectedResponse);
 });
 
-test('activateConfigAdminResponse activates the selected config without reordering it', async () => {
+test('activateConfigAdminResponse promotes the selected config before activating it', async () => {
   const calls = [];
   const manager = {
     activateConfig: (index, reason) => {
@@ -75,11 +76,56 @@ test('activateConfigAdminResponse activates the selected config without reorderi
 
   const response = await activateConfigAdminResponse(1, {
     accountManager: manager,
+    configFile: '/tmp/openai.json',
+    readParsedConfigFile: configFile => {
+      calls.push(['read', configFile]);
+      return {
+        configs: [
+          { account_id: 'account-0', access_token: 'token-0' },
+          { account_id: 'account-1', access_token: 'token-1' },
+        ],
+      };
+    },
+    moveConfigItem: (parsed, fromIndex, toIndex) => {
+      calls.push(['move', fromIndex, toIndex]);
+      return {
+        ...parsed,
+        configs: [parsed.configs[1], parsed.configs[0]],
+      };
+    },
+    persistAndReloadConfig: async (nextParsed, reason, options) => {
+      calls.push(['persist', nextParsed.configs[0].account_id, reason, options]);
+    },
     buildResponse: () => expectedResponse,
   });
 
   assert.deepEqual(calls, [
     ['activate', 1, 'admin_manual_activate'],
+    ['read', '/tmp/openai.json'],
+    ['move', 1, 0],
+    ['persist', 'account-1', 'admin_manual_activate', { skipQuotaRefresh: true, preserveActiveConfig: true }],
+  ]);
+  assert.equal(response, expectedResponse);
+});
+
+test('switchRuntimeConfigAdminResponse switches the selected config without reordering it', async () => {
+  const calls = [];
+  const manager = {
+    activateConfig: (index, reason) => {
+      calls.push(['activate', index, reason]);
+    },
+  };
+  const expectedResponse = {
+    active_config_index: 1,
+  };
+
+  const response = await switchRuntimeConfigAdminResponse(1, {
+    accountManager: manager,
+    buildResponse: () => expectedResponse,
+  });
+
+  assert.deepEqual(calls, [
+    ['activate', 1, 'admin_runtime_switch'],
   ]);
   assert.equal(response, expectedResponse);
 });

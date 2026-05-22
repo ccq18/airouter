@@ -982,6 +982,10 @@ async function refreshConfigAdminResponse(options = {}) {
 async function activateConfigAdminResponse(index, options = {}) {
     let manager = options.accountManager || accountManager;
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
+    const readParsed = options.readParsedConfigFile || readParsedConfigFile;
+    const moveConfig = options.moveConfigItem || moveConfigItem;
+    const persistReload = options.persistAndReloadConfig || persistAndReloadConfig;
+    const configFile = options.configFile || CONFIG_FILE;
 
     if (!manager || typeof manager.activateConfig !== 'function') {
         throw new ConfigEditorError('账号管理器未初始化');
@@ -989,6 +993,31 @@ async function activateConfigAdminResponse(index, options = {}) {
 
     try {
         manager.activateConfig(index, 'admin_manual_activate');
+        if (index > 0) {
+            const parsed = readParsed(configFile);
+            const nextParsed = moveConfig(parsed, index, 0);
+            await persistReload(nextParsed, 'admin_manual_activate', {
+                skipQuotaRefresh: true,
+                preserveActiveConfig: true
+            });
+        }
+    } catch (err) {
+        throw new ConfigEditorError(err.message);
+    }
+
+    return buildResponse();
+}
+
+async function switchRuntimeConfigAdminResponse(index, options = {}) {
+    let manager = options.accountManager || accountManager;
+    const buildResponse = options.buildResponse || buildConfigAdminResponse;
+
+    if (!manager || typeof manager.activateConfig !== 'function') {
+        throw new ConfigEditorError('账号管理器未初始化');
+    }
+
+    try {
+        manager.activateConfig(index, 'admin_runtime_switch');
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
@@ -1799,6 +1828,19 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
     }
 });
 
+app.post('/admin/api/configs/:index/switch-runtime', async (req, res) => {
+    try {
+        const targetIndex = parseConfigIndex(req.params.index);
+        res.json(await switchRuntimeConfigAdminResponse(targetIndex));
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '账号切换失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
@@ -2148,6 +2190,7 @@ module.exports = {
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,
     activateConfigAdminResponse,
+    switchRuntimeConfigAdminResponse,
     openExternalUrl,
     reportBusinessRequestError,
     registerProcessSafetyHandlers,

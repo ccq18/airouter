@@ -504,7 +504,7 @@ async function deleteConfig(index) {
 }
 
 async function activateConfig(index) {
-  const result = await requestJson(`/admin/api/configs/${index}/activate`, {
+  const result = await requestJson(`/admin/api/configs/${index}/switch-runtime`, {
     method: 'POST'
   });
 
