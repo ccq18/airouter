@@ -509,7 +509,7 @@ async function activateConfig(index) {
   });
 
   renderSnapshot(result);
-  setMessage('info', '已切换当前使用配置，并已置顶。');
+  setMessage('info', '已切换当前使用配置。');
 }
 
 async function refreshConfigToken(index) {

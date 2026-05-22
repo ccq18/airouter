@@ -982,10 +982,6 @@ async function refreshConfigAdminResponse(options = {}) {
 async function activateConfigAdminResponse(index, options = {}) {
     let manager = options.accountManager || accountManager;
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
-    const readParsed = options.readParsedConfigFile || readParsedConfigFile;
-    const moveConfig = options.moveConfigItem || moveConfigItem;
-    const persistReload = options.persistAndReloadConfig || persistAndReloadConfig;
-    const configFile = options.configFile || CONFIG_FILE;
 
     if (!manager || typeof manager.activateConfig !== 'function') {
         throw new ConfigEditorError('账号管理器未初始化');
@@ -993,14 +989,6 @@ async function activateConfigAdminResponse(index, options = {}) {
 
     try {
         manager.activateConfig(index, 'admin_manual_activate');
-        if (index > 0) {
-            const parsed = readParsed(configFile);
-            const nextParsed = moveConfig(parsed, index, 0);
-            await persistReload(nextParsed, 'admin_manual_activate', {
-                skipQuotaRefresh: true,
-                preserveActiveConfig: true
-            });
-        }
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
