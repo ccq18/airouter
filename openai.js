@@ -12,6 +12,8 @@ const { createUpstreamRequest, consumeResponseBody } = require('./app/upstream-r
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
 const { normalizeResponsesRequestBody, isResponsesPath } = require('./app/responses-defaults');
 const { createClaudeMessagesHandler } = require('./app/claude-messages-handler');
+const { createCcxHandler } = require('./app/ccx/handler');
+const { createCcxSessionStore } = require('./app/ccx/session-store');
 const { createAccountManager } = require('./app/account-manager');
 const { refreshOpenAIToken } = require('./app/openai-token-refresh');
 const {
@@ -25,6 +27,7 @@ const {
 const {
     resolveClaudeCodeOptions,
     resolveResponsesOptions,
+    resolveCcxOptions,
     createRuntimeConfigs,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring,
@@ -116,7 +119,8 @@ function buildLoadedConfig(parsed) {
         parsed,
         configs: createRuntimeConfigs(parsed),
         claudeCode: resolveClaudeCodeOptions(parsed),
-        responses: resolveResponsesOptions(parsed)
+        responses: resolveResponsesOptions(parsed),
+        ccx: resolveCcxOptions(parsed)
     };
 }
 
@@ -183,8 +187,13 @@ let claudeCodeConfig = resolveClaudeCodeOptions({
 let responsesConfig = resolveResponsesOptions({
     configs: [{}]
 });
+let ccxConfig = resolveCcxOptions({
+    configs: [{}]
+});
 let accountManager = null;
 let handleClaudeMessagesRequest = null;
+let handleCcxRequest = null;
+let ccxSessionStore = null;
 let server = null;
 let shuttingDown = false;
 const activeSockets = new Set();
@@ -690,12 +699,35 @@ function createClaudeMessagesRequestHandler() {
     });
 }
 
+function createCcxRequestHandler() {
+    if (ccxSessionStore) {
+        ccxSessionStore.stop();
+    }
+    ccxSessionStore = createCcxSessionStore(ccxConfig.session);
+
+    return createCcxHandler({
+        getConfig: protocol => {
+            const matcher = protocol === 'messages'
+                ? item => configSupportsCapability(item, 'claude')
+                : item => item.type === 'token' || configSupportsCapability(item, 'gpt');
+            return accountManager.getActiveConfig(matcher) ||
+                accountManager.ensureActiveConfig(`ccx_${protocol}`, matcher);
+        },
+        ccxOptions: ccxConfig,
+        createUpstreamRequest,
+        responsesOptions: responsesConfig,
+        sessionStore: ccxSessionStore,
+        upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS
+    });
+}
+
 function applyLoadedConfig(loadedConfig) {
     currentParsedConfig = loadedConfig.parsed;
     apiConfigs = loadedConfig.configs;
     configType = getConfigPoolType(apiConfigs);
     claudeCodeConfig = loadedConfig.claudeCode;
     responsesConfig = loadedConfig.responses;
+    ccxConfig = loadedConfig.ccx;
 
     if (accountManager) {
         accountManager.stopQuotaMonitor();
@@ -723,6 +755,7 @@ function applyLoadedConfig(loadedConfig) {
         now: getCurrentTimestamp
     });
     handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
+    handleCcxRequest = createCcxRequestHandler();
 }
 
 function hydrateLoadedConfig(loadedConfig, options = {}) {
@@ -1918,6 +1951,17 @@ app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
         reportBusinessRequestError(res, err, 'Claude Messages 请求处理失败');
     });
 });
+
+for (const route of ['/ccx/v1/responses', '/ccx/v1/responses/compact', '/ccx/v1/messages', '/ccx/v1/chat/completions']) {
+    app.post(route, requireConfiguredApiKeys, (req, res) => {
+        if (!accountManager.getActiveConfig()) {
+            return createMissingConfigResponse(res);
+        }
+        void handleCcxRequest(req, res).catch(err => {
+            reportBusinessRequestError(res, err, 'CCX 请求处理失败');
+        });
+    });
+}
 
 // 兼容 OpenAI 风格接口
 app.use('/v1', requireConfiguredApiKeys, createHandler());

@@ -26,6 +26,7 @@ const {
   normalizePortValue,
   buildProxyAccessInfo,
   buildRuntimeSyncText,
+  buildDesktopUpdateState,
 } = require('../public/config-admin.js');
 
 test('config admin hides the responses settings module', () => {
@@ -91,8 +92,9 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /即时生效/);
   assert.doesNotMatch(html, /重启 App 后完整生效/);
   assert.match(html, /id="refreshButton"/);
+  assert.match(html, /id="desktopUpdateButton"[^>]*hidden/);
   assert.match(html, /id="runtimeSyncStatus"/);
-  assert.match(html, /RUNTIME_SYNC_INTERVAL_MS\s*=\s*5000/);
+  assert.match(html, /RUNTIME_SYNC_INTERVAL_MS\s*=\s*30000/);
   assert.match(html, /refreshRuntimeSnapshot\(\)/);
   assert.match(html, /document\.visibilityState === 'visible'/);
   assert.match(html, /refreshStatic:\s*false/);
@@ -123,6 +125,37 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /window\.confirm/);
   assert.ok(accessControlSection, 'access control section should be present');
   assert.match(accessControlSection, /id="addApiKeyButton"/);
+});
+
+test('desktop update state is only available for newer releases', () => {
+  assert.deepEqual(
+    buildDesktopUpdateState('1.2.3', {
+      tag_name: 'v1.2.4',
+      html_url: 'https://github.com/ccq18/airouter/releases/tag/v1.2.4',
+    }),
+    {
+      available: true,
+      currentVersion: '1.2.3',
+      latestVersion: '1.2.4',
+      releaseUrl: 'https://github.com/ccq18/airouter/releases/tag/v1.2.4',
+    },
+  );
+
+  assert.equal(
+    buildDesktopUpdateState('1.2.3', {
+      tag_name: 'v1.2.3',
+      html_url: 'https://github.com/ccq18/airouter/releases/tag/v1.2.3',
+    }).available,
+    false,
+  );
+
+  assert.equal(
+    buildDesktopUpdateState('1.2.3', {
+      tag_name: 'v1.2.3-beta.1',
+      html_url: 'https://github.com/ccq18/airouter/releases/tag/v1.2.3-beta.1',
+    }).available,
+    false,
+  );
 });
 
 test('buildRuntimeSyncText describes idle, polling, and synced runtime states', () => {

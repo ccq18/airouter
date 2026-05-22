@@ -17,4 +17,5 @@ test('desktop boot page exposes a first-run config wizard', () => {
   assert.match(script, /airouter-config-missing/);
   assert.match(script, /initialize_config/);
   assert.match(script, /show_config_page/);
+  assert.match(script, /if \(panel\.dataset\.state === 'loading'\)[\s\S]+progress\.hidden = true;/);
 });

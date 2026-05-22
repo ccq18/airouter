@@ -20,6 +20,8 @@ const CONFIG_TEMPLATE_FILE: &str = "openai.json.example";
 const PID_FILE: &str = "openai.pid";
 const LOG_FILE: &str = "openai.log";
 const DEFAULT_PORT: u16 = 3009;
+const RELEASES_URL: &str = "https://github.com/ccq18/airouter/releases";
+const LATEST_RELEASE_API_URL: &str = "https://api.github.com/repos/ccq18/airouter/releases/latest";
 const PORT_KILL_WAIT_TIMEOUT_MS: u64 = 2_500;
 const PORT_FORCE_KILL_WAIT_TIMEOUT_MS: u64 = 800;
 const PORT_KILL_POLL_INTERVAL_MS: u64 = 100;
@@ -36,6 +38,14 @@ struct ServiceStatus {
     runtime_dir: String,
     message: String,
     logs: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopAppInfo {
+    version: String,
+    releases_url: String,
+    latest_release_api_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,10 +255,7 @@ fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     let config_path = runtime_dir.join(CONFIG_FILE);
     let template_path = runtime_dir.join(CONFIG_TEMPLATE_FILE);
     if !config_path.exists() && !template_path.exists() {
-        return Err(format!(
-            "运行目录缺少配置模板 {}",
-            template_path.display()
-        ));
+        return Err(format!("运行目录缺少配置模板 {}", template_path.display()));
     }
 
     Ok(runtime_dir)
@@ -348,6 +355,14 @@ fn build_initial_config_value(
 
     config.remove("type");
     Ok(config)
+}
+
+fn desktop_app_info() -> DesktopAppInfo {
+    DesktopAppInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        releases_url: RELEASES_URL.to_string(),
+        latest_release_api_url: LATEST_RELEASE_API_URL.to_string(),
+    }
 }
 
 fn write_initial_config(runtime_dir: &Path, request: InitialConfigRequest) -> Result<(), String> {
@@ -770,7 +785,10 @@ fn show_config_page(app: AppHandle) -> Result<ServiceStatus, String> {
 }
 
 #[tauri::command]
-fn initialize_config(app: AppHandle, request: InitialConfigRequest) -> Result<ServiceStatus, String> {
+fn initialize_config(
+    app: AppHandle,
+    request: InitialConfigRequest,
+) -> Result<ServiceStatus, String> {
     let runtime_dir = ensure_runtime(&app)?;
     write_initial_config(&runtime_dir, request)?;
     Ok(status_for_runtime(runtime_dir))
@@ -780,6 +798,11 @@ fn initialize_config(app: AppHandle, request: InitialConfigRequest) -> Result<Se
 fn read_recent_logs(app: AppHandle, limit: Option<usize>) -> Result<String, String> {
     let runtime_dir = ensure_runtime(&app)?;
     Ok(tail_text(&runtime_dir.join(LOG_FILE), limit.unwrap_or(160)))
+}
+
+#[tauri::command]
+fn get_desktop_app_info() -> DesktopAppInfo {
+    desktop_app_info()
 }
 
 #[tauri::command]
@@ -865,7 +888,8 @@ pub fn run() {
             open_admin_window,
             open_admin_in_browser,
             reveal_runtime_dir,
-            read_recent_logs
+            read_recent_logs,
+            get_desktop_app_info
         ])
         .build(tauri::generate_context!())
         .expect("error while building Airouter Desktop");
@@ -951,7 +975,10 @@ mod tests {
             config.get("apikeys"),
             Some(&Value::from(vec!["sk-airouter-test"]))
         );
-        assert_eq!(config.get("configs"), Some(&Value::from(Vec::<Value>::new())));
+        assert_eq!(
+            config.get("configs"),
+            Some(&Value::from(Vec::<Value>::new()))
+        );
     }
 
     #[test]
@@ -972,7 +999,10 @@ mod tests {
 
         assert_eq!(config.get("port"), Some(&Value::from(3009)));
         assert_eq!(config.get("proxy_port"), None);
-        assert_eq!(config.get("apikeys"), Some(&Value::from(Vec::<Value>::new())));
+        assert_eq!(
+            config.get("apikeys"),
+            Some(&Value::from(Vec::<Value>::new()))
+        );
     }
 
     #[test]
@@ -985,7 +1015,8 @@ mod tests {
             apikey: None,
         };
 
-        let error = build_initial_config_value(r#"{"configs":[]}"#, request).expect_err("invalid port");
+        let error =
+            build_initial_config_value(r#"{"configs":[]}"#, request).expect_err("invalid port");
 
         assert!(error.contains("服务端口"));
     }
@@ -1048,5 +1079,14 @@ mod tests {
         let log = temp.path().join("openai.log");
         fs::write(&log, "a\nb\nc\nd\n").expect("write log");
         assert_eq!(tail_text(&log, 2), "c\nd");
+    }
+
+    #[test]
+    fn desktop_app_info_points_to_github_releases() {
+        let info = desktop_app_info();
+
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.releases_url, RELEASES_URL);
+        assert_eq!(info.latest_release_api_url, LATEST_RELEASE_API_URL);
     }
 }

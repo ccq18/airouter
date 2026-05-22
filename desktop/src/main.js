@@ -42,7 +42,7 @@
     message.textContent = String(error || '本地服务启动失败，请查看最近日志。');
     actions.hidden = false;
     setupForm.hidden = true;
-    progress.hidden = false;
+    progress.hidden = true;
   }
 
   function showSetup(status) {
@@ -152,6 +152,7 @@
       headline.textContent = '仍在等待本地服务';
       message.textContent = '如果长时间停留在这里，可以重新进入配置页或查看日志。';
       actions.hidden = false;
+      progress.hidden = true;
     }
   }, 12000);
 })();

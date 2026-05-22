@@ -572,6 +572,119 @@
     return '运行态尚未同步';
   }
 
+  function normalizeReleaseVersion(value) {
+    const text = normalizeText(value).replace(/^v/i, '');
+    const withoutBuild = text.split('+')[0];
+    return withoutBuild || '';
+  }
+
+  function parseReleaseVersion(value) {
+    const version = normalizeReleaseVersion(value);
+    const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+
+    if (!match) {
+      return null;
+    }
+
+    return {
+      text: version,
+      major: Number.parseInt(match[1], 10),
+      minor: Number.parseInt(match[2], 10),
+      patch: Number.parseInt(match[3], 10),
+      prerelease: match[4] || '',
+    };
+  }
+
+  function comparePrerelease(left, right) {
+    if (!left && !right) {
+      return 0;
+    }
+
+    if (!left) {
+      return 1;
+    }
+
+    if (!right) {
+      return -1;
+    }
+
+    const leftParts = left.split('.');
+    const rightParts = right.split('.');
+    const length = Math.max(leftParts.length, rightParts.length);
+
+    for (let index = 0; index < length; index += 1) {
+      const leftPart = leftParts[index];
+      const rightPart = rightParts[index];
+
+      if (leftPart === undefined) {
+        return -1;
+      }
+
+      if (rightPart === undefined) {
+        return 1;
+      }
+
+      const leftNumber = /^\d+$/.test(leftPart) ? Number.parseInt(leftPart, 10) : null;
+      const rightNumber = /^\d+$/.test(rightPart) ? Number.parseInt(rightPart, 10) : null;
+
+      if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) {
+        return leftNumber > rightNumber ? 1 : -1;
+      }
+
+      if (leftNumber !== null && rightNumber === null) {
+        return -1;
+      }
+
+      if (leftNumber === null && rightNumber !== null) {
+        return 1;
+      }
+
+      if (leftPart !== rightPart) {
+        return leftPart > rightPart ? 1 : -1;
+      }
+    }
+
+    return 0;
+  }
+
+  function compareReleaseVersions(left, right) {
+    const leftVersion = parseReleaseVersion(left);
+    const rightVersion = parseReleaseVersion(right);
+
+    if (!leftVersion || !rightVersion) {
+      return 0;
+    }
+
+    for (const key of ['major', 'minor', 'patch']) {
+      if (leftVersion[key] !== rightVersion[key]) {
+        return leftVersion[key] > rightVersion[key] ? 1 : -1;
+      }
+    }
+
+    return comparePrerelease(leftVersion.prerelease, rightVersion.prerelease);
+  }
+
+  function buildDesktopUpdateState(currentVersion, release, fallbackReleaseUrl = 'https://github.com/ccq18/airouter/releases') {
+    const latestVersion = normalizeReleaseVersion(release && release.tag_name);
+    const releaseUrl = normalizeText((release && release.html_url) || fallbackReleaseUrl);
+    const normalizedCurrent = normalizeReleaseVersion(currentVersion);
+    const available = Boolean(
+      normalizedCurrent
+        && latestVersion
+        && releaseUrl
+        && !(release && release.draft)
+        && !(release && release.prerelease)
+        && compareReleaseVersions(latestVersion, normalizedCurrent) > 0
+    );
+
+    return {
+      available,
+      currentVersion: normalizedCurrent,
+      latestVersion,
+      releaseUrl,
+    };
+  }
+
   function formatResponsesModelAliasesInput(snapshot) {
     return JSON.stringify(getResponsesModelAliases(snapshot), null, 2);
   }
@@ -658,6 +771,7 @@
     normalizePortValue,
     buildProxyAccessInfo,
     buildRuntimeSyncText,
+    buildDesktopUpdateState,
   };
 
   if (typeof module !== 'undefined' && module.exports) {

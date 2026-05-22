@@ -287,6 +287,11 @@
       color: var(--accent);
     }
 
+    .update-button {
+      background: var(--warning-soft);
+      color: var(--warning);
+    }
+
     .danger {
       background: var(--danger-soft);
       color: var(--danger);
@@ -663,6 +668,7 @@
         <p class="page-subtitle">管理入口 apikey、上游账号和当前运行态。</p>
       </div>
       <div class="toolbar">
+        <button class="update-button" type="button" id="desktopUpdateButton" hidden>更新可用</button>
         <button class="secondary" type="button" id="refreshButton">刷新</button>
         <button class="secondary" type="button" id="testResponseButton">测试请求</button>
       </div>
@@ -838,6 +844,7 @@
     const apiKeyInput = document.getElementById('apiKeyInput');
     const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
     const addButton = document.getElementById('addButton');
+    const desktopUpdateButton = document.getElementById('desktopUpdateButton');
     const refreshButton = document.getElementById('refreshButton');
     const testResponseButton = document.getElementById('testResponseButton');
     const addApiKeyButton = document.getElementById('addApiKeyButton');
@@ -851,7 +858,9 @@
     const proxyEndpointMeta = document.getElementById('proxyEndpointMeta');
     const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
-    const RUNTIME_SYNC_INTERVAL_MS = 5000;
+    const RUNTIME_SYNC_INTERVAL_MS = 30000;
+    const DESKTOP_LATEST_RELEASE_API_URL = 'https://api.github.com/repos/ccq18/airouter/releases/latest';
+    const DESKTOP_RELEASES_URL = 'https://github.com/ccq18/airouter/releases';
     const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
     const {
       buildConfigSnapshotRequest,
@@ -874,6 +883,7 @@
       normalizePortValue,
       buildProxyAccessInfo,
       buildRuntimeSyncText,
+      buildDesktopUpdateState,
     } = window.AirouterConfigAdmin;
 
     let snapshot = null;
@@ -906,6 +916,52 @@
         state,
         ...options,
       });
+    }
+
+    function getTauriInvoke() {
+      const invoke = window.__TAURI__?.core?.invoke;
+      return typeof invoke === 'function' ? invoke : null;
+    }
+
+    async function checkDesktopUpdate() {
+      const invoke = getTauriInvoke();
+      if (!invoke || !desktopUpdateButton) {
+        return;
+      }
+
+      try {
+        const appInfo = await invoke('get_desktop_app_info');
+        const latestReleaseResponse = await fetch(
+          appInfo.latestReleaseApiUrl || DESKTOP_LATEST_RELEASE_API_URL,
+          {
+            headers: {
+              Accept: 'application/vnd.github+json',
+            },
+          },
+        );
+
+        if (!latestReleaseResponse.ok) {
+          return;
+        }
+
+        const latestRelease = await latestReleaseResponse.json();
+        const updateState = buildDesktopUpdateState(
+          appInfo.version,
+          latestRelease,
+          appInfo.releasesUrl || DESKTOP_RELEASES_URL,
+        );
+
+        if (!updateState.available) {
+          return;
+        }
+
+        desktopUpdateButton.hidden = false;
+        desktopUpdateButton.textContent = `更新到 ${updateState.latestVersion}`;
+        desktopUpdateButton.title = `当前版本 ${updateState.currentVersion}，点击打开下载页`;
+        desktopUpdateButton.dataset.releaseUrl = updateState.releaseUrl;
+      } catch (error) {
+        desktopUpdateButton.hidden = true;
+      }
     }
 
     function renderProxySettings(data) {
@@ -1435,6 +1491,11 @@
       }
     });
 
+    desktopUpdateButton.addEventListener('click', async () => {
+      const releaseUrl = desktopUpdateButton.dataset.releaseUrl || DESKTOP_RELEASES_URL;
+      await openExternalLink(releaseUrl);
+    });
+
     refreshButton.addEventListener('click', async () => {
       refreshButton.disabled = true;
       try {
@@ -1524,6 +1585,7 @@
 
     updateConfigMode();
     loadSnapshot();
+    checkDesktopUpdate();
     startRuntimeSyncPolling();
   </script>
 </body>

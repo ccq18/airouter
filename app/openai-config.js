@@ -4,6 +4,7 @@ const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.4';
 const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
 const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const SUPPORTED_APIKEY_CAPABILITIES = new Set(['gpt', 'claude']);
+const { resolveCcxOptions } = require('./ccx/protocols');
 
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -197,6 +198,13 @@ function parseOpenAiConfigFile(raw) {
         }
     }
 
+    if (parsed.ccx !== undefined) {
+        if (!isPlainObject(parsed.ccx)) {
+            throw new Error('配置文件 ccx 必须是对象');
+        }
+        resolveCcxOptions(parsed);
+    }
+
     return parsed;
 }
 
@@ -306,6 +314,7 @@ module.exports = {
     parseOpenAiConfigFile,
     resolveClaudeCodeOptions,
     resolveResponsesOptions,
+    resolveCcxOptions,
     createRuntimeConfigs,
     createTokenRuntimeConfig,
     createApiKeyRuntimeConfig,
