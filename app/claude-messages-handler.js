@@ -406,7 +406,11 @@ function forwardClaudeApiKeyMessagesRequest({
     error
 }) {
     const upstreamHeaders = buildClaudeApiKeyUpstreamHeaders(req.headers, config, rawBody.length, isClientStream);
-    const targetUrl = new URL(incomingUrl, config.baseUrl).toString();
+    const targetUrlObject = new URL(incomingUrl, config.baseUrl);
+    if (!targetUrlObject.searchParams.has('client_version')) {
+        targetUrlObject.searchParams.set('client_version', '1');
+    }
+    const targetUrl = targetUrlObject.toString();
 
     if (accessLogEnabled && typeof logRequestSnapshot === 'function') {
         logRequestSnapshot({

@@ -9,6 +9,7 @@ const {
   activateConfigAdminResponse,
   openExternalUrl,
   refreshConfigAdminResponse,
+  refreshConfigTokenAdminResponse,
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
   selectReloadedActiveConfig,
@@ -110,11 +111,91 @@ test('selectReloadedActiveConfig preserves active config during reorder reloads'
   assert.deepEqual(calls, ['getActiveConfig']);
 });
 
+test('activateConfigAdminResponse activates the first config without rewriting the file', async () => {
+  const calls = [];
+  const manager = {
+    activateConfig: (index, reason) => {
+      calls.push(['activate', index, reason]);
+    },
+  };
+  const response = await activateConfigAdminResponse(0, {
+    accountManager: manager,
+    readParsedConfigFile: () => {
+      calls.push('read');
+      return { configs: [] };
+    },
+    persistAndReloadConfig: async () => {
+      calls.push('persist');
+    },
+    buildResponse: () => ({ active_config_index: 0 }),
+  });
+
+  assert.deepEqual(calls, [['activate', 0, 'admin_manual_activate']]);
+  assert.deepEqual(response, { active_config_index: 0 });
+});
+
 test('admin reorder route moves the selected config to the top', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const routeStart = source.indexOf("app.post('/admin/api/configs/:index/move-up'");
+  const routeEnd = source.indexOf("app.post('/admin/api/configs/:index/refresh-token'", routeStart);
+  const routeSource = routeStart >= 0 && routeEnd > routeStart
+    ? source.slice(routeStart, routeEnd)
+    : '';
 
-  assert.match(source, /moveConfigItem\(parsed,\s*targetIndex,\s*0\)/);
-  assert.doesNotMatch(source, /moveConfigItem\(parsed,\s*targetIndex,\s*targetIndex - 1\)/);
+  assert.match(routeSource, /moveConfigItem\(parsed,\s*targetIndex,\s*0\)/);
+  assert.match(routeSource, /preserveActiveConfig:\s*true/);
+  assert.doesNotMatch(routeSource, /accountManager\.activateConfig\(0,\s*'admin_move_config'\)/);
+});
+
+test('refreshConfigTokenAdminResponse refreshes and persists a token config', async () => {
+  const persisted = [];
+  const response = await refreshConfigTokenAdminResponse(0, {
+    configFile: '/tmp/openai.json',
+    readParsedConfigFile: () => ({
+      configs: [{
+        access_token: 'old-access',
+        refresh_token: 'old-refresh',
+        client_id: 'old-client',
+      }],
+    }),
+    refreshOpenAIToken: async payload => {
+      assert.equal(payload.refreshToken, 'old-refresh');
+      assert.equal(payload.clientId, 'old-client');
+      return {
+        access_token: 'new-access',
+        refresh_token: 'new-refresh',
+        client_id: 'new-client',
+      };
+    },
+    persistTokenRefreshForConfig: payload => {
+      persisted.push(payload);
+    },
+    buildResponse: () => ({ ok: true }),
+    timeoutMs: 1234,
+  });
+
+  assert.deepEqual(persisted, [{
+    config: { index: 0 },
+    accessToken: 'new-access',
+    refreshToken: 'new-refresh',
+    clientId: 'new-client',
+  }]);
+  assert.deepEqual(response, { ok: true });
+});
+
+test('refreshConfigTokenAdminResponse rejects configs without refresh_token', async () => {
+  await assert.rejects(
+    () => refreshConfigTokenAdminResponse(0, {
+      configFile: '/tmp/openai.json',
+      readParsedConfigFile: () => ({
+        configs: [{
+          access_token: 'old-access',
+          account_id: 'account-1',
+        }],
+      }),
+    }),
+    /当前配置项没有 refresh_token/
+  );
 });
 
 test('openExternalUrl reports opener spawn errors without leaving an unhandled child error', async () => {

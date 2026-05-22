@@ -4,6 +4,15 @@ openai.control.json
 node_modules
 openai.pid
 
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Desktop wrapper generated artifacts
 desktop/node_modules
 desktop/package-lock.json

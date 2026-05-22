@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenAIRouter Admin</title>
+  <link rel="stylesheet" href="./popup.css">
+</head>
+<body>
+  <main class="page">
+    <section class="panel hero">
+      <div class="hero-head">
+        <h1>OpenAIRouter</h1>
+        <div class="actions toolbar-actions">
+          <button id="openAdminButton" class="button linklike" type="button">打开后管</button>
+          <button id="startServiceButton" class="button start" type="button">启动</button>
+          <button id="restartServiceButton" class="button restart" type="button">重启</button>
+          <button id="refreshButton" class="button secondary" type="button">刷新</button>
+        </div>
+      </div>
+      <div class="section-head">
+        <h2>配置列表</h2>
+      </div>
+      <div id="cards"></div>
+    </section>
+
+    <details class="panel disclosure">
+      <summary class="disclosure-summary">
+        <div class="section-head">
+          <h2>连接设置</h2>
+          <span id="connectionBadge" class="badge note">未连接</span>
+        </div>
+      </summary>
+      <div class="disclosure-body">
+        <div id="message" class="message" role="status" aria-live="polite"></div>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">Base URL</span>
+            <input id="baseUrlInput" type="text" placeholder="http://localhost:3100">
+          </label>
+          <label class="field">
+            <span class="field-label">Auth Token（默认已内置）</span>
+            <input id="authTokenInput" type="password" placeholder="auth_xxx">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="saveSettingsButton" class="button primary" type="button">保存设置</button>
+          <a class="button linklike" href="http://localhost:3100/admin/configs" target="_blank" rel="noreferrer">打开管理页</a>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel disclosure">
+      <summary class="disclosure-summary">
+        <div class="section-head">
+          <h2>更多操作</h2>
+          <span id="apiKeyStatusBadge" class="badge note">未读取</span>
+        </div>
+      </summary>
+      <div class="disclosure-body split">
+        <div class="guide-list">
+          <article class="guide-item">
+            <div class="guide-step">1</div>
+            <div>
+              <h2>登录 ChatGPT</h2>
+              <p>先确保账号已经在浏览器中登录。</p>
+              <a class="button linklike" href="https://chatgpt.com/" target="_blank" rel="noreferrer">打开 ChatGPT</a>
+            </div>
+          </article>
+          <article class="guide-item">
+            <div class="guide-step">2</div>
+            <div>
+              <h2>获取 AuthSession</h2>
+              <p>从 AuthSession 页面复制 JSON，然后粘贴到新增配置区域。</p>
+              <a class="button linklike" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noreferrer">打开 AuthSession</a>
+            </div>
+          </article>
+        </div>
+
+        <div class="stack">
+          <div class="section-head">
+            <h2>访问控制</h2>
+          </div>
+          <div class="actions compact">
+            <button id="addApiKeyButton" class="button secondary" type="button">新增随机 apikey</button>
+          </div>
+          <div id="apiKeysList" class="stack-list"></div>
+
+          <div class="section-head section-gap">
+            <h2>新增配置项</h2>
+          </div>
+          <div class="mode-switch" role="radiogroup" aria-label="配置模式">
+            <label class="mode-option">
+              <input type="radio" name="configMode" value="token" checked>
+              <span>
+                <span class="mode-name">Token</span>
+                <span class="mode-note">ChatGPT AuthSession JSON</span>
+              </span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="configMode" value="apikey">
+              <span>
+                <span class="mode-name">API Key</span>
+                <span class="mode-note">第三方上游地址</span>
+              </span>
+            </label>
+          </div>
+
+          <div id="tokenConfigPanel" class="config-panel">
+            <textarea id="rawJsonInput" spellcheck="false" placeholder='{
+  "user": { "email": "user@example.com" },
+  "account": { "id": "account-id" },
+  "accessToken": "..."
+}'></textarea>
+          </div>
+
+          <div id="apiKeyConfigPanel" class="config-panel" hidden>
+            <div class="form-grid compact-grid">
+              <label class="field">
+                <span class="field-label">Base URL</span>
+                <input id="apiKeyBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
+              </label>
+              <label class="field">
+                <span class="field-label">API Key</span>
+                <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off">
+              </label>
+              <label class="field">
+                <span class="field-label">备注</span>
+                <input id="apiKeyDescriptionInput" type="text" placeholder="例如：备用上游">
+              </label>
+              <div class="field">
+                <span class="field-label">Support</span>
+                <div class="support-options">
+                  <label class="support-option">
+                    <input type="checkbox" name="apiKeySupport" value="gpt" checked>
+                    <span>GPT</span>
+                  </label>
+                  <label class="support-option">
+                    <input type="checkbox" name="apiKeySupport" value="claude">
+                    <span>Claude</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions compact">
+            <button id="addConfigButton" class="button primary" type="button">直接新增</button>
+          </div>
+        </div>
+      </div>
+    </details>
+  </main>
+
+  <script src="./popup.js"></script>
+</body>
+</html>
