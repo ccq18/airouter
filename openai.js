@@ -996,23 +996,6 @@ async function activateConfigAdminResponse(index, options = {}) {
     return buildResponse();
 }
 
-async function switchRuntimeConfigAdminResponse(index, options = {}) {
-    let manager = options.accountManager || accountManager;
-    const buildResponse = options.buildResponse || buildConfigAdminResponse;
-
-    if (!manager || typeof manager.activateConfig !== 'function') {
-        throw new ConfigEditorError('账号管理器未初始化');
-    }
-
-    try {
-        manager.activateConfig(index, 'admin_runtime_switch');
-    } catch (err) {
-        throw new ConfigEditorError(err.message);
-    }
-
-    return buildResponse();
-}
-
 async function refreshConfigTokenAdminResponse(index, options = {}) {
     const readParsed = options.readParsedConfigFile || readParsedConfigFile;
     const refreshTokenRequest = options.refreshOpenAIToken || refreshOpenAIToken;
@@ -1816,19 +1799,6 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
     }
 });
 
-app.post('/admin/api/configs/:index/switch-runtime', async (req, res) => {
-    try {
-        const targetIndex = parseConfigIndex(req.params.index);
-        res.json(await switchRuntimeConfigAdminResponse(targetIndex));
-    } catch (err) {
-        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
-        res.status(statusCode).json({
-            error: statusCode === 400 ? '账号切换失败' : '配置更新失败',
-            details: err.message
-        });
-    }
-});
-
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
     await handleConfigMutation(
         res,
@@ -2175,7 +2145,6 @@ module.exports = {
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,
     activateConfigAdminResponse,
-    switchRuntimeConfigAdminResponse,
     openExternalUrl,
     reportBusinessRequestError,
     registerProcessSafetyHandlers,

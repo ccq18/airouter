@@ -24,8 +24,8 @@ test('chrome popup switch button prevents details summary click handling', () =>
     : '';
 
   assert.match(popupScript, /data-action="switch-config"/);
-  assert.match(popupScript, /\/admin\/api\/configs\/\$\{index\}\/switch-runtime/);
-  assert.doesNotMatch(popupScript, /\/admin\/api\/configs\/\$\{index\}\/activate/);
+  assert.match(popupScript, /\/admin\/api\/configs\/\$\{index\}\/activate/);
+  assert.doesNotMatch(popupScript, /\/admin\/api\/configs\/\$\{index\}\/switch-runtime/);
   assert.match(switchHandler, /event\.preventDefault\(\);/);
   assert.match(switchHandler, /event\.stopPropagation\(\);/);
   assert.match(switchHandler, /await activateConfig\(switchConfigButton\.dataset\.index\);/);

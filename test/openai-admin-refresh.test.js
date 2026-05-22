@@ -13,7 +13,6 @@ const {
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
   selectReloadedActiveConfig,
-  switchRuntimeConfigAdminResponse,
 } = require('../openai');
 
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
@@ -110,28 +109,6 @@ test('selectReloadedActiveConfig preserves active config during reorder reloads'
 
   assert.equal(selected, activeConfig);
   assert.deepEqual(calls, ['getActiveConfig']);
-});
-
-test('switchRuntimeConfigAdminResponse switches the selected config without reordering it', async () => {
-  const calls = [];
-  const manager = {
-    activateConfig: (index, reason) => {
-      calls.push(['activate', index, reason]);
-    },
-  };
-  const expectedResponse = {
-    active_config_index: 1,
-  };
-
-  const response = await switchRuntimeConfigAdminResponse(1, {
-    accountManager: manager,
-    buildResponse: () => expectedResponse,
-  });
-
-  assert.deepEqual(calls, [
-    ['activate', 1, 'admin_runtime_switch'],
-  ]);
-  assert.equal(response, expectedResponse);
 });
 
 test('activateConfigAdminResponse activates the first config without rewriting the file', async () => {
