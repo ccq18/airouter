@@ -17,6 +17,7 @@ const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
 const apiKeyInput = document.getElementById('apiKeyInput');
 const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
 const saveSettingsButton = document.getElementById('saveSettingsButton');
+const openAdminButton = document.getElementById('openAdminButton');
 const startServiceButton = document.getElementById('startServiceButton');
 const restartServiceButton = document.getElementById('restartServiceButton');
 const refreshButton = document.getElementById('refreshButton');
@@ -536,6 +537,16 @@ async function restartService() {
   setMessage('info', '重启命令已触发。');
 }
 
+function openAdminPage() {
+  const adminUrl = buildUrl('/admin/configs');
+  if (globalThis.chrome?.tabs?.create) {
+    globalThis.chrome.tabs.create({ url: adminUrl });
+    return;
+  }
+
+  window.open(adminUrl, '_blank', 'noopener');
+}
+
 function bindBusy(button, task) {
   return async () => {
     button.disabled = true;
@@ -557,6 +568,10 @@ saveSettingsButton.addEventListener('click', bindBusy(saveSettingsButton, async 
 refreshButton.addEventListener('click', bindBusy(refreshButton, async () => {
   await loadSnapshot('已刷新配置状态。');
 }));
+
+openAdminButton.addEventListener('click', () => {
+  openAdminPage();
+});
 
 startServiceButton.addEventListener('click', bindBusy(startServiceButton, async () => {
   await startService();

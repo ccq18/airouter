@@ -3,7 +3,18 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const popupHtml = fs.readFileSync(path.join(__dirname, '..', 'chrome-popup-admin', 'popup.html'), 'utf8');
 const popupScript = fs.readFileSync(path.join(__dirname, '..', 'chrome-popup-admin', 'popup.js'), 'utf8');
+
+test('chrome popup shows the backend admin button before service controls', () => {
+  const openAdminIndex = popupHtml.indexOf('id="openAdminButton"');
+  const startIndex = popupHtml.indexOf('id="startServiceButton"');
+
+  assert.ok(openAdminIndex >= 0, 'open backend admin button should exist');
+  assert.ok(startIndex > openAdminIndex, 'open backend admin button should be before start button');
+  assert.match(popupScript, /const openAdminButton = document\.getElementById\('openAdminButton'\);/);
+  assert.match(popupScript, /buildUrl\('\/admin\/configs'\)/);
+});
 
 test('chrome popup switch button prevents details summary click handling', () => {
   const switchHandlerStart = popupScript.indexOf('const switchConfigButton = event.target.closest');
