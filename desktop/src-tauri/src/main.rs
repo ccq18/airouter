@@ -610,9 +610,71 @@ fn auth_session_probe_script(callback_url: &str) -> String {
     return (document.body && document.body.innerText ? document.body.innerText : '').replace(/\s+/g, ' ').trim();
   }}
 
+  function buttonText(element) {{
+    return (element.innerText || element.textContent || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+  }}
+
+  function clickCookieBannerButton() {{
+    if (window.__airouterCookieBannerClicked) {{
+      return false;
+    }}
+
+    const directButton = document.querySelector('#onetrust-accept-btn-handler, button#accept-recommended-btn-handler');
+    if (directButton) {{
+      window.__airouterCookieBannerClicked = true;
+      directButton.click();
+      return true;
+    }}
+
+    const candidates = [...document.querySelectorAll('button, [role="button"]')];
+    const cookieButton = candidates.find((button) => {{
+      const text = buttonText(button);
+      return /^(接受全部|全部接受|同意|我同意|允许所有|Accept all|Allow all|I agree|Agree|Got it|OK)$/i.test(text);
+    }});
+    if (cookieButton && /cookie|cookies|隐私|privacy|consent|同意/.test(pageText())) {{
+      window.__airouterCookieBannerClicked = true;
+      cookieButton.click();
+      return true;
+    }}
+    return false;
+  }}
+
+  function clickInitialLoginButton() {{
+    if (document.querySelector('input[type="email"], input[name="email"], input[autocomplete="one-time-code"], input[inputmode="numeric"]')) {{
+      return false;
+    }}
+    if (window.location.pathname.includes('/auth') || window.location.pathname.includes('/login')) {{
+      return false;
+    }}
+    if (isLoggedInHtmlReady()) {{
+      return false;
+    }}
+    if (window.__airouterInitialLoginClickAttempts >= 3) {{
+      return false;
+    }}
+    if (window.__airouterInitialLoginLastClickAt && Date.now() - window.__airouterInitialLoginLastClickAt < 1500) {{
+      return false;
+    }}
+
+    const candidates = [...document.querySelectorAll('a, button, [role="button"]')];
+    const loginButton = candidates.find((item) => {{
+      const text = buttonText(item);
+      const href = item.getAttribute('href') || '';
+      return /^(登录|Log in|Login|Sign in)$/i.test(text) || /\/(auth\/)?login/.test(href);
+    }});
+    if (!loginButton) {{
+      return false;
+    }}
+
+    window.__airouterInitialLoginClickAttempts = (window.__airouterInitialLoginClickAttempts || 0) + 1;
+    window.__airouterInitialLoginLastClickAt = Date.now();
+    loginButton.click();
+    return true;
+  }}
+
   function dismissPostLoginGuide() {{
     const buttons = [...document.querySelectorAll('button')];
-    const startButton = buttons.find((button) => /好的[，, ]*开始吧|开始吧|继续/.test((button.innerText || button.textContent || '').trim()));
+    const startButton = buttons.find((button) => /好的[，, ]*开始吧|开始吧|继续/.test(buttonText(button)));
     if (startButton && /入门技巧|请核实你的信息|尽管问/.test(pageText())) {{
       startButton.click();
       return true;
@@ -714,6 +776,14 @@ fn auth_session_probe_script(callback_url: &str) -> String {
   async function probeAuthSession() {{
     try {{
       if (await submitSessionFromApiPage()) {{
+        return;
+      }}
+      if (clickCookieBannerButton()) {{
+        setStatus('Airouter: 已关闭 cookie 提示，正在准备登录...');
+        return;
+      }}
+      if (clickInitialLoginButton()) {{
+        setStatus('Airouter: 已打开 ChatGPT 登录入口，请继续完成登录。');
         return;
       }}
       if (dismissPostLoginGuide()) {{
@@ -819,6 +889,7 @@ fn open_auth_session_window_inner(app: &AppHandle, request: AuthSessionRequest) 
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
         .collect::<String>();
     let label = format!("{AUTH_SESSION_WINDOW_LABEL_PREFIX}{label_suffix}");
+    let callback_url = request.callback_url.clone();
 
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed_url))
         .title("ChatGPT 登录")
@@ -827,7 +898,21 @@ fn open_auth_session_window_inner(app: &AppHandle, request: AuthSessionRequest) 
         .incognito(true)
         .initialization_script(auth_session_probe_script(&request.callback_url))
         .build()
-        .map_err(|error| format!("无法打开 AuthSession WebView: {error}"))?;
+        .map_err(|error| format!("无法打开 AuthSession WebView: {error}"))?
+        .on_window_event(move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                let callback_url = callback_url.clone();
+                thread::spawn(move || {
+                    let payload = serde_json::json!({
+                        "ok": false,
+                        "cancelled": true,
+                        "message": "ChatGPT 登录窗口已关闭"
+                    })
+                    .to_string();
+                    let _ = post_auth_session_callback(&callback_url, &payload);
+                });
+            }
+        });
 
     Ok(())
 }

@@ -1053,6 +1053,11 @@
           receiveDesktopAuthSession(payload);
           return;
         }
+        if (payload && payload.cancelled) {
+          autoAuthSessionButton.disabled = false;
+          setMessage('info', payload.message || 'ChatGPT 登录窗口已关闭，可重新点击 App 自动获取。');
+          return;
+        }
       } catch (error) {
         autoAuthSessionButton.disabled = false;
         setMessage('error', `自动获取 AuthSession 失败：${error.message}`);

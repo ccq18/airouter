@@ -1240,6 +1240,14 @@ function updateDesktopAuthSessionProbe(payload) {
         return;
     }
 
+    if (payload && payload.cancelled) {
+        desktopAuthSessionJob.status = 'cancelled';
+        desktopAuthSessionJob.error = typeof payload.message === 'string'
+            ? payload.message
+            : 'ChatGPT 登录窗口已关闭';
+        return;
+    }
+
     const message = payload && typeof payload.message === 'string'
         ? payload.message
         : '等待 ChatGPT 登录完成';
@@ -2111,6 +2119,16 @@ app.get('/admin/api/desktop/auth-session', (req, res) => {
         res.status(502).json({
             error: '自动获取 AuthSession 失败',
             details: desktopAuthSessionJob.error || '未知错误'
+        });
+        return;
+    }
+
+    if (desktopAuthSessionJob.status === 'cancelled') {
+        res.json({
+            ok: false,
+            cancelled: true,
+            status: desktopAuthSessionJob.status,
+            message: desktopAuthSessionJob.error || 'ChatGPT 登录窗口已关闭'
         });
         return;
     }
