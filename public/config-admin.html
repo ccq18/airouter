@@ -731,9 +731,6 @@
         <div id="tokenConfigPanel" class="config-panel">
           <div class="field">
             <label class="field-label" for="rawJsonInput">AuthSession JSON</label>
-            <div class="actions" id="desktopAuthSessionActions" hidden>
-              <button class="secondary" type="button" id="autoAuthSessionButton">App 自动获取</button>
-            </div>
             <textarea id="rawJsonInput" spellcheck="false"></textarea>
             <p class="field-hint">
               建议使用浏览器隐私模式登录 ChatGPT 后打开
@@ -854,8 +851,8 @@
     const cardsEl = document.getElementById('cards');
     const messageEl = document.getElementById('message');
     const rawJsonInput = document.getElementById('rawJsonInput');
-    const desktopAuthSessionActions = document.getElementById('desktopAuthSessionActions');
-    const autoAuthSessionButton = document.getElementById('autoAuthSessionButton');
+    let desktopAuthSessionActions = null;
+    let autoAuthSessionButton = null;
     const tokenConfigPanel = document.getElementById('tokenConfigPanel');
     const apiKeyConfigPanel = document.getElementById('apiKeyConfigPanel');
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
@@ -997,7 +994,30 @@
       updateConfigMode();
     }
 
+    function ensureDesktopAuthSessionButton() {
+      if (autoAuthSessionButton) {
+        return autoAuthSessionButton;
+      }
+
+      desktopAuthSessionActions = document.createElement('div');
+      desktopAuthSessionActions.className = 'actions';
+      desktopAuthSessionActions.id = 'desktopAuthSessionActions';
+
+      autoAuthSessionButton = document.createElement('button');
+      autoAuthSessionButton.className = 'secondary';
+      autoAuthSessionButton.type = 'button';
+      autoAuthSessionButton.id = 'autoAuthSessionButton';
+      autoAuthSessionButton.textContent = 'App 自动获取';
+      desktopAuthSessionActions.appendChild(autoAuthSessionButton);
+      rawJsonInput.before(desktopAuthSessionActions);
+      return autoAuthSessionButton;
+    }
+
     function receiveDesktopAuthSession(payload = {}) {
+      if (!isDesktopApp || !autoAuthSessionButton) {
+        return;
+      }
+
       if (payload.ok && payload.session) {
         window.__airouterDesktopAuthSessionDone = true;
         selectTokenMode();
@@ -1046,11 +1066,10 @@
 
     function initializeDesktopAuthSessionImport() {
       if (!isDesktopApp) {
-        desktopAuthSessionActions.hidden = true;
         return;
       }
 
-      desktopAuthSessionActions.hidden = false;
+      ensureDesktopAuthSessionButton();
       if (autoAuthSessionButton.dataset.initialized === 'true') {
         return;
       }

@@ -106,8 +106,10 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
   assert.match(html, /\/admin\/api\/open-external/);
   assert.doesNotMatch(html, /window\.location\.href\s*=\s*url/);
-  assert.match(html, /id="autoAuthSessionButton"/);
-  assert.match(html, /id="desktopAuthSessionActions" hidden/);
+  assert.match(html, /autoAuthSessionButton\.id = 'autoAuthSessionButton'/);
+  assert.match(html, /createElement\('button'\)/);
+  assert.doesNotMatch(html, /<button[^>]+id="autoAuthSessionButton"/);
+  assert.doesNotMatch(html, /id="desktopAuthSessionActions" hidden/);
   assert.match(html, /desktop_app/);
   assert.match(html, /AirouterReceiveAuthSession/);
   assert.match(html, /\/admin\/api\/desktop\/auth-session/);
