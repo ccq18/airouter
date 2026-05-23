@@ -274,8 +274,8 @@
             accessToken: '...',
             refresh_token: '...',
           }, null, 2),
-          actionText: '打开 AuthSession 页面',
-          actionHref: 'https://chatgpt.com/api/auth/session',
+          actionText: '复制 AuthSession 页面',
+          actionCopyText: 'https://chatgpt.com/api/auth/session',
         },
         {
           title: 'API Key 模式',

@@ -101,10 +101,18 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /id="testResponseButton"/);
   assert.match(html, /id="addButton"/);
   assert.match(html, /config_type:\s*getSelectedConfigMode\(\)/);
-  assert.match(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
-  assert.match(html, /data-open-external="true"/);
+  assert.match(html, /data-copy-url="https:\/\/chatgpt\.com\/api\/auth\/session"/);
+  assert.match(html, /链接已复制/);
+  assert.doesNotMatch(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
   assert.match(html, /\/admin\/api\/open-external/);
   assert.doesNotMatch(html, /window\.location\.href\s*=\s*url/);
+  assert.match(html, /id="autoAuthSessionButton"/);
+  assert.match(html, /id="desktopAuthSessionActions" hidden/);
+  assert.match(html, /desktop_app/);
+  assert.match(html, /AirouterReceiveAuthSession/);
+  assert.match(html, /\/admin\/api\/desktop\/auth-session/);
+  assert.doesNotMatch(html, /airouter:\/\/auth-session/);
+  assert.doesNotMatch(html, /window\.__TAURI__/);
   assert.match(html, /隐私模式登录 ChatGPT/);
   assert.match(html, /不要退出该登录态/);
   assert.match(html, /name="configMode" value="token"/);
@@ -299,8 +307,9 @@ test('getConfigGuideContent explains token JSON and apikey form entry separately
   assert.match(tokenStep.description, /不要退出该登录态/);
   assert.match(tokenStep.example, /"accessToken": "\.\.\."/);
   assert.match(tokenStep.example, /"refresh_token": "\.\.\."/);
-  assert.equal(tokenStep.actionText, '打开 AuthSession 页面');
-  assert.equal(tokenStep.actionHref, 'https://chatgpt.com/api/auth/session');
+  assert.equal(tokenStep.actionText, '复制 AuthSession 页面');
+  assert.equal(tokenStep.actionCopyText, 'https://chatgpt.com/api/auth/session');
+  assert.equal(tokenStep.actionHref, undefined);
 
   const apiKeyStep = guide.steps.find(step => step.title === 'API Key 模式');
   assert.match(apiKeyStep.description, /输入框/);
