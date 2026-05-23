@@ -104,6 +104,7 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
   assert.match(html, /data-open-external="true"/);
   assert.match(html, /\/admin\/api\/open-external/);
+  assert.doesNotMatch(html, /window\.location\.href\s*=\s*url/);
   assert.match(html, /隐私模式登录 ChatGPT/);
   assert.match(html, /不要退出该登录态/);
   assert.match(html, /name="configMode" value="token"/);

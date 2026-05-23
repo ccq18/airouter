@@ -1140,7 +1140,7 @@
       } catch (error) {
         const opened = window.open(url, '_blank', 'noopener,noreferrer');
         if (!opened) {
-          window.location.href = url;
+          setMessage('error', `无法打开新页面：${error.message}`);
         }
       }
     }
