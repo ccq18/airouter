@@ -1262,8 +1262,19 @@ function parseConfigItemJson(rawJson) {
     try {
         const parsed = JSON.parse(rawJson);
 
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new ConfigEditorError('配置项 JSON 必须是对象');
+        if (!parsed || typeof parsed !== 'object') {
+            throw new ConfigEditorError('配置项 JSON 必须是对象或对象数组');
+        }
+
+        if (Array.isArray(parsed)) {
+            if (parsed.length === 0) {
+                throw new ConfigEditorError('配置项 JSON 数组不能为空');
+            }
+            parsed.forEach((item, index) => {
+                if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                    throw new ConfigEditorError(`配置项 JSON 数组第 ${index + 1} 项必须是对象`);
+                }
+            });
         }
 
         return parsed;
@@ -1916,24 +1927,54 @@ app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
 app.post('/admin/api/configs', async (req, res) => {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
-        const rawItem = parseConfigItemJson(req.body && req.body.raw_json);
+        const rawInput = parseConfigItemJson(req.body && req.body.raw_json);
         const configType = req.body && typeof req.body.config_type === 'string'
             ? req.body.config_type.trim()
             : '';
-        const inputItem = configType
-            ? buildImportedConfigItem(configType, rawItem)
-            : buildImportedConfigItem(rawItem);
-        const itemWithCreatedAt = {
-            ...inputItem,
-            created_at: inputItem.created_at || new Date().toISOString()
-        };
-        const validatedRuntimeConfig = await validateConfigItemBeforeAdd(null, itemWithCreatedAt);
-        const nextParsed = addConfigItem(parsed, itemWithCreatedAt);
+        const rawItems = Array.isArray(rawInput) ? rawInput : [rawInput];
+        if (Array.isArray(rawInput) && configType !== 'token') {
+            throw new ConfigEditorError('批量新增只支持 token 模式');
+        }
+
+        const now = new Date().toISOString();
+        const itemsWithCreatedAt = rawItems.map((rawItem, index) => {
+            try {
+                const inputItem = configType
+                    ? buildImportedConfigItem(configType, rawItem)
+                    : buildImportedConfigItem(rawItem);
+                return {
+                    ...inputItem,
+                    created_at: inputItem.created_at || now
+                };
+            } catch (err) {
+                if (rawItems.length > 1) {
+                    throw new ConfigEditorError(`第 ${index + 1} 个配置项无效: ${err.message}`);
+                }
+                throw err;
+            }
+        });
+        const validatedRuntimeConfigs = itemsWithCreatedAt.map((item, index) => {
+            try {
+                return validateConfigItemBeforeAdd(null, item);
+            } catch (err) {
+                if (itemsWithCreatedAt.length > 1) {
+                    throw new ConfigEditorError(`第 ${index + 1} 个配置项无效: ${err.message}`);
+                }
+                throw err;
+            }
+        });
+        const nextParsed = itemsWithCreatedAt.reduce(
+            (next, item) => addConfigItem(next, item),
+            parsed
+        );
         await persistAndReloadConfig(nextParsed, 'admin_create', {
-            runtimeOverrides: [validatedRuntimeConfig],
+            runtimeOverrides: validatedRuntimeConfigs,
             skipQuotaRefresh: true
         });
-        res.status(201).json(buildConfigAdminResponse());
+        res.status(201).json({
+            ...buildConfigAdminResponse(),
+            added_count: itemsWithCreatedAt.length
+        });
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({

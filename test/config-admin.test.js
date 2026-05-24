@@ -361,6 +361,39 @@ test('buildConfigItemFromForm keeps token mode as pasted AuthSession JSON', () =
   );
 });
 
+test('buildConfigItemFromForm accepts token mode AuthSession JSON arrays', () => {
+  const sessions = [
+    {
+      user: { email: 'user-1@example.com' },
+      account: { id: 'account-1' },
+      accessToken: 'token-1',
+    },
+    {
+      user: { email: 'user-2@example.com' },
+      account: { id: 'account-2' },
+      accessToken: 'token-2',
+    },
+  ];
+
+  assert.deepEqual(
+    buildConfigItemFromForm({
+      mode: 'token',
+      tokenRawJson: JSON.stringify(sessions),
+    }),
+    sessions,
+  );
+});
+
+test('buildConfigItemFromForm rejects invalid token mode AuthSession JSON array items', () => {
+  assert.throws(
+    () => buildConfigItemFromForm({
+      mode: 'token',
+      tokenRawJson: JSON.stringify([{ accessToken: 'token-1' }, null]),
+    }),
+    /第 2 项必须是 JSON 对象/,
+  );
+});
+
 test('buildConfigItemFromForm builds an apikey config from normal form fields', () => {
   assert.deepEqual(
     buildConfigItemFromForm({
