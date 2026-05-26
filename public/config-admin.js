@@ -206,12 +206,7 @@
   }
 
   function parseJsonObject(rawText, label) {
-    let parsed;
-    try {
-      parsed = JSON.parse(String(rawText || '').trim());
-    } catch (error) {
-      throw new Error(`${label} 解析失败: ${error.message}`);
-    }
+    const parsed = parseJsonValue(rawText, label);
 
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new Error(`${label} 必须是 JSON 对象`);
@@ -220,12 +215,35 @@
     return parsed;
   }
 
+  function parseJsonValue(rawText, label) {
+    try {
+      return JSON.parse(String(rawText || '').trim());
+    } catch (error) {
+      throw new Error(`${label} 解析失败: ${error.message}`);
+    }
+  }
+
   function buildConfigItemFromForm(values) {
     const formValues = values && typeof values === 'object' ? values : {};
     const mode = normalizeText(formValues.mode || 'token').toLowerCase();
 
     if (mode === 'token') {
-      return parseJsonObject(formValues.tokenRawJson, 'AuthSession JSON');
+      const parsed = parseJsonValue(formValues.tokenRawJson, 'AuthSession JSON');
+      if (Array.isArray(parsed)) {
+        if (parsed.length === 0) {
+          throw new Error('AuthSession JSON 数组不能为空');
+        }
+        parsed.forEach((item, index) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            throw new Error(`AuthSession JSON 数组第 ${index + 1} 项必须是 JSON 对象`);
+          }
+        });
+        return parsed;
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('AuthSession JSON 必须是 JSON 对象或对象数组');
+      }
+      return parsed;
     }
 
     if (mode !== 'apikey') {
@@ -274,8 +292,8 @@
             accessToken: '...',
             refresh_token: '...',
           }, null, 2),
-          actionText: '打开 AuthSession 页面',
-          actionHref: 'https://chatgpt.com/api/auth/session',
+          actionText: '复制 AuthSession 页面',
+          actionCopyText: 'https://chatgpt.com/api/auth/session',
         },
         {
           title: 'API Key 模式',

@@ -261,6 +261,7 @@
       flex-wrap: wrap;
       gap: 10px;
       margin-top: 14px;
+      margin-bottom: 10px;
     }
 
     button {
@@ -322,15 +323,33 @@
       line-height: 1.55;
     }
 
-    .field-hint a {
+    .field-hint a,
+    .inline-copy-button {
       color: var(--accent);
       font-weight: 800;
       text-decoration: none;
       border-bottom: 1px solid rgba(18, 52, 71, 0.32);
     }
 
-    .field-hint a:hover {
+    .inline-copy-button {
+      appearance: none;
+      border-top: 0;
+      border-right: 0;
+      border-left: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .field-hint a:hover,
+    .inline-copy-button:hover {
       border-bottom-color: var(--accent);
+    }
+
+    .inline-copy-button:hover:not(:disabled) {
+      transform: none;
     }
 
     .port-grid {
@@ -715,7 +734,7 @@
             <textarea id="rawJsonInput" spellcheck="false"></textarea>
             <p class="field-hint">
               建议使用浏览器隐私模式登录 ChatGPT 后打开
-              <a href="https://chatgpt.com/api/auth/session" target="_blank" rel="noreferrer" data-open-external="true">AuthSession 页面</a>
+              <button class="inline-copy-button" type="button" data-copy-url="https://chatgpt.com/api/auth/session">AuthSession 页面</button>
               复制完整 JSON；粘贴后不要退出该登录态，否则 token 会失效。系统会自动提取 accessToken、refresh_token、account id 和邮箱备注。
             </p>
           </div>
@@ -832,6 +851,8 @@
     const cardsEl = document.getElementById('cards');
     const messageEl = document.getElementById('message');
     const rawJsonInput = document.getElementById('rawJsonInput');
+    let desktopAuthSessionActions = null;
+    let autoAuthSessionButton = null;
     const tokenConfigPanel = document.getElementById('tokenConfigPanel');
     const apiKeyConfigPanel = document.getElementById('apiKeyConfigPanel');
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
@@ -852,7 +873,11 @@
     const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
     const RUNTIME_SYNC_INTERVAL_MS = 5000;
-    const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
+    const DESKTOP_AUTH_SESSION_POLL_INTERVAL_MS = 2000;
+    const DESKTOP_AUTH_SESSION_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+    const pageParams = new URLSearchParams(window.location.search);
+    const adminAuthToken = pageParams.get('auth_token') || '';
+    const isDesktopApp = pageParams.get('desktop_app') === '1';
     const {
       buildConfigSnapshotRequest,
       buildJsonRequestOptions,
@@ -961,6 +986,118 @@
       tokenConfigPanel.hidden = mode !== 'token';
       apiKeyConfigPanel.hidden = mode !== 'apikey';
     }
+
+    function selectTokenMode() {
+      const tokenModeInput = document.querySelector('input[name="configMode"][value="token"]');
+      if (tokenModeInput) {
+        tokenModeInput.checked = true;
+      }
+      updateConfigMode();
+    }
+
+    function ensureDesktopAuthSessionButton() {
+      if (autoAuthSessionButton) {
+        return autoAuthSessionButton;
+      }
+
+      desktopAuthSessionActions = document.createElement('div');
+      desktopAuthSessionActions.className = 'actions';
+      desktopAuthSessionActions.id = 'desktopAuthSessionActions';
+
+      autoAuthSessionButton = document.createElement('button');
+      autoAuthSessionButton.className = 'secondary';
+      autoAuthSessionButton.type = 'button';
+      autoAuthSessionButton.id = 'autoAuthSessionButton';
+      autoAuthSessionButton.textContent = 'App 自动获取';
+      desktopAuthSessionActions.appendChild(autoAuthSessionButton);
+      rawJsonInput.before(desktopAuthSessionActions);
+      return autoAuthSessionButton;
+    }
+
+    function receiveDesktopAuthSession(payload = {}) {
+      if (!isDesktopApp || !autoAuthSessionButton) {
+        return;
+      }
+
+      if (payload.ok && payload.session) {
+        window.__airouterDesktopAuthSessionDone = true;
+        selectTokenMode();
+        rawJsonInput.value = JSON.stringify(payload.session, null, 2);
+        rawJsonInput.focus();
+        autoAuthSessionButton.disabled = false;
+        setMessage('info', '已自动获取 AuthSession JSON，请确认后点击“新增配置项”。');
+        return;
+      }
+
+      autoAuthSessionButton.disabled = false;
+      if (payload.message) {
+        setMessage('error', payload.message);
+      }
+    }
+
+    async function pollDesktopAuthSession(startedAt) {
+      if (window.__airouterDesktopAuthSessionDone) {
+        return;
+      }
+
+      if (Date.now() - startedAt > DESKTOP_AUTH_SESSION_POLL_TIMEOUT_MS) {
+        autoAuthSessionButton.disabled = false;
+        setMessage('error', '等待 ChatGPT 登录超时，请重新点击 App 自动获取。');
+        return;
+      }
+
+      try {
+        const payload = await requestJson('/admin/api/desktop/auth-session', {
+          method: 'GET',
+        });
+        if (payload && payload.ok && payload.session) {
+          receiveDesktopAuthSession(payload);
+          return;
+        }
+        if (payload && payload.cancelled) {
+          autoAuthSessionButton.disabled = false;
+          setMessage('info', payload.message || 'ChatGPT 登录窗口已关闭，可重新点击 App 自动获取。');
+          return;
+        }
+      } catch (error) {
+        autoAuthSessionButton.disabled = false;
+        setMessage('error', `自动获取 AuthSession 失败：${error.message}`);
+        return;
+      }
+
+      window.setTimeout(() => {
+        pollDesktopAuthSession(startedAt);
+      }, DESKTOP_AUTH_SESSION_POLL_INTERVAL_MS);
+    }
+
+    function initializeDesktopAuthSessionImport() {
+      if (!isDesktopApp) {
+        return;
+      }
+
+      ensureDesktopAuthSessionButton();
+      if (autoAuthSessionButton.dataset.initialized === 'true') {
+        return;
+      }
+
+      autoAuthSessionButton.dataset.initialized = 'true';
+      autoAuthSessionButton.addEventListener('click', async () => {
+        autoAuthSessionButton.disabled = true;
+        try {
+          await requestJson('/admin/api/desktop/auth-session', {
+            method: 'POST',
+            body: JSON.stringify({}),
+          });
+          setMessage('info', '已打开 ChatGPT 登录窗口；登录完成后会自动回填 AuthSession JSON。');
+          pollDesktopAuthSession(Date.now());
+        } catch (error) {
+          autoAuthSessionButton.disabled = false;
+          setMessage('error', `无法触发 App 自动获取：${error.message}`);
+        }
+      });
+    }
+
+    window.AirouterReceiveAuthSession = receiveDesktopAuthSession;
 
     function getSelectedApiKeySupport() {
       return [...document.querySelectorAll('input[name="apiKeySupport"]:checked')]
@@ -1142,8 +1279,28 @@
       } catch (error) {
         const opened = window.open(url, '_blank', 'noopener,noreferrer');
         if (!opened) {
-          window.location.href = url;
+          setMessage('error', `无法打开新页面：${error.message}`);
         }
+      }
+    }
+
+    async function copyTextToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', 'readonly');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) {
+        throw new Error('复制失败，请手动复制链接。');
       }
     }
 
@@ -1212,6 +1369,7 @@
 
     async function addConfig() {
       const configItem = buildConfigItemFromInputs();
+      const configCount = Array.isArray(configItem) ? configItem.length : 1;
       const result = await requestJson('/admin/api/configs', {
         method: 'POST',
         body: JSON.stringify({
@@ -1227,7 +1385,7 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      setMessage('info', '配置项已写入配置文件。');
+      setMessage('info', configCount > 1 ? `已写入 ${configCount} 个配置项。` : '配置项已写入配置文件。');
     }
 
     async function addApiKey() {
@@ -1471,12 +1629,39 @@
     document.querySelectorAll('input[name="configMode"]').forEach(input => {
       input.addEventListener('change', updateConfigMode);
     });
+    initializeDesktopAuthSessionImport();
 
     document.addEventListener('click', async event => {
       const externalLink = event.target.closest('a[data-open-external]');
       if (externalLink) {
         event.preventDefault();
         await openExternalLink(externalLink.href);
+        return;
+      }
+
+      const copyUrlButton = event.target.closest('[data-copy-url]');
+      if (copyUrlButton) {
+        event.preventDefault();
+        try {
+          await copyTextToClipboard(copyUrlButton.dataset.copyUrl);
+          window.clearTimeout(Number(copyUrlButton.dataset.copyTimer || 0));
+          const originalText = copyUrlButton.dataset.originalText || copyUrlButton.textContent;
+          copyUrlButton.dataset.originalText = originalText;
+          copyUrlButton.textContent = '链接已复制';
+          copyUrlButton.dataset.copyTimer = String(window.setTimeout(() => {
+            copyUrlButton.textContent = copyUrlButton.dataset.originalText || originalText;
+            delete copyUrlButton.dataset.originalText;
+            delete copyUrlButton.dataset.copyTimer;
+          }, 1600));
+        } catch (error) {
+          const originalText = copyUrlButton.dataset.originalText || copyUrlButton.textContent;
+          copyUrlButton.dataset.originalText = originalText;
+          copyUrlButton.textContent = '复制失败';
+          window.setTimeout(() => {
+            copyUrlButton.textContent = copyUrlButton.dataset.originalText || originalText;
+            delete copyUrlButton.dataset.originalText;
+          }, 1600);
+        }
         return;
       }
 

@@ -6,12 +6,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const APP_DIR_NAME: &str = "Airouter";
 const RUNTIME_DIR_NAME: &str = "airouter";
@@ -20,6 +20,9 @@ const CONFIG_TEMPLATE_FILE: &str = "openai.json.example";
 const PID_FILE: &str = "openai.pid";
 const LOG_FILE: &str = "openai.log";
 const DEFAULT_PORT: u16 = 3009;
+const CHATGPT_LOGIN_URL: &str = "https://chatgpt.com/";
+const AUTH_SESSION_REQUEST_FILE: &str = "airouter.auth-session.request.json";
+const AUTH_SESSION_WINDOW_LABEL_PREFIX: &str = "auth-session-";
 const PORT_KILL_WAIT_TIMEOUT_MS: u64 = 2_500;
 const PORT_FORCE_KILL_WAIT_TIMEOUT_MS: u64 = 800;
 const PORT_KILL_POLL_INTERVAL_MS: u64 = 100;
@@ -52,6 +55,21 @@ struct InitialConfigRequest {
     proxy_port: Option<Value>,
     apikey_enabled: bool,
     apikey: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthSessionRequest {
+    action: String,
+    job_id: Option<String>,
+    login_url: Option<String>,
+    callback_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAuthSessionCallback {
+    callback_url: String,
+    payload: String,
 }
 
 fn app_data_root() -> Result<PathBuf, String> {
@@ -380,8 +398,8 @@ fn configured_port(runtime_dir: &Path) -> Result<u16, String> {
 fn build_admin_url(port: u16, auth_token: Option<&str>) -> String {
     let base = format!("http://localhost:{port}/admin/configs");
     match auth_token.filter(|token| !token.trim().is_empty()) {
-        Some(token) => format!("{base}?auth_token={token}"),
-        None => base,
+        Some(token) => format!("{base}?auth_token={token}&desktop_app=1"),
+        None => format!("{base}?desktop_app=1"),
     }
 }
 
@@ -396,6 +414,7 @@ fn is_runtime_web_host(host: Option<&str>) -> bool {
     )
 }
 
+#[cfg(test)]
 fn is_local_admin_url(url: &tauri::Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && matches!(
@@ -437,6 +456,495 @@ fn open_external_url(url: &tauri::Url) {
         };
 
         let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    });
+}
+
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("URL 编码不完整".to_string());
+            }
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
+                .map_err(|error| format!("URL 编码无效: {error}"))?;
+            let value = u8::from_str_radix(hex, 16)
+                .map_err(|error| format!("URL 编码无效: {error}"))?;
+            output.push(value);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    String::from_utf8(output).map_err(|error| format!("URL 编码 UTF-8 无效: {error}"))
+}
+
+fn post_auth_session_callback(callback_url: &str, payload: &str) -> Result<(), String> {
+    let parsed = tauri::Url::parse(callback_url)
+        .map_err(|error| format!("AuthSession 回调地址无效: {error}"))?;
+    if parsed.scheme() != "http" {
+        return Err("AuthSession 回调只允许 http".to_string());
+    }
+    if !matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1") | Some("::1")) {
+        return Err("AuthSession 回调只允许本机地址".to_string());
+    }
+
+    let host = parsed.host_str().unwrap_or("localhost");
+    let port = parsed.port().unwrap_or(80);
+    let mut path = parsed.path().to_string();
+    if let Some(query) = parsed.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+
+    let body = payload.as_bytes();
+    let mut stream = std::net::TcpStream::connect((host, port))
+        .map_err(|error| format!("连接 AuthSession 回调失败: {error}"))?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: text/plain;charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .map_err(|error| format!("写入 AuthSession 回调失败: {error}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("读取 AuthSession 回调响应失败: {error}"))?;
+    if response.starts_with("HTTP/1.1 2") || response.starts_with("HTTP/1.0 2") {
+        Ok(())
+    } else {
+        let status = response.lines().next().unwrap_or("无响应状态");
+        Err(format!("AuthSession 回调失败: {status}"))
+    }
+}
+
+fn deliver_auth_session_to_main(app: &AppHandle, payload: &str) -> Result<(), String> {
+    let parsed: Value = serde_json::from_str(payload)
+        .map_err(|error| format!("AuthSession payload JSON 无效: {error}"))?;
+    let ok = parsed.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !ok || parsed.get("session").is_none() {
+        return Err("AuthSession payload 不完整".to_string());
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .eval(&format!(
+                "window.AirouterReceiveAuthSession && window.AirouterReceiveAuthSession({});",
+                parsed
+            ))
+            .map_err(|error| format!("主窗口回填 AuthSession 失败: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn close_auth_session_window_on_main_thread(app: &AppHandle, label: String) {
+    let app = app.clone();
+    if let Err(error) = app.clone().run_on_main_thread(move || {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
+        }
+    }) {
+        eprintln!("Airouter AuthSession close dispatch failed: {error}");
+    }
+}
+
+fn auth_session_probe_script(callback_url: &str) -> String {
+    let callback_url_json = serde_json::to_string(callback_url).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"
+(() => {{
+  const callbackUrl = {callback_url_json};
+  const sessionUrl = 'https://chatgpt.com/api/auth/session';
+  const validOrigins = new Set(['https://chatgpt.com', 'https://chat.openai.com']);
+  if (!validOrigins.has(window.location.origin) || window.__airouterAuthSessionProbeStarted) {{
+    return;
+  }}
+  window.__airouterAuthSessionProbeStarted = true;
+  window.__airouterAuthSessionProbeAttempts = 0;
+  window.__airouterAuthSessionProbeInFlight = false;
+  window.__airouterAuthSessionLastReady = 0;
+
+  function setStatus(text) {{
+    let el = document.getElementById('__airouter_auth_session_status');
+    if (!el) {{
+      el = document.createElement('div');
+      el.id = '__airouter_auth_session_status';
+      el.style.cssText = [
+        'position:fixed',
+        'right:14px',
+        'bottom:14px',
+        'z-index:2147483647',
+        'max-width:420px',
+        'padding:10px 12px',
+        'border-radius:8px',
+        'background:rgba(0,0,0,.76)',
+        'color:#fff',
+        'font:12px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+        'box-shadow:0 8px 24px rgba(0,0,0,.25)',
+        'white-space:pre-wrap'
+      ].join(';');
+      document.documentElement.appendChild(el);
+    }}
+    el.textContent = text;
+  }}
+
+  function postReport(message) {{
+    fetch(callbackUrl, {{
+      method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
+      headers: {{ 'content-type': 'text/plain;charset=UTF-8' }},
+      body: JSON.stringify({{ ok: false, message }})
+    }}).catch(() => {{}});
+  }}
+
+  function pageText() {{
+    return (document.body && document.body.innerText ? document.body.innerText : '').replace(/\s+/g, ' ').trim();
+  }}
+
+  function buttonText(element) {{
+    return (element.innerText || element.textContent || element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+  }}
+
+  function clickCookieBannerButton() {{
+    if (window.__airouterCookieBannerClicked) {{
+      return false;
+    }}
+
+    const directButton = document.querySelector('#onetrust-accept-btn-handler, button#accept-recommended-btn-handler');
+    if (directButton) {{
+      window.__airouterCookieBannerClicked = true;
+      directButton.click();
+      return true;
+    }}
+
+    const candidates = [...document.querySelectorAll('button, [role="button"]')];
+    const cookieButton = candidates.find((button) => {{
+      const text = buttonText(button);
+      return /^(接受全部|全部接受|同意|我同意|允许所有|Accept all|Allow all|I agree|Agree|Got it|OK)$/i.test(text);
+    }});
+    if (cookieButton && /cookie|cookies|隐私|privacy|consent|同意/.test(pageText())) {{
+      window.__airouterCookieBannerClicked = true;
+      cookieButton.click();
+      return true;
+    }}
+    return false;
+  }}
+
+  function clickInitialLoginButton() {{
+    if (document.querySelector('input[type="email"], input[name="email"], input[autocomplete="one-time-code"], input[inputmode="numeric"]')) {{
+      return false;
+    }}
+    if (window.location.pathname.includes('/auth') || window.location.pathname.includes('/login')) {{
+      return false;
+    }}
+    if (isLoggedInHtmlReady()) {{
+      return false;
+    }}
+    if (window.__airouterInitialLoginClickAttempts >= 3) {{
+      return false;
+    }}
+    if (window.__airouterInitialLoginLastClickAt && Date.now() - window.__airouterInitialLoginLastClickAt < 1500) {{
+      return false;
+    }}
+
+    const candidates = [...document.querySelectorAll('a, button, [role="button"]')];
+    const loginButton = candidates.find((item) => {{
+      const text = buttonText(item);
+      const href = item.getAttribute('href') || '';
+      return /^(登录|Log in|Login|Sign in)$/i.test(text) || /\/(auth\/)?login/.test(href);
+    }});
+    if (!loginButton) {{
+      return false;
+    }}
+
+    window.__airouterInitialLoginClickAttempts = (window.__airouterInitialLoginClickAttempts || 0) + 1;
+    window.__airouterInitialLoginLastClickAt = Date.now();
+    loginButton.click();
+    return true;
+  }}
+
+  function dismissPostLoginGuide() {{
+    const buttons = [...document.querySelectorAll('button')];
+    const startButton = buttons.find((button) => /好的[，, ]*开始吧|开始吧|继续/.test(buttonText(button)));
+    if (startButton && /入门技巧|请核实你的信息|尽管问/.test(pageText())) {{
+      startButton.click();
+      return true;
+    }}
+    return false;
+  }}
+
+  function isLoginStillInProgress() {{
+    const text = pageText();
+    const hasEmailInput = !!document.querySelector('input[type="email"], input[name="email"]');
+    const hasOtpInput = !!document.querySelector('input[autocomplete="one-time-code"], input[inputmode="numeric"]');
+    const loginButtons = [...document.querySelectorAll('button,a')]
+      .some((item) => /^(登录|免费注册|使用 Google 账户继续|使用 Apple 账户继续|使用电话号码继续|继续)$/.test((item.innerText || item.textContent || '').trim()));
+    return hasEmailInput
+      || hasOtpInput
+      || loginButtons
+      || /登录或注册|检查你的收件箱|验证码|电子邮件地址|重新发送电子邮件|获取为你量身定制的回复/.test(text);
+  }}
+
+  function isLoggedInHtmlReady() {{
+    const text = pageText();
+    if (isLoginStillInProgress()) {{
+      return false;
+    }}
+
+    const hasProfileMenu = [...document.querySelectorAll('button')]
+      .some((button) => /个人资料|账户菜单|打开.*菜单|升级/.test(button.getAttribute('aria-label') || '') || /免费版|Plus|Pro|Team|Enterprise/.test(button.innerText || ''));
+    const hasComposer = !!document.querySelector('textarea, [contenteditable="true"], [data-testid*="composer"], form textarea')
+      || /尽管问|发送消息|Message ChatGPT|Ask anything|我们先从哪里开始/.test(text);
+    const hasLoggedInSidebar = /新对话|新聊天|搜索聊天|搜索对话|历史聊天记录/.test(text);
+    const hasPostLoginGuide = /入门技巧|请勿共享敏感信息|请核实你的信息|好的[，, ]*开始吧/.test(text);
+    return hasPostLoginGuide || (hasComposer && (hasProfileMenu || hasLoggedInSidebar));
+  }}
+
+  function submitByTauriNavigation(payload) {{
+    const nativePayload = encodeURIComponent(JSON.stringify({{ callbackUrl, payload }}));
+    window.location.href = 'airouter-auth-session://callback#' + nativePayload;
+    window.setTimeout(() => {{
+      window.close();
+    }}, 300);
+  }}
+
+  function submitSession(session) {{
+    const payload = JSON.stringify({{ ok: true, session }});
+    setStatus('Airouter: 正在使用 Tauri 原生回填 AuthSession...');
+    submitByTauriNavigation(payload);
+    return new Promise(() => {{}});
+  }}
+
+  function parseSessionCandidate(candidate) {{
+    if (typeof candidate === 'string') {{
+      candidate = JSON.parse(candidate);
+    }}
+    if (candidate && candidate.accessToken && candidate.account && candidate.account.id) {{
+      return candidate;
+    }}
+    return null;
+  }}
+
+  async function submitSessionFromApiPage() {{
+    if (window.location.pathname !== '/api/auth/session') {{
+      return false;
+    }}
+    const raw = (document.body && document.body.innerText ? document.body.innerText : '').trim();
+    if (!raw) {{
+      setStatus('Airouter: AuthSession 页面还在加载...');
+      return true;
+    }}
+    try {{
+      const session = parseSessionCandidate(raw);
+      if (session) {{
+        setStatus('Airouter: 已从 AuthSession 页面读取 JSON，正在回填...');
+        await submitSession(session);
+        setStatus('Airouter: 已回填 AuthSession。');
+        window.close();
+      }} else {{
+        const parsed = JSON.parse(raw);
+        const keys = parsed && typeof parsed === 'object' ? Object.keys(parsed).join(',') : typeof parsed;
+        const message = 'Airouter: AuthSession 页面返回不完整，字段: ' + keys;
+        setStatus(message);
+        postReport(message);
+      }}
+    }} catch (err) {{
+      const message = 'Airouter: AuthSession 页面 JSON 解析失败：' + (err && err.message ? err.message : String(err));
+      setStatus(message);
+      postReport(message);
+    }}
+    return true;
+  }}
+
+  function openRawSessionPage(reason) {{
+    if (window.location.pathname === '/api/auth/session') {{
+      return;
+    }}
+    setStatus(reason + '\nAirouter: 正在打开 AuthSession 原始页面重试...');
+    window.location.href = sessionUrl + '?airouter=' + Date.now();
+  }}
+
+  async function probeAuthSession() {{
+    try {{
+      if (await submitSessionFromApiPage()) {{
+        return;
+      }}
+      if (clickCookieBannerButton()) {{
+        setStatus('Airouter: 已关闭 cookie 提示，正在准备登录...');
+        return;
+      }}
+      if (clickInitialLoginButton()) {{
+        setStatus('Airouter: 已打开 ChatGPT 登录入口，请继续完成登录。');
+        return;
+      }}
+      if (dismissPostLoginGuide()) {{
+        setStatus('Airouter: 已检测到登录后引导，正在关闭引导...');
+        return;
+      }}
+      if (!isLoggedInHtmlReady()) {{
+        const message = 'Airouter: 等待 ChatGPT 登录完成，当前页面还不是登录后主界面。';
+        setStatus(message);
+        return;
+      }}
+      if (!window.__airouterAuthSessionLastReady) {{
+        window.__airouterAuthSessionLastReady = Date.now();
+        setStatus('Airouter: 已检测到登录成功页面，等待 ChatGPT 初始化登录态...');
+        return;
+      }}
+      if (Date.now() - window.__airouterAuthSessionLastReady < 1500) {{
+        setStatus('Airouter: 已检测到登录成功页面，等待 ChatGPT 初始化登录态...');
+        return;
+      }}
+      if (window.__airouterAuthSessionProbeInFlight) {{
+        return;
+      }}
+      if (window.__airouterAuthSessionProbeAttempts >= 6) {{
+        const message = 'Airouter: 已确认登录成功，但多次读取 AuthSession 未返回完整 JSON，请稍后重新点击 App 自动获取。';
+        setStatus(message);
+        postReport(message);
+        return;
+      }}
+      window.__airouterAuthSessionProbeInFlight = true;
+      window.__airouterAuthSessionProbeAttempts += 1;
+      setStatus('Airouter: 正在读取 ChatGPT AuthSession...');
+      const response = await fetch(sessionUrl, {{
+        credentials: 'include',
+        cache: 'no-store',
+        headers: {{
+          accept: 'application/json, text/plain, */*',
+          'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8'
+        }}
+      }});
+      const contentType = response.headers.get('content-type') || '';
+      if (!response.ok || !contentType.toLowerCase().includes('application/json')) {{
+        const message = 'Airouter: session 未就绪，HTTP ' + response.status + ', content-type: ' + (contentType || '空');
+        setStatus(message);
+        postReport(message);
+        return;
+      }}
+      const session = await response.json();
+      const validSession = parseSessionCandidate(session);
+      if (!validSession) {{
+        const keys = session && typeof session === 'object' ? Object.keys(session).join(',') : typeof session;
+        const message = 'Airouter: session 返回不完整，字段: ' + keys;
+        setStatus(message);
+        postReport(message);
+        if (session && typeof session === 'object' && Object.keys(session).length === 1 && session.WARNING_BANNER) {{
+          if (window.__airouterAuthSessionProbeAttempts >= 3) {{
+            openRawSessionPage(message);
+          }}
+        }}
+        return;
+      }}
+      setStatus('Airouter: 已读取 AuthSession，正在回填...');
+      await submitSession(validSession);
+      setStatus('Airouter: 已回填 AuthSession。');
+      window.close();
+    }} catch (err) {{
+      const message = 'Airouter: 自动读取失败：' + (err && err.message ? err.message : String(err));
+      setStatus(message);
+      postReport(message);
+    }} finally {{
+      window.__airouterAuthSessionProbeInFlight = false;
+    }}
+  }}
+
+  window.setInterval(probeAuthSession, 1000);
+  window.addEventListener('load', probeAuthSession);
+  new MutationObserver(() => {{
+    window.clearTimeout(window.__airouterAuthSessionMutationTimer);
+    window.__airouterAuthSessionMutationTimer = window.setTimeout(probeAuthSession, 250);
+  }}).observe(document.documentElement, {{ childList: true, subtree: true, characterData: true }});
+  probeAuthSession();
+}})();
+"#
+    )
+}
+
+fn open_auth_session_window_inner(app: &AppHandle, request: AuthSessionRequest) -> Result<(), String> {
+    if request.action != "open_auth_session" {
+        return Err("未知 AuthSession 请求".to_string());
+    }
+
+    let login_url = request.login_url.as_deref().unwrap_or(CHATGPT_LOGIN_URL);
+    let parsed_url = tauri::Url::parse(login_url)
+        .map_err(|error| format!("AuthSession 登录地址无效: {error}"))?;
+    if !matches!(parsed_url.host_str(), Some("chatgpt.com") | Some("chat.openai.com")) {
+        return Err("AuthSession 登录地址必须是 ChatGPT".to_string());
+    }
+    let label_suffix = request
+        .job_id
+        .as_deref()
+        .unwrap_or("window")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect::<String>();
+    let label = format!("{AUTH_SESSION_WINDOW_LABEL_PREFIX}{label_suffix}");
+    let callback_url = request.callback_url.clone();
+
+    WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed_url))
+        .title("ChatGPT 登录")
+        .inner_size(1120.0, 820.0)
+        .resizable(true)
+        .incognito(true)
+        .initialization_script(auth_session_probe_script(&request.callback_url))
+        .build()
+        .map_err(|error| format!("无法打开 AuthSession WebView: {error}"))?
+        .on_window_event(move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                let callback_url = callback_url.clone();
+                thread::spawn(move || {
+                    let payload = serde_json::json!({
+                        "ok": false,
+                        "cancelled": true,
+                        "message": "ChatGPT 登录窗口已关闭"
+                    })
+                    .to_string();
+                    let _ = post_auth_session_callback(&callback_url, &payload);
+                });
+            }
+        });
+
+    Ok(())
+}
+
+fn start_auth_session_request_watcher(app: AppHandle) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(500));
+        let Ok(runtime_dir) = app_data_root() else {
+            continue;
+        };
+        let request_file = runtime_dir.join(AUTH_SESSION_REQUEST_FILE);
+        if !request_file.exists() {
+            continue;
+        }
+
+        let raw = fs::read_to_string(&request_file).unwrap_or_default();
+        let _ = fs::remove_file(&request_file);
+        let request = match serde_json::from_str::<AuthSessionRequest>(&raw) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("Airouter AuthSession request parse failed: {error}");
+                continue;
+            }
+        };
+        let app_for_main = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            if let Err(error) = open_auth_session_window_inner(&app_for_main, request) {
+                eprintln!("Airouter AuthSession WebView failed: {error}");
+            }
+        }) {
+            eprintln!("Airouter AuthSession dispatch failed: {error}");
+        }
     });
 }
 
@@ -829,7 +1337,48 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("external-link")
-                .on_navigation(|_, url| {
+                .on_navigation(|webview, url| {
+                    if url.scheme() == "airouter-auth-session" {
+                        let app = webview.app_handle().clone();
+                        let label = webview.label().to_string();
+                        let url = url.clone();
+                        thread::spawn(move || {
+                            let callback = (|| {
+                                let encoded = url
+                                    .fragment()
+                                    .ok_or_else(|| "AuthSession 原生回调缺少 payload".to_string())?;
+                                let decoded = percent_decode(encoded)?;
+                                serde_json::from_str::<NativeAuthSessionCallback>(&decoded)
+                                    .map_err(|error| format!("AuthSession 原生回调 JSON 无效: {error}"))
+                            })();
+
+                            match callback {
+                                Ok(callback) => {
+                                    let post_result = post_auth_session_callback(&callback.callback_url, &callback.payload);
+                                    let deliver_result = deliver_auth_session_to_main(&app, &callback.payload);
+                                    if post_result.is_ok() || deliver_result.is_ok() {
+                                        close_auth_session_window_on_main_thread(&app, label);
+                                    } else {
+                                        if let Err(error) = post_result {
+                                            eprintln!("Airouter AuthSession native HTTP callback failed: {error}");
+                                        }
+                                        if let Err(error) = deliver_result {
+                                            eprintln!("Airouter AuthSession native main-window callback failed: {error}");
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("Airouter AuthSession native callback failed: {error}");
+                                }
+                            }
+                        });
+                        return false;
+                    }
+
+                    if webview.label().starts_with(AUTH_SESSION_WINDOW_LABEL_PREFIX) {
+                        return matches!(url.scheme(), "http" | "https");
+                    }
+
                     if should_keep_in_app(url) || !matches!(url.scheme(), "http" | "https") {
                         true
                     } else {
@@ -841,6 +1390,7 @@ pub fn run() {
         )
         .setup(|app| {
             let app_handle = app.handle().clone();
+            start_auth_session_request_watcher(app_handle.clone());
             thread::spawn(move || {
                 if let Err(error) = maybe_start_or_prompt_for_config(&app_handle) {
                     eprintln!("Airouter Desktop startup failed: {error}");
@@ -889,7 +1439,7 @@ mod tests {
     fn builds_admin_url_with_auth_token() {
         assert_eq!(
             build_admin_url(3009, Some("auth_abc")),
-            "http://localhost:3009/admin/configs?auth_token=auth_abc"
+            "http://localhost:3009/admin/configs?auth_token=auth_abc&desktop_app=1"
         );
     }
 
@@ -897,7 +1447,7 @@ mod tests {
     fn builds_admin_url_without_empty_auth_token() {
         assert_eq!(
             build_admin_url(3009, Some("")),
-            "http://localhost:3009/admin/configs"
+            "http://localhost:3009/admin/configs?desktop_app=1"
         );
     }
 

@@ -64,6 +64,8 @@ let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
 const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
 const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
+const DESKTOP_AUTH_SESSION_REQUEST_FILE = path.join(__dirname, 'airouter.auth-session.request.json');
+const DESKTOP_AUTH_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const MIN_REMAINING_PERCENT = 3;
@@ -1189,6 +1191,76 @@ function openExternalUrl(rawUrl, options = {}) {
     });
 }
 
+let desktopAuthSessionJob = null;
+
+function startDesktopAuthSessionJob() {
+    const job = {
+        id: `${Date.now()}`,
+        status: 'running',
+        started_at: Date.now(),
+        payload: null,
+        last_probe: '',
+        error: ''
+    };
+    desktopAuthSessionJob = job;
+    fs.writeFileSync(
+        DESKTOP_AUTH_SESSION_REQUEST_FILE,
+        JSON.stringify({
+            action: 'open_auth_session',
+            job_id: job.id,
+            login_url: 'https://chatgpt.com/',
+            callback_url: `http://localhost:${runtimePort}/admin/api/desktop/auth-session/callback?auth_token=${encodeURIComponent(getConfiguredAuthToken(currentParsedConfig))}`,
+            created_at: new Date().toISOString()
+        }, null, 2)
+    );
+    return job;
+}
+
+function receiveDesktopAuthSession(payload) {
+    if (typeof payload === 'string') {
+        try {
+            payload = JSON.parse(payload);
+        } catch (err) {
+            throw new ConfigEditorError('AuthSession 回填 JSON 解析失败');
+        }
+    }
+
+    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
+        throw new ConfigEditorError('自动获取 AuthSession 尚未启动');
+    }
+
+    const session = payload && payload.session;
+    if (!session || typeof session !== 'object' || !session.accessToken || !session.account || !session.account.id) {
+        throw new ConfigEditorError('AuthSession JSON 不完整');
+    }
+
+    desktopAuthSessionJob.status = 'complete';
+    desktopAuthSessionJob.payload = {
+        ok: true,
+        session
+    };
+    return desktopAuthSessionJob.payload;
+}
+
+function updateDesktopAuthSessionProbe(payload) {
+    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
+        return;
+    }
+
+    if (payload && payload.cancelled) {
+        desktopAuthSessionJob.status = 'cancelled';
+        desktopAuthSessionJob.error = typeof payload.message === 'string'
+            ? payload.message
+            : 'ChatGPT 登录窗口已关闭';
+        return;
+    }
+
+    const message = payload && typeof payload.message === 'string'
+        ? payload.message
+        : '等待 ChatGPT 登录完成';
+    desktopAuthSessionJob.last_probe = message.slice(0, 500);
+}
+
 function parseConfigItemJson(rawJson) {
     if (typeof rawJson !== 'string' || rawJson.trim().length === 0) {
         throw new ConfigEditorError('请先输入配置项 JSON');
@@ -1197,8 +1269,19 @@ function parseConfigItemJson(rawJson) {
     try {
         const parsed = JSON.parse(rawJson);
 
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            throw new ConfigEditorError('配置项 JSON 必须是对象');
+        if (!parsed || typeof parsed !== 'object') {
+            throw new ConfigEditorError('配置项 JSON 必须是对象或对象数组');
+        }
+
+        if (Array.isArray(parsed)) {
+            if (parsed.length === 0) {
+                throw new ConfigEditorError('配置项 JSON 数组不能为空');
+            }
+            parsed.forEach((item, index) => {
+                if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                    throw new ConfigEditorError(`配置项 JSON 数组第 ${index + 1} 项必须是对象`);
+                }
+            });
         }
 
         return parsed;
@@ -1881,6 +1964,15 @@ app.get('/admin/configs', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
 });
 
+app.use('/admin/api/desktop/auth-session/callback', express.text({
+    type: 'text/plain',
+    limit: '1mb'
+}));
+app.use('/admin/api/desktop/auth-session/callback', express.urlencoded({
+    extended: false,
+    limit: '1mb'
+}));
+
 app.get('/admin/api/configs', (req, res) => {
     try {
         res.json(buildConfigAdminResponse());
@@ -1978,24 +2070,54 @@ app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
 app.post('/admin/api/configs', async (req, res) => {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
-        const rawItem = parseConfigItemJson(req.body && req.body.raw_json);
+        const rawInput = parseConfigItemJson(req.body && req.body.raw_json);
         const configType = req.body && typeof req.body.config_type === 'string'
             ? req.body.config_type.trim()
             : '';
-        const inputItem = configType
-            ? buildImportedConfigItem(configType, rawItem)
-            : buildImportedConfigItem(rawItem);
-        const itemWithCreatedAt = {
-            ...inputItem,
-            created_at: inputItem.created_at || new Date().toISOString()
-        };
-        const validatedRuntimeConfig = await validateConfigItemBeforeAdd(null, itemWithCreatedAt);
-        const nextParsed = addConfigItem(parsed, itemWithCreatedAt);
+        const rawItems = Array.isArray(rawInput) ? rawInput : [rawInput];
+        if (Array.isArray(rawInput) && configType !== 'token') {
+            throw new ConfigEditorError('批量新增只支持 token 模式');
+        }
+
+        const now = new Date().toISOString();
+        const itemsWithCreatedAt = rawItems.map((rawItem, index) => {
+            try {
+                const inputItem = configType
+                    ? buildImportedConfigItem(configType, rawItem)
+                    : buildImportedConfigItem(rawItem);
+                return {
+                    ...inputItem,
+                    created_at: inputItem.created_at || now
+                };
+            } catch (err) {
+                if (rawItems.length > 1) {
+                    throw new ConfigEditorError(`第 ${index + 1} 个配置项无效: ${err.message}`);
+                }
+                throw err;
+            }
+        });
+        const validatedRuntimeConfigs = itemsWithCreatedAt.map((item, index) => {
+            try {
+                return validateConfigItemBeforeAdd(null, item);
+            } catch (err) {
+                if (itemsWithCreatedAt.length > 1) {
+                    throw new ConfigEditorError(`第 ${index + 1} 个配置项无效: ${err.message}`);
+                }
+                throw err;
+            }
+        });
+        const nextParsed = itemsWithCreatedAt.reduce(
+            (next, item) => addConfigItem(next, item),
+            parsed
+        );
         await persistAndReloadConfig(nextParsed, 'admin_create', {
-            runtimeOverrides: [validatedRuntimeConfig],
+            runtimeOverrides: validatedRuntimeConfigs,
             skipQuotaRefresh: true
         });
-        res.status(201).json(buildConfigAdminResponse());
+        res.status(201).json({
+            ...buildConfigAdminResponse(),
+            added_count: itemsWithCreatedAt.length
+        });
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
@@ -2110,6 +2232,97 @@ app.post('/admin/api/open-external', async (req, res) => {
             details: err.message
         });
     }
+});
+
+app.post('/admin/api/desktop/auth-session', async (req, res) => {
+    try {
+        const job = startDesktopAuthSessionJob();
+        res.status(202).json({
+            ok: true,
+            status: job.status,
+            job_id: job.id
+        });
+    } catch (err) {
+        res.status(500).json({
+            error: '自动获取 AuthSession 触发失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/desktop/auth-session/callback', (req, res) => {
+    try {
+        let body = req.body;
+        if (body && typeof body === 'object' && typeof body.payload === 'string') {
+            body = body.payload;
+        }
+        let parsedBody = body;
+        if (typeof parsedBody === 'string') {
+            try {
+                parsedBody = JSON.parse(parsedBody);
+            } catch (err) {
+                throw new ConfigEditorError('AuthSession 回填 JSON 解析失败');
+            }
+        }
+        if (parsedBody && parsedBody.ok === false) {
+            updateDesktopAuthSessionProbe(parsedBody);
+            res.json({ ok: false, waiting: true });
+            return;
+        }
+        const payload = receiveDesktopAuthSession(parsedBody);
+        res.json(payload);
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? 'AuthSession 回填失败' : 'AuthSession 回填异常',
+            details: err.message
+        });
+    }
+});
+
+app.get('/admin/api/desktop/auth-session', (req, res) => {
+    if (!desktopAuthSessionJob) {
+        res.status(404).json({
+            error: '自动获取 AuthSession 尚未启动',
+            details: '请先点击 App 自动获取'
+        });
+        return;
+    }
+
+    if (Date.now() - desktopAuthSessionJob.started_at > DESKTOP_AUTH_SESSION_TIMEOUT_MS) {
+        desktopAuthSessionJob.status = 'error';
+        desktopAuthSessionJob.error = '等待 ChatGPT 登录超时';
+    }
+
+    if (desktopAuthSessionJob.status === 'complete') {
+        res.json(desktopAuthSessionJob.payload);
+        return;
+    }
+
+    if (desktopAuthSessionJob.status === 'error') {
+        res.status(502).json({
+            error: '自动获取 AuthSession 失败',
+            details: desktopAuthSessionJob.error || '未知错误'
+        });
+        return;
+    }
+
+    if (desktopAuthSessionJob.status === 'cancelled') {
+        res.json({
+            ok: false,
+            cancelled: true,
+            status: desktopAuthSessionJob.status,
+            message: desktopAuthSessionJob.error || 'ChatGPT 登录窗口已关闭'
+        });
+        return;
+    }
+
+    res.json({
+        ok: false,
+        waiting: true,
+        status: desktopAuthSessionJob.status,
+        message: desktopAuthSessionJob.last_probe || ''
+    });
 });
 
 app.post('/admin/api/start-service', (req, res) => {

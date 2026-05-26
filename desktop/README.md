@@ -11,6 +11,8 @@ Windows: %APPDATA%\Airouter\airouter\
 
 It does not modify the root service files. Build preparation copies the service into `desktop/src-tauri/resources/airouter/` and places the platform Node.js sidecar in `desktop/src-tauri/binaries/`.
 
+The bundled management page can use the desktop shell to fetch ChatGPT AuthSession JSON. Click `App 自动获取`, log in in the ChatGPT window opened by the app, and the session JSON is filled back into the Token config form after login succeeds.
+
 ## Development
 
 ```bash
