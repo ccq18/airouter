@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Call Airouter's OpenAI-compatible image generation and edit endpoints.
+"""调用 Airouter 的 OpenAI 兼容图片生成和图片编辑接口。
 
-Examples:
+示例：
   python scripts/image_endpoints_demo.py
   python scripts/image_endpoints_demo.py --ak sk-airouter-xxxx
   python scripts/image_endpoints_demo.py --input-image /path/to/input.png --skip-generation
@@ -23,6 +23,13 @@ from pathlib import Path
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:3009"
+
+# 图片模型列表来自 Codex 源码：
+# /Users/lrd/code/jscode/codex/codex-rs/skills/src/assets/samples/imagegen/references/image-api.md
+# 当前列出：gpt-image-2、gpt-image-1.5、gpt-image-1、gpt-image-1-mini。
+# token 模式下这个 model 字段用于兼容 OpenAI Images 客户端；Airouter
+# 会转成 Codex Responses + image_generation 工具调用，真正的上游
+# Responses 模型由服务端配置决定。
 DEFAULT_GENERATION_PROMPT = (
     "A tasteful illustrated portrait of an adult East Asian woman, elegant, "
     "dignified, fully clothed, neutral background, no text, no watermark."
@@ -38,47 +45,47 @@ DEFAULT_EDIT_PROMPT = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Test /v1/images/generations and /v1/images/edits through Airouter.",
+        description="通过 Airouter 测试 /v1/images/generations 和 /v1/images/edits。",
     )
     parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
-        help=f"Airouter base URL, default: {DEFAULT_BASE_URL}",
+        help=f"Airouter 基础地址，默认：{DEFAULT_BASE_URL}",
     )
     parser.add_argument(
         "--api-key",
         "--ak",
         dest="api_key",
         default=os.environ.get("AIROUTER_API_KEY", ""),
-        help="Optional Airouter entry API key. Also reads AIROUTER_API_KEY.",
+        help="可选的 Airouter 入口 API key；也会读取 AIROUTER_API_KEY。",
     )
-    parser.add_argument("--model", default="gpt-image-1.5")
+    parser.add_argument("--model", default="gpt-image-2")
     parser.add_argument("--output-format", default="png", choices=("png", "jpeg", "webp"))
-    parser.add_argument("--size", default="", help="Optional generation size, for example 1024x1024.")
-    parser.add_argument("--quality", default="", help="Optional generation quality, for example medium.")
+    parser.add_argument("--size", default="", help="可选的生成尺寸，例如 1024x1024。")
+    parser.add_argument("--quality", default="", help="可选的生成质量，例如 medium。")
     parser.add_argument("--prompt", default=DEFAULT_GENERATION_PROMPT)
     parser.add_argument("--edit-prompt", default=DEFAULT_EDIT_PROMPT)
     parser.add_argument(
         "--input-image",
         default="",
-        help="Optional local image for /v1/images/edits. If omitted, the generated image is used.",
+        help="可选的本地图片，用于 /v1/images/edits；不传则使用刚生成的图片。",
     )
     parser.add_argument(
         "--skip-generation",
         action="store_true",
-        help="Only call /v1/images/edits. Requires --input-image.",
+        help="只调用 /v1/images/edits；需要同时提供 --input-image。",
     )
     parser.add_argument(
         "--skip-edit",
         action="store_true",
-        help="Only call /v1/images/generations.",
+        help="只调用 /v1/images/generations。",
     )
     parser.add_argument(
         "--out-dir",
         default="/tmp/airouter-image-demo",
-        help="Directory for JSON responses and decoded images.",
+        help="保存 JSON 响应和解码图片的目录。",
     )
-    parser.add_argument("--timeout", type=float, default=330.0, help="HTTP timeout in seconds.")
+    parser.add_argument("--timeout", type=float, default=660.0, help="HTTP 超时时间，单位秒。")
     return parser.parse_args()
 
 

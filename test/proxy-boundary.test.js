@@ -178,6 +178,14 @@ test('server registers token image compatibility before the generic v1 proxy', (
   assert.ok(editsRouteIndex < genericProxyIndex, 'edits route should run before generic proxy');
 });
 
+test('server defaults upstream requests to the official SDK timeout window', () => {
+  const openaiSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const upstreamSource = fs.readFileSync(path.join(__dirname, '..', 'app/upstream-request.js'), 'utf8');
+
+  assert.match(openaiSource, /UPSTREAM_REQUEST_TIMEOUT_MS', 10 \* 60 \* 1000/);
+  assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);
+});
+
 test('createClaudeMessagesHandler rejects apikey configs with a clear error before contacting upstream', async () => {
   let upstreamCalled = false;
   const handler = createClaudeMessagesHandler({

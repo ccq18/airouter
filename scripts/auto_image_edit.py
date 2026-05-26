@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Automatically retouch an image through Airouter.
+"""通过 Airouter 自动修图。
 
-The default flow sends the input image to /v1/responses first so the model can
-write a focused edit prompt, then sends the original image plus that prompt to
-/v1/images/edits.
+默认流程会先把输入图片发到 /v1/responses，让模型生成一段聚焦的修图
+prompt；然后再把原图和这段 prompt 一起发到 /v1/images/edits。
 
-Examples:
+示例：
   python scripts/auto_image_edit.py --input-image /path/to/photo.png
   python scripts/auto_image_edit.py --input-image /path/to/photo.png --ak sk-airouter-xxxx
   python scripts/auto_image_edit.py --input-image /path/to/photo.png --prompt "Brighten it naturally"
@@ -28,8 +27,25 @@ from pathlib import Path
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:3009"
+
+# 模型支持说明：
+# - Responses 模型列表来自 Codex 源码：
+#   /Users/lrd/code/jscode/codex/codex-rs/models-manager/models.json
+#   当前列出：gpt-5.5、gpt-5.4、gpt-5.4-mini、gpt-5.3-codex、
+#   gpt-5.2、codex-auto-review。生成修图 prompt 的步骤调用
+#   /v1/responses，默认使用 gpt-5.5；其它模型是否可用，取决于当前
+#   Airouter 账号或上游是否开放。
+# - GPT Image 模型列表来自 Codex 源码：
+#   /Users/lrd/code/jscode/codex/codex-rs/skills/src/assets/samples/imagegen/references/image-api.md
+#   当前列出：gpt-image-2、gpt-image-1.5、gpt-image-1、
+#   gpt-image-1-mini。真正修图的步骤调用 /v1/images/edits，并把
+#   --image-model 作为 OpenAI Images 兼容字段传入。
+# - 在 Airouter token 模式下，/v1/images/edits 会被转换成 Codex
+#   Responses + image_generation 工具调用，所以真正发给上游的模型由服务端
+#   AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL 控制，默认是 gpt-5.5。
+#   在 apikey 模式下，则由上游 Images API 自己决定支持哪些图片模型。
 DEFAULT_RESPONSES_MODEL = "gpt-5.5"
-DEFAULT_IMAGE_MODEL = "gpt-image-1.5"
+DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_OUTPUT_FORMAT = "png"
 DEFAULT_RETOUCH_GOAL = (
     "Create a concise image-editing prompt that improves this image naturally. "
@@ -43,30 +59,30 @@ DEFAULT_RETOUCH_GOAL = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Retouch one local image through Airouter /v1/responses and /v1/images/edits.",
+        description="通过 Airouter 的 /v1/responses 和 /v1/images/edits 修一张本地图片。",
     )
-    parser.add_argument("--input-image", required=True, help="Local image to retouch.")
+    parser.add_argument("--input-image", required=True, help="要修的本地图片。")
     parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
-        help=f"Airouter base URL, default: {DEFAULT_BASE_URL}",
+        help=f"Airouter 基础地址，默认：{DEFAULT_BASE_URL}",
     )
     parser.add_argument(
         "--api-key",
         "--ak",
         dest="api_key",
         default=os.environ.get("AIROUTER_API_KEY", ""),
-        help="Optional Airouter entry API key. Also reads AIROUTER_API_KEY.",
+        help="可选的 Airouter 入口 API key；也会读取 AIROUTER_API_KEY。",
     )
     parser.add_argument(
         "--prompt",
         default="",
-        help="Use this edit prompt directly and skip /v1/responses prompt generation.",
+        help="直接使用这段修图 prompt，并跳过 /v1/responses 的 prompt 生成步骤。",
     )
     parser.add_argument(
         "--retouch-goal",
         default=DEFAULT_RETOUCH_GOAL,
-        help="Instruction sent to /v1/responses when --prompt is not provided.",
+        help="未提供 --prompt 时，发送给 /v1/responses 的修图目标说明。",
     )
     parser.add_argument("--responses-model", default=DEFAULT_RESPONSES_MODEL)
     parser.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
@@ -74,14 +90,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         default=".",
-        help="Directory for the edited image, and debug files when --save-debug is set. Defaults to the current folder.",
+        help="修图结果的输出目录；开启 --save-debug 时也会保存调试文件。默认是当前目录。",
     )
     parser.add_argument(
         "--save-debug",
         action="store_true",
-        help="Save generated prompt and raw JSON/SSE responses next to the edited image.",
+        help="在修图结果旁边保存生成的 prompt 和原始 JSON/SSE 响应。",
     )
-    parser.add_argument("--timeout", type=float, default=330.0, help="HTTP timeout in seconds.")
+    parser.add_argument("--timeout", type=float, default=660.0, help="HTTP 超时时间，单位秒。")
     return parser.parse_args()
 
 

@@ -107,7 +107,7 @@ function parseTimeoutMs(name, fallbackValue) {
     return Math.floor(parsedValue);
 }
 
-const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 5 * 60 * 1000);
+const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 10 * 60 * 1000);
 const QUOTA_CHECK_TIMEOUT_MS = parseTimeoutMs('QUOTA_CHECK_TIMEOUT_MS', 10 * 1000);
 
 function hasCliFlag(flag) {
@@ -1714,6 +1714,12 @@ async function handleTokenImageGenerationRequest(req, res, config) {
     let responsesPayload;
     try {
         responsesPayload = buildResponsesImageGenerationBody(payload, {
+            // token 模式真正使用的是 Responses 模型，不是客户端传来的
+            // gpt-image-* 图片模型名。Codex 源码的模型目录在
+            // codex-rs/models-manager/models.json，当前列出：
+            // gpt-5.5、gpt-5.4、gpt-5.4-mini、gpt-5.3-codex、
+            // gpt-5.2、codex-auto-review。某个模型是否开启
+            // image_generation 工具，以当前账号后端运行时为准。
             model: process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
         });
     } catch (err) {
@@ -1762,6 +1768,8 @@ async function handleTokenImageEditRequest(req, res, config) {
     try {
         const form = parseMultipartFormData(body, req.headers['content-type']);
         responsesPayload = buildResponsesImageEditBody(form, {
+            // token 模式的模型支持规则见上面的图片生成处理逻辑。apikey 配置
+            // 不走这里，而是直接由上游 Images API 决定支持哪些图片模型。
             model: process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
         });
     } catch (err) {

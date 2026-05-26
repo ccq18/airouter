@@ -261,3 +261,11 @@ test('auto_image_edit.py writes debug files only when requested', async () => {
   assert.ok(files.some(file => /^auto-image-edit-\d{8}-\d{6}-edit-prompt\.txt$/.test(file)));
   assert.ok(files.some(file => /^auto-image-edit-\d{8}-\d{6}-image-edit-response\.json$/.test(file)));
 });
+
+test('image scripts default client timeout stays longer than the server timeout', async () => {
+  const autoEditSource = await fs.readFile(path.join(REPO_ROOT, 'scripts/auto_image_edit.py'), 'utf8');
+  const demoSource = await fs.readFile(path.join(REPO_ROOT, 'scripts/image_endpoints_demo.py'), 'utf8');
+
+  assert.match(autoEditSource, /default=660\.0, help="HTTP 超时时间，单位秒。"/);
+  assert.match(demoSource, /default=660\.0, help="HTTP 超时时间，单位秒。"/);
+});

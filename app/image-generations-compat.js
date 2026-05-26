@@ -1,3 +1,15 @@
+// Token 图片接口兼容路径通过 Codex Responses + image_generation 工具实现。
+// Codex 源码里的 Responses 模型目录来自：
+// /Users/lrd/code/jscode/codex/codex-rs/models-manager/models.json
+// 当前目录列出的模型是：gpt-5.5、gpt-5.4、gpt-5.4-mini、
+// gpt-5.3-codex、gpt-5.2、codex-auto-review。账号后端是否真的给某个
+// Responses 模型开启 image_generation，仍以运行时为准。
+// Codex 源码里的图片 API fallback 说明来自：
+// /Users/lrd/code/jscode/codex/codex-rs/skills/src/assets/samples/imagegen/references/image-api.md
+// 其中列出的 GPT Image 模型是：gpt-image-2、gpt-image-1.5、
+// gpt-image-1、gpt-image-1-mini。为了兼容 OpenAI Images 客户端，请求里
+// 仍然可以带这些图片模型名；但 token 路径真正发给上游的是下面这个
+// Responses 模型，默认值可用 AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL 覆盖。
 const DEFAULT_RESPONSES_IMAGE_MODEL = 'gpt-5.5';
 const SUPPORTED_OUTPUT_FORMATS = new Set(['png', 'jpeg', 'webp']);
 

@@ -1,0 +1,360 @@
+# API 接口文档
+
+本文档只描述客户端可以直接调用的 Airouter 对外接口。管理页、管理 API、桌面端控制接口、上游后台接口不在本文档范围内。
+
+默认服务地址：
+
+```text
+http://localhost:3009
+```
+
+如果配置了入口 `apikeys`，所有接口都需要携带其中一个入口密钥：
+
+```http
+Authorization: Bearer sk-airouter-xxxx
+```
+
+也可以使用：
+
+```http
+x-api-key: sk-airouter-xxxx
+```
+
+如果没有配置入口 `apikeys`，本机请求不会校验入口密钥。
+
+## 接口列表
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/health` | 查看本地服务和当前账号状态 |
+| `POST` | `/v1/responses` | OpenAI Responses 兼容接口 |
+| `POST` | `/v1/messages` | Claude Messages 兼容接口 |
+| `POST` | `/v1/images/generations` | OpenAI Images 图片生成兼容接口 |
+| `POST` | `/v1/images/edits` | OpenAI Images 图片编辑兼容接口 |
+| 任意 | `/v1/*` | 其它 OpenAI `/v1` 兼容接口透传 |
+
+## 通用转发规则
+
+Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配置优先级越高；当前活动配置可用时会继续沿用。
+
+`token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和部分账号切换逻辑。
+
+`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
+
+如果上游 `apikey` 返回 401/403、429、5xx，或请求失败，Airouter 会把该配置项临时标记为不可用，并尝试切到下一个可用配置。
+
+## GET /health
+
+用于检查本地服务是否存活，以及当前活动账号摘要。
+
+示例：
+
+```bash
+curl -sS http://localhost:3009/health \
+  -H "Authorization: Bearer sk-airouter-xxxx"
+```
+
+响应示例：
+
+```json
+{
+  "status": "ok",
+  "mode": "openai",
+  "timestamp": "2026/5/26 18:30:00",
+  "active_account": {
+    "index": 0,
+    "description": "account@example.com"
+  },
+  "configs": {
+    "total": 2,
+    "default": "account@example.com"
+  }
+}
+```
+
+## POST /v1/responses
+
+OpenAI Responses 兼容入口。请求体使用 JSON。
+
+示例：
+
+```bash
+curl -sS http://localhost:3009/v1/responses \
+  -H "Authorization: Bearer sk-airouter-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-5.5",
+    "input": "用一句话介绍 Airouter"
+  }'
+```
+
+常用字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `model` | string | 模型名。会先经过 `responses.model_aliases` 映射 |
+| `input` | string 或 array | 用户输入，格式兼容 Responses API |
+| `instructions` | string | 可选，系统指令 |
+| `tools` | array | 可选，工具列表 |
+| `tool_choice` | string 或 object | 可选，默认 `auto` |
+| `stream` | boolean | 可选，Airouter 默认补 `true` |
+| `store` | boolean | 可选，token 模式下会强制为 `false` |
+
+Airouter 会给 `/v1/responses` 补这些默认值：
+
+```json
+{
+  "instructions": "",
+  "tools": [],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "store": false,
+  "stream": true,
+  "include": []
+}
+```
+
+如果配置了 `responses.model_aliases`，`model` 会按大小写不敏感规则替换。例如配置：
+
+```json
+{
+  "responses": {
+    "model_aliases": {
+      "gpt-5.2": "gpt-5.5"
+    }
+  }
+}
+```
+
+请求里的 `"model": "GPT-5.2"` 会被转成 `"gpt-5.5"`。
+
+## POST /v1/messages
+
+Claude Messages 兼容入口。请求体使用 JSON。
+
+当存在 `support` 包含 `claude` 的 `apikey` 配置项时，Airouter 会优先把请求原样转发给该 Claude Messages 上游。没有可用 Claude 上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求。
+
+示例：
+
+```bash
+curl -sS http://localhost:3009/v1/messages \
+  -H "Authorization: Bearer sk-airouter-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 512,
+    "messages": [
+      {
+        "role": "user",
+        "content": "用一句话介绍 Airouter"
+      }
+    ]
+  }'
+```
+
+常用字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `model` | string | Claude Messages 模型名。原样转发时由上游决定；转换链路中可被 `claude_code.model` 覆盖 |
+| `max_tokens` | number | 最大输出 token。转换链路当前不向 Responses 传递该字段 |
+| `system` | string 或 array | 可选，系统提示词 |
+| `messages` | array | Claude Messages 消息列表 |
+| `tools` | array | 可选，Claude 工具定义 |
+| `tool_choice` | string 或 object | 可选，工具选择策略 |
+| `stream` | boolean | 可选，是否流式返回 |
+
+token 转换链路受配置项影响：
+
+```json
+{
+  "claude_code": {
+    "model": "gpt-5.4",
+    "reasoning_effort": "high"
+  }
+}
+```
+
+`claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 token 转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
+
+## POST /v1/images/generations
+
+OpenAI Images 图片生成兼容入口。请求体使用 JSON。
+
+示例：
+
+```bash
+curl -sS http://localhost:3009/v1/images/generations \
+  -H "Authorization: Bearer sk-airouter-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "A clean product-style photo of a small white ceramic mug on a desk.",
+    "size": "1024x1024",
+    "quality": "medium",
+    "output_format": "png"
+  }' \
+  -o image-generation-response.json
+```
+
+常用字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `prompt` | string | 是 | 图片生成提示词 |
+| `model` | string | 否 | OpenAI Images 兼容字段。token 模式下不会直接作为上游 Responses 模型使用 |
+| `n` | number | 否 | token 模式下只支持 `1` |
+| `output_format` | string | 否 | token 模式下支持 `png`、`jpeg`、`webp`，默认 `png` |
+| `size` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
+| `quality` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
+
+token 模式下，Airouter 会通过 Codex Responses 的 `image_generation` 工具生成图片，并返回 OpenAI Images 风格 JSON：
+
+```json
+{
+  "created": 1779778600,
+  "data": [
+    {
+      "b64_json": "...",
+      "revised_prompt": "..."
+    }
+  ]
+}
+```
+
+apikey 模式下，请求会直连上游 Images API，支持字段和返回格式由上游决定。
+
+### 图片模型速度实测
+
+下面是 2026-05-26 18:36 左右在本机 `http://127.0.0.1:3009` 上的单次生成测速。测试请求都使用同一条小 prompt、`output_format=png`，并校验返回里存在 `data[0].b64_json`。
+
+当前测试环境是 token 模式。token 模式下，`model` 字段用于兼容 OpenAI Images 客户端；Airouter 实际会转成 Codex Responses + `image_generation` 工具调用，真正发给上游的 Responses 模型由 `AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL` 控制。因此这张表只能代表当前 Airouter token 兼容路径的端到端耗时，不代表第三方 apikey 上游原生 Images API 的模型速度。
+
+| 请求里的图片模型 | HTTP 状态 | 单次耗时 | 返回图片数 | 备注 |
+| --- | --- | ---: | ---: | --- |
+| `gpt-image-2` | `200` | `16.14s` | `1` | 当前默认值 |
+| `gpt-image-1.5` | `200` | `17.32s` | `1` | 兼容旧客户端传参 |
+| `gpt-image-1` | `200` | `18.28s` | `1` | 兼容旧客户端传参 |
+| `gpt-image-1-mini` | `200` | `21.04s` | `1` | 兼容旧客户端传参 |
+
+复杂任务的耗时差异会明显放大。下面是同一环境下追加的一组单次复杂任务实测：
+
+- 复杂生成：同一条写实猫咪花园场景 prompt，包含自然光、毛发、胡须、眼睛、叶脉、石材纹理、景深、曝光平衡等细节要求。
+- 复杂编辑：同一张猫图作为输入，要求保留猫、姿势、构图和花园环境，同时改善曝光、暗部细节、色偏、毛发锐度和噪点。
+
+| 请求里的图片模型 | 复杂生成耗时 | 复杂编辑耗时 | 结果 |
+| --- | ---: | ---: | --- |
+| `gpt-image-2` | `300.05s` | `49.25s` | 生成超时；编辑成功 |
+| `gpt-image-1.5` | `139.63s` | `47.75s` | 生成成功；编辑成功 |
+| `gpt-image-1` | `84.67s` | `300.07s` | 生成成功；编辑超时 |
+| `gpt-image-1-mini` | `68.73s` | `300.04s` | 生成成功；编辑超时 |
+
+这里的 `300s` 左右表示 Airouter 等上游返回时达到服务端请求超时边界，返回 HTTP 500 `request timeout after 300000ms`。这些数据是单次样本，受账号状态、上游排队、图片尺寸、prompt 复杂度和网络状态影响很大，只适合作为当前链路的粗略参考。
+
+后续默认上游请求超时已经按官方 SDK 默认请求窗口调整为 `600000ms`（10 分钟），仍可用环境变量 `UPSTREAM_REQUEST_TIMEOUT_MS` 覆盖。两个图片测试脚本的客户端默认 timeout 是 `660s`，比服务端多 60 秒，方便服务端先返回上游结果或明确的超时错误。上表中的 `300s` 超时结果保留为调大超时前的实测记录。
+
+## POST /v1/images/edits
+
+OpenAI Images 图片编辑兼容入口。请求体使用 `multipart/form-data`。
+
+示例：
+
+```bash
+curl -sS http://localhost:3009/v1/images/edits \
+  -H "Authorization: Bearer sk-airouter-xxxx" \
+  -F "model=gpt-image-2" \
+  -F "prompt=Add a small red hat to the subject. Keep the original style and composition." \
+  -F "image=@/absolute/path/to/input.png" \
+  -F "size=1024x1024" \
+  -F "quality=medium" \
+  -F "output_format=png" \
+  -o image-edit-response.json
+```
+
+常用字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `prompt` | string | 是 | 图片编辑提示词 |
+| `image` | file | 是 | 输入图片。token 模式支持一个或多个同名 `image` 文件 |
+| `model` | string | 否 | OpenAI Images 兼容字段。token 模式下不会直接作为上游 Responses 模型使用 |
+| `n` | number | 否 | token 模式下只支持 `1` |
+| `output_format` | string | 否 | token 模式下支持 `png`、`jpeg`、`webp`，默认 `png` |
+| `size` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
+| `quality` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
+| `mask` | file | 否 | apikey 模式由上游决定；token 模式当前不处理 mask |
+
+token 模式下返回格式与 `/v1/images/generations` 一致：
+
+```json
+{
+  "created": 1779778600,
+  "data": [
+    {
+      "b64_json": "...",
+      "revised_prompt": "..."
+    }
+  ]
+}
+```
+
+保存图片示例：
+
+```bash
+python3 - <<'PY'
+import base64
+import json
+from pathlib import Path
+
+data = json.loads(Path("image-edit-response.json").read_text())
+Path("edited.png").write_bytes(base64.b64decode(data["data"][0]["b64_json"]))
+PY
+```
+
+## 其它 /v1/* OpenAI 兼容接口
+
+除上面单独处理的接口外，Airouter 会把其它 `/v1/*` 请求作为 OpenAI 兼容接口透传，例如：
+
+```text
+/v1/models
+/v1/chat/completions
+/v1/embeddings
+```
+
+示例：
+
+```bash
+curl -sS http://localhost:3009/v1/models \
+  -H "Authorization: Bearer sk-airouter-xxxx"
+```
+
+对这些接口：
+
+- token 配置项会走 Airouter 的 Codex 兼容链路；具体路径是否可用由当前账号对应的上游能力决定。
+- apikey 配置项会直连配置里的 `base_url`；具体路径是否可用由第三方上游决定。
+- 路径命中 `/responses` 时会应用 Responses 默认值和模型别名；其它路径一般保持请求体原样。
+
+## 状态码和错误格式
+
+Airouter 自己产生的错误通常是 JSON：
+
+```json
+{
+  "error": "请求体处理失败",
+  "details": "prompt 必须是非空字符串"
+}
+```
+
+常见状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | 请求体格式错误、必填字段缺失、当前兼容路径不支持的参数 |
+| `401` | 配置了入口 `apikeys`，但请求没有提供有效入口密钥 |
+| `404` | 路径不存在 |
+| `405` | 接口不支持该 HTTP 方法 |
+| `415` | `/v1/messages` 没有使用 `application/json` |
+| `502` | 没有可用配置项，或上游请求失败 |
+| `504` | 上游请求超时 |
+
+上游直接返回的错误会尽量保持原状态码、响应头和响应体。

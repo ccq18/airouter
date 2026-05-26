@@ -88,6 +88,8 @@ http://localhost:3009/v1/images/edits
 http://localhost:3009/v1/messages
 ```
 
+完整接口说明见 [API 接口文档](docs/api-reference.md)。
+
 Token 配置下，`/v1/images/generations` 和 `/v1/images/edits` 会通过 Codex Responses 的 `image_generation` 工具兼容输出 OpenAI Images JSON：
 
 ```json
