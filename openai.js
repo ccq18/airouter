@@ -8,8 +8,15 @@ const { spawn } = require('node:child_process');
 const { inspect } = require('node:util');
 const zlib = require('zlib');
 const express = require('express');
-const { createUpstreamRequest, consumeResponseBody } = require('./app/upstream-request');
+const { createUpstreamRequest, consumeResponseBody, requestBuffered } = require('./app/upstream-request');
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
+const { buildIncomingUrl, rewriteProxyUrl } = require('./app/proxy-url-rewrite');
+const {
+    buildResponsesImageEditBody,
+    buildResponsesImageGenerationBody,
+    extractImageGenerationResponse,
+    parseMultipartFormData,
+} = require('./app/image-generations-compat');
 const { normalizeResponsesRequestBody, isResponsesPath } = require('./app/responses-defaults');
 const { createClaudeMessagesHandler } = require('./app/claude-messages-handler');
 const { createAccountManager } = require('./app/account-manager');
@@ -1215,42 +1222,6 @@ function validateConfigItemBeforeAdd(type, item) {
     }
 }
 
-function buildIncomingUrl(req, proxyPath = '') {
-    const combinedUrl = `${req.baseUrl || ''}${req.url || ''}`;
-    if (!proxyPath || !combinedUrl.startsWith(proxyPath)) {
-        return combinedUrl || '/';
-    }
-
-    const strippedUrl = combinedUrl.slice(proxyPath.length);
-    return strippedUrl.startsWith('/') ? strippedUrl : `/${strippedUrl}`;
-}
-
-function rewriteProxyUrl(incomingUrl, config) {
-    const parsedUrl = new URL(incomingUrl, 'http://localhost');
-    if (config.type === 'apikey') {
-        if (!parsedUrl.searchParams.has('client_version')) {
-            parsedUrl.searchParams.set('client_version', '1');
-        }
-        return `${parsedUrl.pathname}${parsedUrl.search}`;
-    }
-
-    const incomingPath = parsedUrl.pathname || '/';
-    let upstreamPath;
-
-    if (incomingPath === '/v1' || incomingPath.startsWith('/v1/')) {
-        const suffix = incomingPath === '/v1' ? '' : incomingPath.slice('/v1'.length);
-        upstreamPath = `${config.apiBasePath}${suffix}`;
-    } else if (incomingPath === '/wham' || incomingPath.startsWith('/wham/')) {
-        const suffix = incomingPath === '/wham' ? '' : incomingPath.slice('/wham'.length);
-        upstreamPath = `/backend-api/wham${suffix}`;
-    } else {
-        upstreamPath = `${config.apiBasePath}${incomingPath === '/' ? '' : incomingPath}`;
-    }
-
-    parsedUrl.pathname = upstreamPath;
-    return `${parsedUrl.pathname}${parsedUrl.search}`;
-}
-
 function shouldForceResponsesStoreFalse(config, rewrittenUrl) {
     return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
 }
@@ -1617,6 +1588,178 @@ function createHandler(proxyPath = '') {
         } else {
             proxyRequest(req, res, config, undefined, incomingUrl);
         }
+    };
+}
+
+function readBufferedRequestBody(req, limitBytes = 1024 * 1024) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let totalBytes = 0;
+
+        req.on('data', chunk => {
+            totalBytes += chunk.length;
+            if (totalBytes > limitBytes) {
+                reject(new Error('请求体过大'));
+                req.destroy();
+                return;
+            }
+
+            chunks.push(chunk);
+        });
+
+        req.on('end', () => {
+            resolve(Buffer.concat(chunks));
+        });
+
+        req.on('error', reject);
+    });
+}
+
+async function handleTokenImageGenerationRequest(req, res, config) {
+    const body = await readBufferedRequestBody(req);
+    let payload;
+    try {
+        payload = JSON.parse(body.toString('utf8'));
+    } catch (err) {
+        res.status(400).json({
+            error: '请求体处理失败',
+            details: `图片生成请求必须是 JSON: ${err.message}`,
+        });
+        return;
+    }
+
+    let responsesPayload;
+    try {
+        responsesPayload = buildResponsesImageGenerationBody(payload, {
+            model: process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
+        });
+    } catch (err) {
+        res.status(400).json({
+            error: '请求体处理失败',
+            details: err.message,
+        });
+        return;
+    }
+
+    const upstreamPath = `${config.apiBasePath}/responses`;
+    const normalizedPayload = normalizeProxyJsonBody(config, upstreamPath, responsesPayload, responsesConfig);
+    const upstreamBody = Buffer.from(JSON.stringify(normalizedPayload));
+    const requestHeaders = {
+        ...req.headers,
+        accept: 'text/event-stream, application/json',
+        'content-type': 'application/json',
+    };
+    const headers = applyResponsesFailoverRequestHeaders(
+        buildProxyHeaders(requestHeaders, config, upstreamBody.length),
+        upstreamPath
+    );
+    const targetUrl = new URL(upstreamPath, config.baseUrl).toString();
+    const result = await requestBuffered({
+        method: 'POST',
+        targetUrl,
+        headers,
+        body: upstreamBody,
+        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+    });
+
+    if (result.statusCode < 200 || result.statusCode >= 300) {
+        writeBufferedUpstreamResponse(res, result.statusCode, result.headers, result.body);
+        return;
+    }
+
+    const imageResponse = extractImageGenerationResponse(result.bodyText, {
+        created: Math.floor(Date.now() / 1000),
+    });
+    res.status(200).json(imageResponse);
+}
+
+async function handleTokenImageEditRequest(req, res, config) {
+    const body = await readBufferedRequestBody(req, 32 * 1024 * 1024);
+    let responsesPayload;
+    try {
+        const form = parseMultipartFormData(body, req.headers['content-type']);
+        responsesPayload = buildResponsesImageEditBody(form, {
+            model: process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
+        });
+    } catch (err) {
+        res.status(400).json({
+            error: '请求体处理失败',
+            details: err.message,
+        });
+        return;
+    }
+
+    const upstreamPath = `${config.apiBasePath}/responses`;
+    const normalizedPayload = normalizeProxyJsonBody(config, upstreamPath, responsesPayload, responsesConfig);
+    const upstreamBody = Buffer.from(JSON.stringify(normalizedPayload));
+    const requestHeaders = {
+        ...req.headers,
+        accept: 'text/event-stream, application/json',
+        'content-type': 'application/json',
+    };
+    const headers = applyResponsesFailoverRequestHeaders(
+        buildProxyHeaders(requestHeaders, config, upstreamBody.length),
+        upstreamPath
+    );
+    const targetUrl = new URL(upstreamPath, config.baseUrl).toString();
+    const result = await requestBuffered({
+        method: 'POST',
+        targetUrl,
+        headers,
+        body: upstreamBody,
+        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+    });
+
+    if (result.statusCode < 200 || result.statusCode >= 300) {
+        writeBufferedUpstreamResponse(res, result.statusCode, result.headers, result.body);
+        return;
+    }
+
+    const imageResponse = extractImageGenerationResponse(result.bodyText, {
+        created: Math.floor(Date.now() / 1000),
+    });
+    res.status(200).json(imageResponse);
+}
+
+function createImageGenerationsHandler() {
+    const proxyHandler = createHandler();
+
+    return function imageGenerationsHandler(req, res) {
+        const isOpenAiConfig = item => item.type === 'token' || configSupportsCapability(item, 'gpt');
+        const config = accountManager.getActiveConfig(isOpenAiConfig) ||
+            accountManager.ensureActiveConfig('proxy_request', isOpenAiConfig);
+        if (!config) {
+            return createMissingConfigResponse(res);
+        }
+
+        if (config.type !== 'token') {
+            return proxyHandler(req, res);
+        }
+
+        void handleTokenImageGenerationRequest(req, res, config).catch(err => {
+            reportBusinessRequestError(res, err, '图片生成请求处理失败');
+        });
+    };
+}
+
+function createImageEditsHandler() {
+    const proxyHandler = createHandler();
+
+    return function imageEditsHandler(req, res) {
+        const isOpenAiConfig = item => item.type === 'token' || configSupportsCapability(item, 'gpt');
+        const config = accountManager.getActiveConfig(isOpenAiConfig) ||
+            accountManager.ensureActiveConfig('proxy_request', isOpenAiConfig);
+        if (!config) {
+            return createMissingConfigResponse(res);
+        }
+
+        if (config.type !== 'token') {
+            return proxyHandler(req, res);
+        }
+
+        void handleTokenImageEditRequest(req, res, config).catch(err => {
+            reportBusinessRequestError(res, err, '图片编辑请求处理失败');
+        });
     };
 }
 
@@ -2041,6 +2184,9 @@ app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
     });
 });
 
+app.post('/v1/images/generations', requireConfiguredApiKeys, createImageGenerationsHandler());
+app.post('/v1/images/edits', requireConfiguredApiKeys, createImageEditsHandler());
+
 // 兼容 OpenAI 风格接口
 app.use('/v1', requireConfiguredApiKeys, createHandler());
 
@@ -2105,6 +2251,7 @@ async function startServer() {
             log('路由规则:');
             log('  - 可用配置按管理页顺序选择；可通过置顶调整优先级');
             log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
+            log('  - /v1/images/generations 与 /v1/images/edits -> token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON');
             log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');
         })().catch(err => {

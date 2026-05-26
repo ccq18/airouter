@@ -581,7 +581,7 @@
     }
 
     .action-cell {
-      width: 220px;
+      width: 280px;
       white-space: nowrap;
     }
 
@@ -868,6 +868,7 @@
       getConfigGuideContent,
       getConfigIdentityColumnLabel,
       getConfigIdentityValue,
+      formatConfigItemCopyText,
       buildConfigItemFromForm,
       extractRuntimeStatusTags,
       hasRefreshTokenConfig,
@@ -1070,6 +1071,7 @@
                   <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
                   <td>${renderSummary(item.runtime)}</td>
                   <td class="action-cell">
+                    <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
                     <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
                     <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${item.is_active ? '当前' : '切换'}</button>
                     <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
@@ -1343,6 +1345,22 @@
       setMessage('info', '配置项已置顶，当前使用账号未改变。');
     }
 
+    async function copyConfigItemJson(index) {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('当前浏览器不支持剪贴板写入');
+      }
+
+      const numericIndex = Number(index);
+      const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
+      const config = configs.find(item => item && item.index === numericIndex);
+      if (!config) {
+        throw new Error('配置项不存在，请刷新后重试');
+      }
+
+      await navigator.clipboard.writeText(formatConfigItemCopyText(config));
+      setMessage('info', `配置 #${numericIndex + 1} JSON 已复制到剪贴板。`);
+    }
+
     async function deleteConfig(index) {
       const result = await requestJson(`/admin/api/configs/${index}`, {
         method: 'DELETE',
@@ -1474,6 +1492,19 @@
           setMessage('error', error.message);
         } finally {
           deleteApiKeyButton.disabled = false;
+        }
+        return;
+      }
+
+      const copyButton = event.target.closest('[data-action="copy-config"]');
+      if (copyButton) {
+        copyButton.disabled = true;
+        try {
+          await copyConfigItemJson(copyButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          copyButton.disabled = false;
         }
         return;
       }

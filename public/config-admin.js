@@ -324,6 +324,12 @@
     return typeof value === 'string' && value.trim() ? value.trim() : '-';
   }
 
+  function formatConfigItemCopyText(item) {
+    const configItem = item && item.item ? item.item : item;
+
+    return JSON.stringify(configItem || {}, null, 2);
+  }
+
   function hasRefreshTokenConfig(item) {
     const configItem = item && item.item ? item.item : item;
 
@@ -646,6 +652,7 @@
     getConfigGuideContent,
     getConfigIdentityColumnLabel,
     getConfigIdentityValue,
+    formatConfigItemCopyText,
     buildConfigItemFromForm,
     buildAdminStatusSummary,
     extractRuntimeStatusTags,

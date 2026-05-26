@@ -166,6 +166,18 @@ test('server registers Claude messages compatibility on /v1/messages only', () =
   assert.doesNotMatch(source, /app\.post\('\/claude\/v1\/messages'/);
 });
 
+test('server registers token image compatibility before the generic v1 proxy', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const generationsRouteIndex = source.indexOf("app.post('/v1/images/generations'");
+  const editsRouteIndex = source.indexOf("app.post('/v1/images/edits'");
+  const genericProxyIndex = source.indexOf("app.use('/v1', requireConfiguredApiKeys, createHandler())");
+
+  assert.ok(generationsRouteIndex >= 0, 'image generations compatibility route should be registered');
+  assert.ok(editsRouteIndex >= 0, 'image edits compatibility route should be registered');
+  assert.ok(generationsRouteIndex < genericProxyIndex, 'generations route should run before generic proxy');
+  assert.ok(editsRouteIndex < genericProxyIndex, 'edits route should run before generic proxy');
+});
+
 test('createClaudeMessagesHandler rejects apikey configs with a clear error before contacting upstream', async () => {
   let upstreamCalled = false;
   const handler = createClaudeMessagesHandler({
