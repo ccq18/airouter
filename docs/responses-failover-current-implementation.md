@@ -93,17 +93,18 @@
 
 ## 6. 触发切号后的行为
 
-一旦命中第 2 节里的任一条件，当前逻辑统一按“全局不可用”处理：
+一旦命中第 2 节里的任一条件，当前逻辑会先把失败账号整体摘除，再按请求级调度寻找重试账号：
 
 1. 调用 `markConfigUnavailable(...)`
 2. 把当前账号的：
    - `runtime.available = false`
    - `runtime.reason = responses_*`
    - `runtime.lastError = <retrySource>:<retryKey>`
-3. 立即切换到下一个可用账号
-4. 用新账号重放同一个 `/responses` 请求
+3. 如果当前请求有会话 key，沿 token 一致性 hash ring 排除失败账号后选择下一个可用 token 账号
+4. 如果当前请求没有会话 key，按可用 token 账号的 `inFlight` 计数选择重试账号
+5. 用新账号重放同一个 `/responses` 请求
 
-这里没有保留 request 级别的局部切号语义。
+如果失败账号正好是活动账号，活动账号也会按现有规则切换；如果失败账号不是活动账号，则只影响运行态可用性和后续请求调度。
 
 也就是说：
 

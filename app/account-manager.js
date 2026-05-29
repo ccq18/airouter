@@ -1,4 +1,7 @@
 const { requestBuffered } = require('./upstream-request');
+const crypto = require('node:crypto');
+
+const HASH_RING_REPLICA_COUNT = 64;
 
 /**
  * 封装账号状态、额度刷新和活动账号切换逻辑。
@@ -30,6 +33,7 @@ function createAccountManager(options) {
   let activeConfigIndex = Number.isInteger(initialActiveConfigIndex) && initialActiveConfigIndex >= 0
     ? Math.min(initialActiveConfigIndex, Math.max(configs.length - 1, 0))
     : 0;
+  let anonymousDispatchCursor = activeConfigIndex;
   let quotaMonitorRunning = false;
   let currentQuotaMonitorTimer = null;
   let allQuotaMonitorTimer = null;
@@ -139,6 +143,7 @@ function createAccountManager(options) {
       secondaryResetAfterSeconds: config.runtime.secondaryResetAfterSeconds,
       lastCheckedAt: config.runtime.lastCheckedAt,
       reason: config.runtime.reason,
+      inFlight: isDispatchManagedConfig(config) ? normalizeInFlight(config) : null,
       runtimeSummary: getRuntimeSummary(config),
       summaryLine: `${getAccountLabel(config)} | ${getRuntimeSummary(config)}`,
     };
@@ -406,6 +411,9 @@ function createAccountManager(options) {
       nextConfig.runtime.lastError = null;
     }
     activeConfigIndex = index;
+    if (nextConfig.type === 'token') {
+      anonymousDispatchCursor = index;
+    }
 
     if (previousConfig !== nextConfig && reason !== 'startup') {
       warn(`账号切换: ${previousConfig ? getAccountLabel(previousConfig) : 'none'} -> ${getAccountLabel(nextConfig)} (${reason})`);
@@ -436,6 +444,247 @@ function createAccountManager(options) {
 
   function normalizeString(value) {
     return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  }
+
+  function hashText(value) {
+    return crypto
+      .createHash('sha256')
+      .update(String(value))
+      .digest('hex');
+  }
+
+  function hashTextToUInt32(value) {
+    return crypto
+      .createHash('sha256')
+      .update(String(value))
+      .digest()
+      .readUInt32BE(0);
+  }
+
+  function getDispatchIdentity(config) {
+    if (!config || typeof config !== 'object') {
+      return '';
+    }
+
+    if (config.type === 'token') {
+      return [
+        'token',
+        config.baseUrl || '',
+        config.account_id || '',
+      ].join(':');
+    }
+
+    if (config.type === 'apikey') {
+      return [
+        'apikey',
+        config.baseUrl || '',
+        hashText(config.apiKey || ''),
+        Array.isArray(config.support) ? config.support.join(',') : '',
+      ].join(':');
+    }
+
+    return '';
+  }
+
+  function isDispatchManagedConfig(config) {
+    return Boolean(config && config.type === 'token');
+  }
+
+  function normalizeExcludedIdentitySet(excludedConfigs = []) {
+    const excluded = new Set();
+
+    for (const item of excludedConfigs || []) {
+      const identity = typeof item === 'string' ? item : getDispatchIdentity(item);
+      if (identity) {
+        excluded.add(identity);
+      }
+    }
+
+    return excluded;
+  }
+
+  function normalizeInFlight(config) {
+    const value = Number(config?.runtime?.inFlight || 0);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+
+  function incrementInFlight(config) {
+    if (!config || !config.runtime) {
+      return;
+    }
+
+    config.runtime.inFlight = normalizeInFlight(config) + 1;
+  }
+
+  function decrementInFlight(config) {
+    if (!config || !config.runtime) {
+      return;
+    }
+
+    config.runtime.inFlight = Math.max(0, normalizeInFlight(config) - 1);
+  }
+
+  function createConfigLease(config, metadata = {}) {
+    if (!config) {
+      return null;
+    }
+
+    let released = false;
+    incrementInFlight(config);
+
+    return {
+      config,
+      sessionKey: metadata.sessionKey || '',
+      sticky: Boolean(metadata.sticky),
+      fallback: Boolean(metadata.fallback),
+      release() {
+        if (released) {
+          return;
+        }
+
+        released = true;
+        decrementInFlight(config);
+      },
+    };
+  }
+
+  function getAvailableDispatchCandidates(predicate = () => true, excludedConfigs = []) {
+    const excluded = normalizeExcludedIdentitySet(excludedConfigs);
+
+    return configs.filter(config => {
+      const identity = getDispatchIdentity(config);
+      return isDispatchManagedConfig(config) && identity && !excluded.has(identity) && predicate(config) && isConfigAvailable(config);
+    });
+  }
+
+  function getFallbackDispatchConfig(predicate = () => true, excludedConfigs = []) {
+    const excluded = normalizeExcludedIdentitySet(excludedConfigs);
+    const currentConfig = configs[activeConfigIndex] || null;
+    if (isDispatchManagedConfig(currentConfig) && predicate(currentConfig) && !excluded.has(getDispatchIdentity(currentConfig))) {
+      return currentConfig;
+    }
+
+    return configs.find(config => isDispatchManagedConfig(config) && predicate(config) && !excluded.has(getDispatchIdentity(config))) || null;
+  }
+
+  function buildHashRing(candidates) {
+    const ring = [];
+
+    for (const config of candidates) {
+      const identity = getDispatchIdentity(config);
+      for (let replica = 0; replica < HASH_RING_REPLICA_COUNT; replica += 1) {
+        ring.push({
+          hash: hashTextToUInt32(`${identity}:${replica}`),
+          config,
+        });
+      }
+    }
+
+    ring.sort((left, right) => {
+      if (left.hash !== right.hash) {
+        return left.hash - right.hash;
+      }
+
+      return getDispatchIdentity(left.config).localeCompare(getDispatchIdentity(right.config));
+    });
+
+    return ring;
+  }
+
+  function pickByHashRing(sessionKey, candidates) {
+    if (!sessionKey || candidates.length === 0) {
+      return null;
+    }
+
+    if (candidates.length === 1) {
+      return candidates[0];
+    }
+
+    const ring = buildHashRing(candidates);
+    const requestHash = hashTextToUInt32(sessionKey);
+    let left = 0;
+    let right = ring.length - 1;
+    let selectedIndex = 0;
+
+    while (left <= right) {
+      const middle = Math.floor((left + right) / 2);
+      if (ring[middle].hash >= requestHash) {
+        selectedIndex = middle;
+        right = middle - 1;
+      } else {
+        left = middle + 1;
+      }
+    }
+
+    return ring[selectedIndex].config;
+  }
+
+  function pickLeastInFlight(candidates) {
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    let selected = null;
+    let selectedDistance = Number.POSITIVE_INFINITY;
+
+    for (const config of candidates) {
+      if (!selected || normalizeInFlight(config) < normalizeInFlight(selected)) {
+        selected = config;
+        selectedDistance = getDispatchDistance(config.index);
+        continue;
+      }
+
+      if (normalizeInFlight(config) === normalizeInFlight(selected)) {
+        const distance = getDispatchDistance(config.index);
+        if (distance < selectedDistance) {
+          selected = config;
+          selectedDistance = distance;
+        }
+      }
+    }
+
+    anonymousDispatchCursor = (selected.index + 1) % Math.max(configs.length, 1);
+    return selected;
+  }
+
+  function getDispatchDistance(index) {
+    const length = Math.max(configs.length, 1);
+    return (index - anonymousDispatchCursor + length) % length;
+  }
+
+  function acquireConfig(reason = 'dispatch', predicate = () => true, options = {}) {
+    const sessionKey = normalizeString(options.sessionKey);
+    const allowFallback = options.allowFallback !== false;
+    const candidates = getAvailableDispatchCandidates(predicate, options.exclude);
+    const selected = sessionKey
+      ? pickByHashRing(sessionKey, candidates)
+      : pickLeastInFlight(candidates);
+
+    if (selected) {
+      return createConfigLease(selected, {
+        sessionKey,
+        sticky: Boolean(sessionKey),
+      });
+    }
+
+    if (!allowFallback) {
+      return null;
+    }
+
+    const fallbackConfig = getFallbackDispatchConfig(predicate, options.exclude);
+    if (!fallbackConfig) {
+      return null;
+    }
+
+    if (configs.length > 0) {
+      warn(`没有可用账号，继续使用当前账号 ${getAccountLabel(fallbackConfig)} (${reason})`);
+    }
+
+    return createConfigLease(fallbackConfig, {
+      sessionKey,
+      sticky: Boolean(sessionKey),
+      fallback: true,
+    });
   }
 
   function isMissingCredentialsPayload(payload) {
@@ -609,7 +858,7 @@ function createAccountManager(options) {
       return options.refreshAll;
     }
 
-    return reason !== 'poll';
+    return true;
   }
 
   function getQuotaRefreshTargets(reason, options = {}) {
@@ -692,7 +941,10 @@ function createAccountManager(options) {
     }
 
     currentQuotaMonitorTimer = setIntervalFn(() => {
-      void refreshQuotas('poll');
+      void refreshQuotas('poll', {
+        refreshAll: true,
+        delayBetweenAccountsMs: allQuotaCheckDelayMs,
+      });
     }, quotaCheckIntervalMs);
 
     allQuotaMonitorTimer = setIntervalFn(() => {
@@ -728,6 +980,8 @@ function createAccountManager(options) {
     getAccountStatus,
     applyQuotaPayload,
     markConfigUnavailable,
+    acquireConfig,
+    getDispatchIdentity,
   };
 }
 

@@ -1144,8 +1144,16 @@
     function runtimeBadges(item) {
       const tags = [];
 
-      if (item.is_active) {
-        tags.push('<span class="badge active">当前使用</span>');
+      if (item.dispatch_role === 'token_anchor') {
+        tags.push('<span class="badge active">锚点</span>');
+      } else if (item.dispatch_role === 'token_dispatch') {
+        tags.push('<span class="badge ok">会话调度</span>');
+      } else if (item.dispatch_role === 'apikey_override') {
+        tags.push('<span class="badge active">覆盖中</span>');
+      } else if (item.dispatch_role === 'apikey_fallback') {
+        tags.push('<span class="badge muted">fallback</span>');
+      } else if (item.is_active) {
+        tags.push('<span class="badge active">当前</span>');
       }
 
       if (hasRefreshTokenConfig(item)) {
@@ -1153,6 +1161,18 @@
       }
 
       return tags.join('');
+    }
+
+    function getActivateButtonText(item) {
+      if (item.dispatch_role === 'token_anchor') {
+        return '当前锚点';
+      }
+
+      if (item.dispatch_role === 'apikey_override') {
+        return '覆盖中';
+      }
+
+      return item.item && item.item.type === 'apikey' ? '全量切换' : '设为锚点';
     }
 
     function renderRuntimeTags(runtime) {
@@ -1208,7 +1228,7 @@
                   <td>${renderSummary(item.runtime)}</td>
                   <td class="action-cell">
                     <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
-                    <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${item.is_active ? '当前' : '切换'}</button>
+                    <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${getActivateButtonText(item)}</button>
                     <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
                   </td>
                 </tr>
@@ -1485,7 +1505,10 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      setMessage('info', '当前账号已临时切换。');
+      const activated = Array.isArray(result.configs) ? result.configs.find(item => item && item.index === index) : null;
+      setMessage('info', activated && activated.item && activated.item.type === 'apikey'
+        ? '已进入 API Key 覆盖模式。'
+        : '已设置 token 调度锚点。');
     }
 
     async function moveConfigUp(index) {

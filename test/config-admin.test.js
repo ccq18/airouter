@@ -58,7 +58,8 @@ test('config admin exposes manual runtime config activation controls', () => {
 
   assert.match(html, /data-action="activate"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
-  assert.match(html, /当前账号已临时切换/);
+  assert.match(html, /已进入 API Key 覆盖模式/);
+  assert.match(html, /已设置 token 调度锚点/);
 });
 
 test('config admin keeps the upstream config column compact after adding activation controls', () => {
@@ -458,6 +459,11 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
   assert.deepEqual(
     buildAdminStatusSummary({
       apikeys: ['sk-airouter-one', 'sk-airouter-two'],
+      dispatch: {
+        mode: 'token_pool',
+        label: 'Token 并发池: 锚点配置 #2',
+        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+      },
       configs: [
         {
           index: 0,
@@ -489,10 +495,10 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
         detail: 'Token 与 API Key 配置总数',
       },
       {
-        label: '当前激活',
-        value: '配置 #2',
+        label: '调度模式',
+        value: 'Token 并发池: 锚点配置 #2',
         tone: 'active',
-        detail: '手动切换会临时覆盖自动调度',
+        detail: 'token 请求按会话调度，apikey 仅作 fallback',
       },
       {
         label: '健康状态',

@@ -86,6 +86,24 @@ const LOCAL_ONLY_HEADER_PREFIXES = [
     'x-airouter-',
     'x-admin-'
 ];
+const SESSION_KEY_HEADERS = [
+    'x-airouter-session-id',
+    'session-id',
+    'session_id',
+    'x-client-request-id'
+];
+const SESSION_KEY_QUERY_FIELDS = [
+    'session_id',
+    'conversation_id',
+    'thread_id',
+    'previous_response_id'
+];
+const SESSION_KEY_BODY_FIELDS = [
+    'session_id',
+    'conversation_id',
+    'thread_id',
+    'previous_response_id'
+];
 
 function parseTimeoutMs(name, fallbackValue) {
     const rawValue = process.env[name];
@@ -404,6 +422,80 @@ function getHeaderValue(headers, headerName) {
     return '';
 }
 
+function normalizeSessionKey(value) {
+    return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+}
+
+function firstNonEmptySessionValue(values) {
+    for (const value of values) {
+        const normalizedValue = normalizeSessionKey(value);
+        if (normalizedValue) {
+            return normalizedValue;
+        }
+    }
+
+    return '';
+}
+
+function getSessionKeyFromBody(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return '';
+    }
+
+    return firstNonEmptySessionValue(SESSION_KEY_BODY_FIELDS.map(field => body[field]));
+}
+
+function getSessionKeyFromUrl(incomingUrl) {
+    try {
+        const parsedUrl = new URL(incomingUrl || '/', 'http://localhost');
+        return firstNonEmptySessionValue(SESSION_KEY_QUERY_FIELDS.map(field => parsedUrl.searchParams.get(field)));
+    } catch (err) {
+        return '';
+    }
+}
+
+function getRequestSessionKey(req, incomingUrl, body = null) {
+    return firstNonEmptySessionValue([
+        ...SESSION_KEY_HEADERS.map(headerName => getHeaderValue(req.headers, headerName)),
+        getSessionKeyFromUrl(incomingUrl),
+        getSessionKeyFromBody(body),
+    ]);
+}
+
+function isOpenAiProxyConfig(item) {
+    return item.type === 'token' || configSupportsCapability(item, 'gpt');
+}
+
+function isTokenProxyConfig(item) {
+    return item.type === 'token';
+}
+
+function isGptApiKeyProxyConfig(item) {
+    return configSupportsCapability(item, 'gpt');
+}
+
+function isRuntimeConfigAvailable(item) {
+    return Boolean(item && item.runtime && item.runtime.enabled && item.runtime.available);
+}
+
+function isExcludedRuntimeConfig(item, excludedConfigs = []) {
+    return excludedConfigs.some(excludedConfig => excludedConfig === item);
+}
+
+function createStaticConfigLease(config, sessionKey = '') {
+    if (!config) {
+        return null;
+    }
+
+    return {
+        config,
+        sessionKey,
+        sticky: false,
+        fallback: false,
+        release() {}
+    };
+}
+
 function canAttemptResponsesFailover(config, requestUrl, attempt) {
     return Boolean(
         accountManager &&
@@ -653,9 +745,22 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
 
 function createClaudeMessagesRequestHandler() {
     return createClaudeMessagesHandler({
-        getConfig: () => {
-            const config = accountManager.ensureActiveConfig('claude_request', item => configSupportsCapability(item, 'claude')) ||
-                accountManager.ensureActiveConfig('claude_request', item => item.type === 'token');
+        getConfig: (req, context = {}) => {
+            const sessionKey = normalizeSessionKey(context.sessionKey);
+            const isClaudeApiKeyConfig = item => configSupportsCapability(item, 'claude');
+            const currentClaudeApiKeyConfig = accountManager.getActiveConfig(isClaudeApiKeyConfig);
+            if (currentClaudeApiKeyConfig && isRuntimeConfigAvailable(currentClaudeApiKeyConfig)) {
+                return createStaticConfigLease(currentClaudeApiKeyConfig, sessionKey);
+            }
+
+            const nextClaudeApiKeyConfig = accountManager.ensureActiveConfig('claude_request', isClaudeApiKeyConfig);
+            if (nextClaudeApiKeyConfig && isRuntimeConfigAvailable(nextClaudeApiKeyConfig)) {
+                return createStaticConfigLease(nextClaudeApiKeyConfig, sessionKey);
+            }
+
+            const config = accountManager.acquireConfig('claude_request', item => item.type === 'token', {
+                sessionKey,
+            });
 
             if (!config) {
                 throw new Error(`当前没有可用 support 包含 claude 的 apikey 或 token 配置，请先访问 ${buildAdminPath()} 添加账号`);
@@ -684,11 +789,22 @@ function createClaudeMessagesRequestHandler() {
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
         clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1',
         upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
-        handleRetryableUpstreamError: (config, classification) => {
+        getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
+        handleRetryableUpstreamError: (config, classification, context = null) => {
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
-            return accountManager.markConfigUnavailable(config, classification.reason, {
+            accountManager.markConfigUnavailable(config, classification.reason, {
                 lastError: `${classification.retrySource}:${classification.retryKey}`,
                 switchReason: 'claude_responses_failover',
+            });
+
+            if (!context) {
+                return null;
+            }
+
+            return accountManager.acquireConfig('claude_responses_failover', item => item.type === config.type, {
+                sessionKey: context.sessionKey,
+                exclude: [config],
+                allowFallback: false,
             });
         }
     });
@@ -940,9 +1056,46 @@ function serializeAccountStatus(accountStatus) {
         secondary_reset_after_seconds: accountStatus.secondaryResetAfterSeconds,
         last_checked_at: accountStatus.lastCheckedAt,
         reason: accountStatus.reason,
+        in_flight: accountStatus.inFlight,
         runtime_summary: accountStatus.runtimeSummary,
         summary_line: accountStatus.summaryLine,
     };
+}
+
+function buildDispatchStatus(activeConfig) {
+    if (!activeConfig) {
+        return {
+            mode: 'empty',
+            label: '无可用配置',
+            detail: '请先添加 token 或 apikey 配置'
+        };
+    }
+
+    if (activeConfig.type === 'apikey') {
+        return {
+            mode: 'apikey_override',
+            label: `API Key 覆盖: 配置 #${activeConfig.index + 1}`,
+            detail: '支持的流量会优先走当前 apikey'
+        };
+    }
+
+    return {
+        mode: 'token_pool',
+        label: `Token 并发池: 锚点配置 #${activeConfig.index + 1}`,
+        detail: 'token 请求按会话调度，apikey 仅作 fallback'
+    };
+}
+
+function getDispatchRole(config, activeConfig) {
+    if (!config || !config.runtime || !config.runtime.available) {
+        return 'unavailable';
+    }
+
+    if (config.type === 'apikey') {
+        return activeConfig === config ? 'apikey_override' : 'apikey_fallback';
+    }
+
+    return activeConfig === config ? 'token_anchor' : 'token_dispatch';
 }
 
 function buildConfigAdminResponse() {
@@ -961,11 +1114,13 @@ function buildConfigAdminResponse() {
         apikey_required: configuredApiKeys.length > 0,
         claude_code: currentParsedConfig.claude_code ?? null,
         responses: currentParsedConfig.responses ?? null,
+        dispatch: buildDispatchStatus(activeConfig),
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
             item,
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
+            dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig) : 'unavailable',
             runtime: apiConfigs[index] ? serializeAccountStatus(accountManager.getAccountStatus(apiConfigs[index])) : null
         }))
     };
@@ -1439,6 +1594,12 @@ function applyResponseHeaders(res, statusCode, rawHeaders) {
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
+    const requestSessionKey = normalizeSessionKey(options.sessionKey);
+    const requestPredicate = typeof options.predicate === 'function' ? options.predicate : () => true;
+    const excludedConfigs = Array.isArray(options.excludedConfigs) ? options.excludedConfigs : [];
+    const retrySelector = typeof options.retrySelector === 'function' ? options.retrySelector : null;
+    let currentLease = options.lease || null;
+    let leaseReleased = false;
     const headers = applyResponsesFailoverRequestHeaders(
         buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined),
         req.url
@@ -1461,6 +1622,33 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const responseBodyChunks = [];
     let upstreamResponseHeaders = {};
     let upstreamResponse = null;
+
+    function releaseCurrentLease() {
+        if (leaseReleased) {
+            return;
+        }
+
+        leaseReleased = true;
+        if (currentLease && typeof currentLease.release === 'function') {
+            currentLease.release();
+        }
+    }
+
+    function acquireFailoverLease(reason) {
+        if (retrySelector) {
+            return retrySelector(reason, requestSessionKey, [...excludedConfigs, config]);
+        }
+
+        if (!accountManager || typeof accountManager.acquireConfig !== 'function') {
+            return null;
+        }
+
+        return accountManager.acquireConfig(reason, requestPredicate, {
+            sessionKey: requestSessionKey,
+            exclude: [...excludedConfigs, config],
+            allowFallback: false,
+        });
+    }
 
     function handleQuotaUsageResponseComplete() {
         if (!shouldLogQuotaUsage) {
@@ -1502,6 +1690,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         response.on('end', () => {
             responseFinished = true;
             handleQuotaUsageResponseComplete();
+            releaseCurrentLease();
 
             if (!res.writableEnded) {
                 res.end();
@@ -1516,6 +1705,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             error('代理请求失败:', err.message);
             if (!res.headersSent) {
                 const gatewayStatusCode = getGatewayStatusCode(err);
+                releaseCurrentLease();
                 res.status(gatewayStatusCode).json({
                     error: gatewayStatusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                     message: err.message
@@ -1524,6 +1714,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
 
             if (!res.writableEnded) {
+                releaseCurrentLease();
                 res.end();
             }
         });
@@ -1537,19 +1728,31 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         const apiKeyFailure = classifyApiKeyUpstreamFailure(config, statusCode);
         if (apiKeyFailure) {
             warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey})`);
-            const nextConfig = accountManager.markConfigUnavailable(config, apiKeyFailure.reason, {
+            accountManager.markConfigUnavailable(config, apiKeyFailure.reason, {
                 lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
                 switchReason: 'apikey_upstream_failover',
             });
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
 
             if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
                 responseFinished = true;
                 void drainAbandonedResponse(response);
                 const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    lease: nextLease,
+                    sessionKey: requestSessionKey,
+                    predicate: requestPredicate,
+                    excludedConfigs: [...excludedConfigs, config],
+                    retrySelector,
                 });
                 return;
+            }
+
+            if (nextLease) {
+                nextLease.release();
             }
         }
 
@@ -1561,19 +1764,31 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
             if (inspection.action === 'retry') {
                 warn(`responses 自动切号: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
-                const nextConfig = accountManager.markConfigUnavailable(config, inspection.classification.reason, {
+                accountManager.markConfigUnavailable(config, inspection.classification.reason, {
                     lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
                     switchReason: 'responses_failover',
                 });
+                const nextLease = acquireFailoverLease('responses_failover');
+                const nextConfig = nextLease ? nextLease.config : null;
 
                 if (!requestClosed && nextConfig && nextConfig !== config) {
                     responseFinished = true;
                     void drainAbandonedResponse(response);
                     const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    releaseCurrentLease();
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
+                        lease: nextLease,
+                        sessionKey: requestSessionKey,
+                        predicate: requestPredicate,
+                        excludedConfigs: [...excludedConfigs, config],
+                        retrySelector,
                     });
                     return;
+                }
+
+                if (nextLease) {
+                    nextLease.release();
                 }
 
                 if (inspection.forwardMode === 'buffered') {
@@ -1585,6 +1800,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     ).headers;
                     headersApplied = true;
                     responseFinished = true;
+                    releaseCurrentLease();
                     return;
                 }
 
@@ -1601,6 +1817,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 ).headers;
                 headersApplied = true;
                 responseFinished = true;
+                releaseCurrentLease();
                 return;
             }
 
@@ -1619,22 +1836,35 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         error('代理请求失败:', err.message);
         if (config && config.type === 'apikey') {
             warn(`apikey 上游请求失败: #${config.index + 1} ${config.description} (${err.message})`);
-            const nextConfig = accountManager.markConfigUnavailable(config, 'apikey_upstream_error', {
+            accountManager.markConfigUnavailable(config, 'apikey_upstream_error', {
                 lastError: err.message,
                 switchReason: 'apikey_upstream_failover',
             });
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
 
             if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
                 const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    lease: nextLease,
+                    sessionKey: requestSessionKey,
+                    predicate: requestPredicate,
+                    excludedConfigs: [...excludedConfigs, config],
+                    retrySelector,
                 });
                 return;
+            }
+
+            if (nextLease) {
+                nextLease.release();
             }
         }
 
         if (!headersApplied && !res.headersSent) {
             const statusCode = getGatewayStatusCode(err);
+            releaseCurrentLease();
             res.status(statusCode).json({
                 error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                 message: err.message
@@ -1643,12 +1873,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
 
         if (!res.writableEnded) {
+            releaseCurrentLease();
             res.end();
         }
     });
 
     const closeUpstream = () => {
         requestClosed = true;
+        releaseCurrentLease();
         if (!responseFinished) {
             upstream.abort(new Error('client closed request'));
         }
@@ -1660,18 +1892,68 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
 function createHandler(proxyPath = '') {
     return function handler(req, res) {
-        const isOpenAiConfig = item => item.type === 'token' || configSupportsCapability(item, 'gpt');
-        const config = accountManager.getActiveConfig(isOpenAiConfig) ||
-            accountManager.ensureActiveConfig('proxy_request', isOpenAiConfig);
-        if (!config) {
-            return createMissingConfigResponse(res);
-        }
         const incomingUrl = buildIncomingUrl(req, proxyPath);
-        const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
 
-        req.url = rewrittenUrl;
-        if (ACCESS_LOG_ENABLED) {
-            log(`请求路径重写: ${incomingUrl} -> ${rewrittenUrl}`);
+        function acquireProxyLease(sessionKey, excludedConfigs = []) {
+            const activeApiKeyConfig = accountManager.getActiveConfig(item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs));
+            if (activeApiKeyConfig && isRuntimeConfigAvailable(activeApiKeyConfig)) {
+                return createStaticConfigLease(activeApiKeyConfig, sessionKey);
+            }
+
+            const tokenLease = accountManager.acquireConfig('proxy_request', isTokenProxyConfig, {
+                sessionKey,
+                exclude: excludedConfigs,
+                allowFallback: false,
+            });
+            if (tokenLease) {
+                return tokenLease;
+            }
+
+            const isAllowedGptApiKeyProxyConfig = item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+            const nextApiKeyConfig = accountManager.ensureActiveConfig('proxy_request', isAllowedGptApiKeyProxyConfig);
+            if (nextApiKeyConfig && isRuntimeConfigAvailable(nextApiKeyConfig)) {
+                return createStaticConfigLease(nextApiKeyConfig, sessionKey);
+            }
+
+            return accountManager.acquireConfig('proxy_request', isTokenProxyConfig, {
+                sessionKey,
+                exclude: excludedConfigs,
+            });
+        }
+
+        function forwardWithConfig(lease, body, jsonBody = null) {
+            if (!lease || !lease.config) {
+                return createMissingConfigResponse(res);
+            }
+
+            const config = lease.config;
+            const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
+            req.url = rewrittenUrl;
+            if (ACCESS_LOG_ENABLED) {
+                log(`请求路径重写: ${incomingUrl} -> ${rewrittenUrl}`);
+            }
+
+            let nextBody = body;
+            if (Buffer.isBuffer(nextBody) && jsonBody) {
+                try {
+                    nextBody = Buffer.from(JSON.stringify(normalizeProxyJsonBody(config, req.url, jsonBody, responsesConfig)));
+                } catch (err) {
+                    lease.release();
+                    error('处理请求体时出错:', err.message);
+                    res.status(400).json({
+                        error: '请求体处理失败',
+                        details: err.message
+                    });
+                    return;
+                }
+            }
+
+            proxyRequest(req, res, config, nextBody, incomingUrl, {
+                lease,
+                sessionKey: lease.sessionKey,
+                predicate: config.type === 'token' ? isTokenProxyConfig : isGptApiKeyProxyConfig,
+                retrySelector: (reason, retrySessionKey, excludedConfigs) => acquireProxyLease(retrySessionKey, excludedConfigs),
+            });
         }
 
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
@@ -1681,14 +1963,13 @@ function createHandler(proxyPath = '') {
             });
 
             req.on('end', () => {
-                let body = Buffer.concat(bodyChunks);
+                const body = Buffer.concat(bodyChunks);
                 const contentType = String(req.headers['content-type'] || '').toLowerCase();
+                let jsonBody = null;
 
                 if (body.length > 0 && contentType.includes('application/json')) {
                     try {
-                        const jsonBody = JSON.parse(body.toString('utf8'));
-                        const normalizedBody = normalizeProxyJsonBody(config, req.url, jsonBody, responsesConfig);
-                        body = Buffer.from(JSON.stringify(normalizedBody));
+                        jsonBody = JSON.parse(body.toString('utf8'));
                     } catch (err) {
                         error('处理请求体时出错:', err.message);
                         res.status(400).json({
@@ -1699,10 +1980,12 @@ function createHandler(proxyPath = '') {
                     }
                 }
 
-                proxyRequest(req, res, config, body, incomingUrl);
+                const sessionKey = getRequestSessionKey(req, incomingUrl, jsonBody);
+                forwardWithConfig(acquireProxyLease(sessionKey), body, jsonBody);
             });
         } else {
-            proxyRequest(req, res, config, undefined, incomingUrl);
+            const sessionKey = getRequestSessionKey(req, incomingUrl);
+            forwardWithConfig(acquireProxyLease(sessionKey), undefined);
         }
     };
 }
@@ -2302,7 +2585,7 @@ async function startServer() {
             log(`  - 模式: ${configType}`);
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
-            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查当前账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
+            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟额外全量校正（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
             log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
@@ -2320,7 +2603,7 @@ async function startServer() {
             }
             log('');
             log('路由规则:');
-            log('  - 可用配置按管理页顺序选择；可通过置顶调整优先级');
+            log('  - token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
             log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
             log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');

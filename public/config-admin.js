@@ -370,6 +370,51 @@
     return active && Number.isInteger(active.index) ? `配置 #${active.index + 1}` : '自动调度';
   }
 
+  function getDispatchModeSummary(snapshot) {
+    const dispatch = snapshot && snapshot.dispatch && typeof snapshot.dispatch === 'object'
+      ? snapshot.dispatch
+      : null;
+    if (dispatch && dispatch.mode === 'apikey_override') {
+      return {
+        value: dispatch.label || 'API Key 覆盖',
+        tone: 'active',
+        detail: dispatch.detail || '支持的流量会优先走当前 apikey',
+      };
+    }
+
+    if (dispatch && dispatch.mode === 'token_pool') {
+      return {
+        value: dispatch.label || 'Token 并发池',
+        tone: 'active',
+        detail: dispatch.detail || 'token 请求按会话调度',
+      };
+    }
+
+    const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
+    const active = configs.find(item => item && item.is_active);
+    if (active && active.item && active.item.type === 'apikey') {
+      return {
+        value: `API Key 覆盖: 配置 #${active.index + 1}`,
+        tone: 'active',
+        detail: '支持的流量会优先走当前 apikey',
+      };
+    }
+
+    if (active) {
+      return {
+        value: `Token 并发池: 锚点配置 #${active.index + 1}`,
+        tone: 'active',
+        detail: 'token 请求按会话调度',
+      };
+    }
+
+    return {
+      value: '无可用配置',
+      tone: 'muted',
+      detail: '请先添加 token 或 apikey 配置',
+    };
+  }
+
   function extractRuntimeStatusTags(runtime) {
     const text = getRuntimeSummaryText(runtime);
 
@@ -454,10 +499,10 @@
         detail: 'Token 与 API Key 配置总数',
       },
       {
-        label: '当前激活',
-        value: getActiveConfigLabel(snapshot),
-        tone: configs.some(item => item && item.is_active) ? 'active' : 'muted',
-        detail: '手动切换会临时覆盖自动调度',
+        label: '调度模式',
+        value: getDispatchModeSummary(snapshot).value,
+        tone: getDispatchModeSummary(snapshot).tone,
+        detail: getDispatchModeSummary(snapshot).detail,
       },
       {
         label: '健康状态',
@@ -666,6 +711,7 @@
     getConfigIdentityValue,
     buildConfigItemFromForm,
     buildAdminStatusSummary,
+    getDispatchModeSummary,
     extractRuntimeStatusTags,
     getActiveConfigLabel,
     hasRefreshTokenConfig,

@@ -69,6 +69,27 @@ test('reconcileRuntimeConfigs preserves existing runtime state for unchanged con
     assert.equal(reconciled.initialActiveConfigIndex, 1);
 });
 
+test('reconcileRuntimeConfigs does not carry transient in-flight counters across reloads', () => {
+    const previousConfigs = [
+        createTokenConfig(0, {
+            available: true,
+            reason: 'ok',
+            inFlight: 3,
+        }),
+    ];
+    const nextConfigs = [
+        createTokenConfig(0),
+    ];
+
+    reconcileRuntimeConfigs(previousConfigs, nextConfigs, {
+        previousActiveConfig: previousConfigs[0],
+        previousActiveIndex: 0,
+    });
+
+    assert.equal(nextConfigs[0].runtime.reason, 'ok');
+    assert.equal(nextConfigs[0].runtime.inFlight, undefined);
+});
+
 test('reconcileRuntimeConfigs prefers runtime overrides for newly added configs', () => {
     const previousConfigs = [createTokenConfig(0, { available: true, reason: 'ok' })];
     const nextConfigs = [

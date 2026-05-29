@@ -185,6 +185,20 @@ function sendBufferedUpstreamResponse(res, status, contentType, bodyBuffer) {
     res.send(bodyText);
 }
 
+function normalizeConfigSelection(selection) {
+    if (selection && selection.config) {
+        return {
+            config: selection.config,
+            release: typeof selection.release === 'function' ? selection.release : null
+        };
+    }
+
+    return {
+        config: selection || null,
+        release: null
+    };
+}
+
 function getGatewayStatusCode(err) {
     return err && err.code === 'ETIMEDOUT' ? 504 : 502;
 }
@@ -403,6 +417,7 @@ function forwardClaudeApiKeyMessagesRequest({
     createUpstreamRequestImpl,
     upstreamRequestTimeoutMs,
     handleRetryableUpstreamError,
+    releaseConfig = null,
     error
 }) {
     const upstreamHeaders = buildClaudeApiKeyUpstreamHeaders(req.headers, config, rawBody.length, isClientStream);
@@ -436,6 +451,18 @@ function forwardClaudeApiKeyMessagesRequest({
     });
     let responseFinished = false;
     let requestClosed = false;
+    let released = false;
+
+    function releaseCurrentConfig() {
+        if (released) {
+            return;
+        }
+
+        released = true;
+        if (typeof releaseConfig === 'function') {
+            releaseConfig();
+        }
+    }
 
     upstream.responsePromise.then(response => {
         const statusCode = Number(response.statusCode || 502);
@@ -457,6 +484,7 @@ function forwardClaudeApiKeyMessagesRequest({
             });
             response.on('end', () => {
                 responseFinished = true;
+                releaseCurrentConfig();
                 if (!res.writableEnded) {
                     res.end();
                 }
@@ -467,6 +495,7 @@ function forwardClaudeApiKeyMessagesRequest({
                 }
 
                 error(`代理请求失败: ${err.message}`);
+                releaseCurrentConfig();
                 if (!res.headersSent) {
                     sendJsonError(res, getGatewayStatusCode(err), {
                         error: 'Bad Gateway',
@@ -486,6 +515,7 @@ function forwardClaudeApiKeyMessagesRequest({
         response.on('end', () => {
             responseFinished = true;
             const bodyBuffer = Buffer.concat(responseBodyChunks);
+            releaseCurrentConfig();
 
             if (statusCode >= 200 && statusCode < 300) {
                 sendBufferedUpstreamResponse(res, statusCode, contentType, bodyBuffer);
@@ -500,6 +530,7 @@ function forwardClaudeApiKeyMessagesRequest({
             }
 
             error(`代理请求失败: ${err.message}`);
+            releaseCurrentConfig();
             sendJsonError(res, getGatewayStatusCode(err), {
                 error: 'Bad Gateway',
                 message: err.message
@@ -512,6 +543,7 @@ function forwardClaudeApiKeyMessagesRequest({
 
         const message = err.message || 'upstream request failed';
         error(`代理请求失败: ${message}`);
+        releaseCurrentConfig();
         sendJsonError(res, getGatewayStatusCode(err), {
             error: 'Bad Gateway',
             message
@@ -520,6 +552,7 @@ function forwardClaudeApiKeyMessagesRequest({
 
     const closeUpstream = () => {
         requestClosed = true;
+        releaseCurrentConfig();
         if (!responseFinished) {
             upstream.abort(new Error('client closed request'));
         }
@@ -541,7 +574,8 @@ function createClaudeMessagesHandler({
     clientVersion = '0.0.1',
     upstreamRequestTimeoutMs = 0,
     createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest,
-    handleRetryableUpstreamError = null
+    handleRetryableUpstreamError = null,
+    getSessionKey = () => ''
 }) {
     return async function handleMessagesRequest(req, res) {
         const incomingUrl = buildIncomingUrl(req);
@@ -561,9 +595,39 @@ function createClaudeMessagesHandler({
             });
         }
 
-        let config;
+        let claudeRequest;
+        let responsesRequest;
+        let isClientStream = false;
+        let rawBody;
+        let sessionKey = '';
+        let configSelection = null;
+        let config = null;
+
         try {
-            config = getConfig(req);
+            rawBody = await readRequestBody(req);
+            claudeRequest = JSON.parse(rawBody.toString('utf8'));
+            isClientStream = claudeRequest.stream === true;
+            sessionKey = getSessionKey({
+                req,
+                incomingUrl,
+                body: claudeRequest,
+                rawBody
+            });
+        } catch (err) {
+            return sendJsonError(res, 400, {
+                error: '请求体处理失败',
+                details: err.message
+            });
+        }
+
+        try {
+            configSelection = normalizeConfigSelection(getConfig(req, {
+                incomingUrl,
+                body: claudeRequest,
+                rawBody,
+                sessionKey
+            }));
+            config = configSelection.config;
         } catch (err) {
             return sendJsonError(res, 502, {
                 error: 'Bad Gateway',
@@ -571,24 +635,27 @@ function createClaudeMessagesHandler({
             });
         }
 
+        if (!config) {
+            if (typeof configSelection.release === 'function') {
+                configSelection.release();
+            }
+            return sendJsonError(res, 502, {
+                error: 'Bad Gateway',
+                message: '当前没有可用配置'
+            });
+        }
+
         if (config.type === 'apikey' && !configSupportsClaudeMessages(config)) {
+            if (typeof configSelection.release === 'function') {
+                configSelection.release();
+            }
             return sendJsonError(res, 400, {
                 error: 'Unsupported Mode',
                 message: '/v1/messages 仅支持 token 或 support 包含 claude 的 apikey 配置项，当前 apikey 配置项请改用 /v1/responses 或添加 support:["claude"]'
             });
         }
 
-        const responsesApiPath = resolveResponsesApiPath(config);
-
-        let claudeRequest;
-        let responsesRequest;
-        let isClientStream = false;
-        let rawBody;
-
         try {
-            rawBody = await readRequestBody(req);
-            claudeRequest = JSON.parse(rawBody.toString('utf8'));
-            isClientStream = claudeRequest.stream === true;
             if (configSupportsClaudeMessages(config)) {
                 forwardClaudeApiKeyMessagesRequest({
                     req,
@@ -602,6 +669,7 @@ function createClaudeMessagesHandler({
                     createUpstreamRequestImpl,
                     upstreamRequestTimeoutMs,
                     handleRetryableUpstreamError,
+                    releaseConfig: configSelection.release,
                     error
                 });
                 return;
@@ -615,6 +683,9 @@ function createClaudeMessagesHandler({
                 includeMaxOutputTokens: false
             });
         } catch (err) {
+            if (typeof configSelection.release === 'function') {
+                configSelection.release();
+            }
             return sendJsonError(res, 400, {
                 error: '请求体处理失败',
                 details: err.message
@@ -626,6 +697,8 @@ function createClaudeMessagesHandler({
         let requestClosed = false;
         let currentUpstream = null;
         let streamInitialized = false;
+        let currentConfigSelection = null;
+        let currentConfigReleased = false;
 
         function getRetryConfig(activeConfig, classification, failoverAttempt) {
             if (
@@ -637,11 +710,41 @@ function createClaudeMessagesHandler({
                 return null;
             }
 
-            const nextConfig = handleRetryableUpstreamError(activeConfig, classification);
-            return nextConfig && nextConfig !== activeConfig ? nextConfig : null;
+            const nextSelection = normalizeConfigSelection(handleRetryableUpstreamError(activeConfig, classification, {
+                sessionKey,
+                failoverAttempt
+            }));
+            if (nextSelection.config && nextSelection.config !== activeConfig) {
+                return nextSelection;
+            }
+
+            if (typeof nextSelection.release === 'function') {
+                nextSelection.release();
+            }
+
+            return null;
         }
 
-        function startUpstreamAttempt(activeConfig, failoverAttempt = 0) {
+        function setCurrentConfigSelection(selection) {
+            currentConfigSelection = normalizeConfigSelection(selection);
+            currentConfigReleased = false;
+            return currentConfigSelection;
+        }
+
+        function releaseCurrentConfigSelection() {
+            if (currentConfigReleased) {
+                return;
+            }
+
+            currentConfigReleased = true;
+            if (currentConfigSelection && typeof currentConfigSelection.release === 'function') {
+                currentConfigSelection.release();
+            }
+        }
+
+        function startUpstreamAttempt(activeSelection, failoverAttempt = 0) {
+            const normalizedSelection = setCurrentConfigSelection(activeSelection);
+            const activeConfig = normalizedSelection.config;
             const attemptResponsesApiPath = resolveResponsesApiPath(activeConfig);
             const upstreamHeaders = buildUpstreamHeaders(req.headers, activeConfig, upstreamBody.length, true, clientVersion);
 
@@ -742,15 +845,17 @@ function createClaudeMessagesHandler({
                         );
 
                         if (retryClassification) {
-                            const nextConfig = getRetryConfig(activeConfig, retryClassification, failoverAttempt);
-                            if (nextConfig) {
+                            const nextSelection = getRetryConfig(activeConfig, retryClassification, failoverAttempt);
+                            if (nextSelection) {
                                 responseFinished = false;
-                                startUpstreamAttempt(nextConfig, failoverAttempt + 1);
+                                releaseCurrentConfigSelection();
+                                startUpstreamAttempt(nextSelection, failoverAttempt + 1);
                                 return;
                             }
                         }
 
                         if (isClientStream) {
+                            releaseCurrentConfigSelection();
                             if (!res.writableEnded) {
                                 res.end();
                             }
@@ -763,9 +868,11 @@ function createClaudeMessagesHandler({
                                 error: 'Bad Gateway',
                                 message: 'Upstream stream completed without enough Claude response events'
                             });
+                            releaseCurrentConfigSelection();
                             return;
                         }
 
+                        releaseCurrentConfigSelection();
                         res.status(upstreamMeta.statusCode).json(mappedResponse);
                         return;
                     }
@@ -776,13 +883,15 @@ function createClaudeMessagesHandler({
                         statusCode: upstreamMeta.statusCode,
                         bodyText: responseText
                     });
-                    const nextConfig = classification ? getRetryConfig(activeConfig, classification, failoverAttempt) : null;
-                    if (nextConfig) {
+                    const nextSelection = classification ? getRetryConfig(activeConfig, classification, failoverAttempt) : null;
+                    if (nextSelection) {
                         responseFinished = false;
-                        startUpstreamAttempt(nextConfig, failoverAttempt + 1);
+                        releaseCurrentConfigSelection();
+                        startUpstreamAttempt(nextSelection, failoverAttempt + 1);
                         return;
                     }
 
+                    releaseCurrentConfigSelection();
                     sendUpstreamError(res, upstreamMeta.statusCode, upstreamContentType, responseText);
                 });
 
@@ -793,6 +902,7 @@ function createClaudeMessagesHandler({
 
                     error(`代理请求失败: ${err.message}`);
                     const statusCode = getGatewayStatusCode(err);
+                    releaseCurrentConfigSelection();
                     sendJsonError(res, statusCode, {
                         error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                         message: err.message
@@ -806,6 +916,7 @@ function createClaudeMessagesHandler({
                 const message = err.message || 'upstream request failed';
                 error(`代理请求失败: ${message}`);
                 const statusCode = getGatewayStatusCode(err);
+                releaseCurrentConfigSelection();
                 sendJsonError(res, statusCode, {
                     error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
                     message
@@ -813,10 +924,11 @@ function createClaudeMessagesHandler({
             });
         }
 
-        startUpstreamAttempt(config);
+        startUpstreamAttempt(configSelection);
 
         const closeUpstream = () => {
             requestClosed = true;
+            releaseCurrentConfigSelection();
             if (!responseFinished && currentUpstream) {
                 currentUpstream.abort(new Error('client closed request'));
             }

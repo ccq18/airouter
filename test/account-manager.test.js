@@ -240,6 +240,20 @@ test('activateConfig switches the active config without changing availability', 
   assert.match(warnings[0], /账号切换: #1 account-1 -> #2 account-2 \(manual\)/);
 });
 
+test('activateConfig uses a token config as the anonymous dispatch anchor', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  manager.activateConfig(1, 'manual');
+  const lease = manager.acquireConfig('proxy_request');
+
+  assert.equal(lease.config, configs[1]);
+  lease.release();
+});
+
 test('ensureActiveConfig keeps a manually activated config while it remains available', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
@@ -287,6 +301,148 @@ test('account manager does not expose internal helper methods', () => {
   assert.equal(manager.evaluateQuotaPayload, undefined);
   assert.equal(manager.applyQuotaState, undefined);
   assert.equal(manager.getAccountLabel, undefined);
+});
+
+test('acquireConfig keeps the same session on the same available account', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+    createConfig(2, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  const firstLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'session-1',
+  });
+  const firstConfig = firstLease.config;
+  assert.equal(firstConfig.runtime.inFlight, 1);
+
+  firstLease.release();
+  firstLease.release();
+  assert.equal(firstConfig.runtime.inFlight, 0);
+
+  const secondLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'session-1',
+  });
+
+  assert.equal(secondLease.config, firstConfig);
+  secondLease.release();
+});
+
+test('acquireConfig moves a sticky session when the hashed account is unavailable', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+    createConfig(2, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  const firstLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'session-2',
+  });
+  const failedConfig = firstLease.config;
+  firstLease.release();
+
+  manager.markConfigUnavailable(failedConfig, 'responses_usage_limit_reached', {
+    allowSwitch: false,
+  });
+
+  const nextLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'session-2',
+  });
+
+  assert.notEqual(nextLease.config, failedConfig);
+  assert.equal(nextLease.config.runtime.available, true);
+  nextLease.release();
+});
+
+test('acquireConfig excludes the failed config during request failover', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+    createConfig(2, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  const firstLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'session-3',
+  });
+  const failedConfig = firstLease.config;
+  firstLease.release();
+
+  const retryLease = manager.acquireConfig('responses_failover', () => true, {
+    sessionKey: 'session-3',
+    exclude: [failedConfig],
+  });
+
+  assert.notEqual(retryLease.config, failedConfig);
+  retryLease.release();
+});
+
+test('acquireConfig can disable unavailable fallback for failover selection', () => {
+  const configs = [
+    createConfig(0, { available: false, reason: 'responses_usage_limit_reached' }),
+  ];
+  const { manager } = createManager(configs);
+
+  const lease = manager.acquireConfig('responses_failover', () => true, {
+    sessionKey: 'session-4',
+    allowFallback: false,
+  });
+
+  assert.equal(lease, null);
+});
+
+test('acquireConfig ignores apikey configs because concurrent dispatch is token-only', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  const lease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'session-apikey',
+  });
+
+  assert.equal(lease, null);
+  assert.equal(configs[0].runtime.inFlight, undefined);
+});
+
+test('acquireConfig balances anonymous requests by in-flight count', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  const firstLease = manager.acquireConfig('proxy_request');
+  const secondLease = manager.acquireConfig('proxy_request');
+
+  assert.notEqual(secondLease.config, firstLease.config);
+  assert.equal(firstLease.config.runtime.inFlight, 1);
+  assert.equal(secondLease.config.runtime.inFlight, 1);
+
+  firstLease.release();
+  secondLease.release();
+  assert.equal(configs[0].runtime.inFlight, 0);
+  assert.equal(configs[1].runtime.inFlight, 0);
+});
+
+test('getDispatchIdentity keeps token routing stable across access token refreshes', () => {
+  const config = createConfig(0, { available: true, reason: 'ok' }, {
+    access_token: 'old-access-token',
+  });
+  const { manager } = createManager([config]);
+
+  const previousIdentity = manager.getDispatchIdentity(config);
+  config.access_token = 'new-access-token';
+
+  assert.equal(manager.getDispatchIdentity(config), previousIdentity);
 });
 
 test('getAccountStatus returns the view model used by callers', () => {
@@ -337,6 +493,7 @@ test('getAccountStatus returns the view model used by callers', () => {
   });
   assert.match(status.runtimeSummary, /可用=否 \| 额度=2%/);
   assert.match(status.runtimeSummary, /状态=剩余额度低于 3%/);
+  assert.equal(status.inFlight, 0);
   assert.equal(status.summaryLine, `${status.label} | ${status.runtimeSummary}`);
 });
 
@@ -632,7 +789,7 @@ test('activateConfig restores an unavailable apikey config before switching to i
   assert.equal(configs[1].runtime.lastError, null);
 });
 
-test('refreshQuotas refreshes only the active token account during a minute poll', async () => {
+test('refreshQuotas refreshes every token account during a minute poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -661,14 +818,14 @@ test('refreshQuotas refreshes only the active token account during a minute poll
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 1);
+  assert.equal(quotaResponses.getCallCount(), 2);
   assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
-  assert.equal(configs[1].runtime.lastCheckedAt, null);
+  assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
   assert.equal(quotaResponses.getCalls()[0].timeoutMs, 10 * 1000);
   assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
 });
 
-test('startQuotaMonitor schedules minute active polls and ten-minute spaced all-account polls', async () => {
+test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -702,6 +859,14 @@ test('startQuotaMonitor schedules minute active polls and ten-minute spaced all-
         secondary_window: { used_percent: 50, reset_at: 1713362000 },
       },
     },
+    {
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 40, reset_at: 1713353000 },
+        secondary_window: { used_percent: 55, reset_at: 1713363000 },
+      },
+    },
   ]);
   const { manager } = createManager(configs, {
     requestBufferedFn: quotaResponses.requestBuffered,
@@ -730,17 +895,18 @@ test('startQuotaMonitor schedules minute active polls and ten-minute spaced all-
 
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0'],
+    ['account-0', 'account-1'],
   );
+  assert.deepEqual(delayCalls, [1000]);
 
   intervalCallbacks[1]();
   await flushAsyncWork();
 
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-0', 'account-1'],
+    ['account-0', 'account-1', 'account-0', 'account-1'],
   );
-  assert.deepEqual(delayCalls, [1000]);
+  assert.deepEqual(delayCalls, [1000, 1000]);
 
   manager.stopQuotaMonitor();
 
@@ -777,10 +943,10 @@ test('refreshQuotas switches to the next available account when the polled accou
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 1);
+  assert.equal(quotaResponses.getCallCount(), 2);
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0'],
+    ['account-0', 'account-1'],
   );
   assert.equal(manager.getActiveConfig(), configs[1]);
   assert.match(warnings[0], /账号不可用: #1 account-1 \(remaining_below_3%\)/);
@@ -788,7 +954,7 @@ test('refreshQuotas switches to the next available account when the polled accou
   assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });
 
-test('refreshQuotas only marks the active account when a minute poll quota check fails', async () => {
+test('refreshQuotas refreshes and can recover non-active accounts during a minute poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: false, reason: 'quota_check_failed' }),
@@ -824,15 +990,17 @@ test('refreshQuotas only marks the active account when a minute poll quota check
 
   assert.deepEqual(
     calls.map(call => call.headers['chatgpt-account-id']),
-    ['account-0'],
+    ['account-0', 'account-1'],
   );
   assert.equal(configs[0].runtime.available, false);
   assert.equal(configs[0].runtime.reason, 'quota_check_failed');
-  assert.equal(manager.getActiveConfig(), configs[0]);
+  assert.equal(configs[1].runtime.available, true);
+  assert.equal(configs[1].runtime.reason, 'ok');
+  assert.equal(manager.getActiveConfig(), configs[1]);
   assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(quota_check_failed: network down\)/.test(line)), true);
-  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2/.test(line)), false);
-  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), false);
-  assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=否/);
+  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2/.test(line)), true);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
+  assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });
 
 test('refreshQuotas refreshes an expired token with refresh_token and retries quota check', async () => {
@@ -1117,7 +1285,7 @@ test('ensureActiveConfig keeps an earlier apikey ahead of a later token config',
   assert.equal(manager.getActiveConfig().index, 0);
 });
 
-test('refreshQuotas skips token configs during a minute poll when the current config is apikey', async () => {
+test('refreshQuotas checks token configs during a minute poll when the current config is apikey', async () => {
   const configs = [
     createConfig(0, { available: false, reason: 'quota_check_failed' }),
     createConfig(1, { reason: 'apikey' }, {
@@ -1144,9 +1312,9 @@ test('refreshQuotas skips token configs during a minute poll when the current co
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 0);
+  assert.equal(quotaResponses.getCallCount(), 1);
   assert.equal(manager.getActiveConfig().index, 1);
-  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.available, true);
   assert.equal(configs[1].runtime.available, true);
 });
 

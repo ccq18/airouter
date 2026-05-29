@@ -25,7 +25,13 @@ function getRuntimeConfigIdentity(config) {
 }
 
 function cloneRuntime(runtime) {
-    return runtime && typeof runtime === 'object' ? { ...runtime } : runtime;
+    if (!runtime || typeof runtime !== 'object') {
+        return runtime;
+    }
+
+    const cloned = { ...runtime };
+    delete cloned.inFlight;
+    return cloned;
 }
 
 function clampInitialActiveIndex(index, configsLength) {

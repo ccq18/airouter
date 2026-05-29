@@ -182,17 +182,18 @@ test('createClaudeMessagesHandler rejects apikey configs with a clear error befo
     },
   });
 
-  const req = new EventEmitter();
-  req.method = 'POST';
-  req.baseUrl = '';
-  req.url = '/v1/messages';
-  req.headers = {
-    'content-type': 'application/json',
-  };
-
   const res = createJsonResponseRecorder();
 
-  await handler(req, res);
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
 
   assert.equal(upstreamCalled, false);
   assert.equal(res.statusCode, 400);

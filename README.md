@@ -113,15 +113,16 @@ API Key: 管理页里的入口 apikey，没有配置就留空
 
 ## 账号顺序和自动切换
 
-管理页里的配置顺序就是优先级。越靠前，越优先使用。
+Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`，或请求头里的 `x-airouter-session-id` / `x-client-request-id`，会尽量固定到同一个可用 token 账号。
 
 你可以：
 
 - 用 `置顶` 调整优先级。
-- 用 `切换` 临时指定当前账号。
+- 在 token 行用 `设为锚点` 指定 token 并发池的调度焦点。
+- 在 apikey 行用 `全量切换` 进入 API Key 覆盖模式。
 - 删除不可用或不再需要的账号。
 
-Airouter 会自动检查 ChatGPT/Codex token 账号状态。额度低、登录态失效或账号不可用时，会跳过它，改用其他可用账号。
+token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态。额度低、登录态失效或账号不可用时，会跳过它。
 
 `/v1/messages` 会优先使用支持 `Claude` 的 API Key；没有可用 Claude 上游时，再走兼容转换。
 
