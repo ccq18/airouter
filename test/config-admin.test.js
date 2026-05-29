@@ -26,6 +26,7 @@ const {
   normalizePortValue,
   buildProxyAccessInfo,
   buildRuntimeSyncText,
+  formatConfigItemCopyText,
 } = require('../public/config-admin.js');
 
 test('config admin hides the responses settings module', () => {
@@ -62,13 +63,21 @@ test('config admin exposes manual runtime config activation controls', () => {
   assert.match(html, /已设置 token 调度锚点/);
 });
 
+test('config admin exposes copy controls for config item JSON', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+
+  assert.match(html, /data-action="copy-config"/);
+  assert.match(html, /copyConfigItemJson\(copyButton\.dataset\.index\)/);
+  assert.match(html, /navigator\.clipboard\.writeText/);
+});
+
 test('config admin keeps the upstream config column compact after adding activation controls', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
   assert.match(html, /min-width:\s*1040px;/);
   assert.match(html, /\.account-id-col,\s*\.account-id-cell\s*\{\s*width:\s*240px;\s*min-width:\s*240px;/);
   assert.match(html, /\.account-id-cell\s*\{\s*white-space:\s*normal;\s*word-break:\s*break-word;\s*overflow-wrap:\s*anywhere;/);
-  assert.match(html, /\.action-cell\s*\{\s*width:\s*220px;\s*white-space:\s*nowrap;/);
+  assert.match(html, /\.action-cell\s*\{\s*width:\s*280px;\s*white-space:\s*nowrap;/);
 });
 
 test('config admin keeps all console controls after UI refresh', () => {
@@ -263,6 +272,31 @@ test('formatResponsesModelAliasesInput serializes configured responses aliases',
     }),
     '{\n  "gpt-5.2": "gpt-5.5"\n}',
   );
+});
+
+test('formatConfigItemCopyText serializes only the raw config item', () => {
+  const copied = formatConfigItemCopyText({
+    index: 1,
+    is_active: true,
+    item: {
+      type: 'apikey',
+      apikey: 'sk-example',
+      base_url: 'https://api.example.com/v1',
+      description: 'backup',
+      support: ['gpt'],
+    },
+    runtime: {
+      runtime_summary: '可用=是',
+    },
+  });
+
+  assert.equal(copied, JSON.stringify({
+    type: 'apikey',
+    apikey: 'sk-example',
+    base_url: 'https://api.example.com/v1',
+    description: 'backup',
+    support: ['gpt'],
+  }, null, 2));
 });
 
 test('parseResponsesModelAliasesInput parses alias JSON and trims keys and values', () => {

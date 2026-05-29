@@ -6,7 +6,7 @@ const DEFAULT_PORTS = {
   'http:': 80,
   'https:': 443,
 };
-const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS = 30 * 1000;
 
 function parseTimeoutMs(value, label) {

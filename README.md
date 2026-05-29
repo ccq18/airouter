@@ -83,10 +83,28 @@ http://localhost:3009/v1
 
 ```text
 http://localhost:3009/v1/responses
+http://localhost:3009/v1/images/generations
+http://localhost:3009/v1/images/edits
 http://localhost:3009/v1/messages
 ```
 
-如果你配置了入口 apikey，客户端里还要填同一个 apikey：
+完整接口说明见 [API 接口文档](docs/api-reference.md)。
+
+Token 配置下，`/v1/images/generations` 和 `/v1/images/edits` 会通过 Codex Responses 的 `image_generation` 工具兼容输出 OpenAI Images JSON：
+
+```json
+{
+  "created": 1779778600,
+  "data": [
+    {
+      "b64_json": "...",
+      "revised_prompt": "..."
+    }
+  ]
+}
+```
+
+如果页面里配置了入口 `apikey`，客户端里还要填同一个 `apikey`：
 
 ```http
 Authorization: Bearer sk-airouter-xxxx
