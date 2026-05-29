@@ -104,7 +104,7 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /重启 App 后完整生效/);
   assert.match(html, /id="refreshButton"/);
   assert.match(html, /id="runtimeSyncStatus"/);
-  assert.match(html, /RUNTIME_SYNC_INTERVAL_MS\s*=\s*5000/);
+  assert.match(html, /RUNTIME_SYNC_INTERVAL_MS\s*=\s*10000/);
   assert.match(html, /refreshRuntimeSnapshot\(\)/);
   assert.match(html, /document\.visibilityState === 'visible'/);
   assert.match(html, /refreshStatic:\s*false/);
@@ -601,7 +601,7 @@ test('formatDispatchSessionStatus summarizes active and recent session observati
     {
       title: '当前会话',
       label: '#abc123def456',
-      detail: '进行中 2 · 粘性',
+      detail: '进行中 2',
       active: true,
       tone: 'active',
     },

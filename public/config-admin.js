@@ -482,9 +482,7 @@
       detailParts.push('fallback');
     }
 
-    if (sticky) {
-      detailParts.push('粘性');
-    } else if (!hasSessionKey) {
+    if (!sticky && !hasSessionKey) {
       detailParts.push('匿名');
     }
 
