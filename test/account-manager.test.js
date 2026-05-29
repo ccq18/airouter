@@ -315,11 +315,25 @@ test('acquireConfig keeps the same session on the same available account', () =>
     sessionKey: 'session-1',
   });
   const firstConfig = firstLease.config;
+  const activeStatus = manager.getAccountStatus(firstConfig);
   assert.equal(firstConfig.runtime.inFlight, 1);
+  assert.match(activeStatus.dispatchSession.label, /^#[0-9a-f]{12}$/);
+  assert.equal(activeStatus.dispatchSession.active, true);
+  assert.equal(activeStatus.dispatchSession.sticky, true);
+  assert.equal(activeStatus.dispatchSession.fallback, false);
+  assert.equal(activeStatus.dispatchSession.reason, 'proxy_request');
+  assert.equal(activeStatus.dispatchSession.startedAt, 1713337200000);
+  assert.equal(activeStatus.dispatchSession.lastSeenAt, 1713337200000);
+  assert.equal(activeStatus.dispatchSession.label.includes('session-1'), false);
 
   firstLease.release();
   firstLease.release();
+  const releasedStatus = manager.getAccountStatus(firstConfig);
   assert.equal(firstConfig.runtime.inFlight, 0);
+  assert.equal(releasedStatus.dispatchSession.label, activeStatus.dispatchSession.label);
+  assert.equal(releasedStatus.dispatchSession.active, false);
+  assert.equal(releasedStatus.dispatchSession.sticky, true);
+  assert.equal(releasedStatus.dispatchSession.lastSeenAt, 1713337200000);
 
   const secondLease = manager.acquireConfig('proxy_request', () => true, {
     sessionKey: 'session-1',
@@ -411,6 +425,7 @@ test('acquireConfig ignores apikey configs because concurrent dispatch is token-
 
   assert.equal(lease, null);
   assert.equal(configs[0].runtime.inFlight, undefined);
+  assert.equal(manager.getAccountStatus(configs[0]).dispatchSession, null);
 });
 
 test('acquireConfig balances anonymous requests by in-flight count', () => {
@@ -494,6 +509,7 @@ test('getAccountStatus returns the view model used by callers', () => {
   assert.match(status.runtimeSummary, /可用=否 \| 额度=2%/);
   assert.match(status.runtimeSummary, /状态=剩余额度低于 3%/);
   assert.equal(status.inFlight, 0);
+  assert.equal(status.dispatchSession, null);
   assert.equal(status.summaryLine, `${status.label} | ${status.runtimeSummary}`);
 });
 

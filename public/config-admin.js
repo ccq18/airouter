@@ -376,6 +376,29 @@
     return active && Number.isInteger(active.index) ? `配置 #${active.index + 1}` : '自动调度';
   }
 
+  function formatObservedDispatchSession(observedSession) {
+    if (!observedSession || typeof observedSession !== 'object') {
+      return '';
+    }
+
+    const sessionStatus = formatDispatchSessionStatus({
+      in_flight: observedSession.in_flight,
+      dispatch_session: observedSession,
+    });
+    if (!sessionStatus) {
+      return '';
+    }
+
+    const configIndex = Number(observedSession.config_index);
+    const configLabel = Number.isInteger(configIndex)
+      ? `配置 #${configIndex + 1}`
+      : typeof observedSession.config_label === 'string' && observedSession.config_label.trim()
+        ? observedSession.config_label.trim()
+        : '未知配置';
+
+    return `${sessionStatus.title} ${sessionStatus.label} -> ${configLabel}`;
+  }
+
   function getDispatchModeSummary(snapshot) {
     const dispatch = snapshot && snapshot.dispatch && typeof snapshot.dispatch === 'object'
       ? snapshot.dispatch
@@ -389,10 +412,11 @@
     }
 
     if (dispatch && dispatch.mode === 'token_pool') {
+      const observedDetail = formatObservedDispatchSession(dispatch.observed_session);
       return {
         value: dispatch.label || 'Token 并发池',
         tone: 'active',
-        detail: dispatch.detail || 'token 请求按会话调度',
+        detail: observedDetail || dispatch.detail || 'token 请求按会话调度',
       };
     }
 
@@ -418,6 +442,58 @@
       value: '无可用配置',
       tone: 'muted',
       detail: '请先添加 token 或 apikey 配置',
+    };
+  }
+
+  function formatDispatchSessionStatus(runtime) {
+    const session = runtime && typeof runtime === 'object'
+      ? runtime.dispatch_session || runtime.dispatchSession
+      : null;
+    if (!session || typeof session !== 'object') {
+      return null;
+    }
+
+    const sessionHash = typeof session.session_hash === 'string' && session.session_hash
+      ? session.session_hash
+      : typeof session.sessionHash === 'string' && session.sessionHash
+        ? session.sessionHash
+        : '';
+    const label = typeof session.label === 'string' && session.label.trim()
+      ? session.label.trim()
+      : sessionHash
+        ? `#${sessionHash}`
+        : '匿名请求';
+    const active = Boolean(session.active);
+    const sticky = Boolean(session.sticky);
+    const fallback = Boolean(session.fallback);
+    const hasSessionKey = Boolean(session.has_session_key || session.hasSessionKey || sessionHash);
+    const inFlight = Number(runtime.in_flight ?? runtime.inFlight);
+    const detailParts = [];
+
+    if (active) {
+      detailParts.push(Number.isFinite(inFlight) && inFlight > 1
+        ? `进行中 ${Math.floor(inFlight)}`
+        : '进行中');
+    } else {
+      detailParts.push('已释放');
+    }
+
+    if (fallback) {
+      detailParts.push('fallback');
+    }
+
+    if (sticky) {
+      detailParts.push('粘性');
+    } else if (!hasSessionKey) {
+      detailParts.push('匿名');
+    }
+
+    return {
+      title: active ? '当前会话' : '最近会话',
+      label,
+      detail: detailParts.join(' · '),
+      active,
+      tone: active ? 'active' : 'muted',
     };
   }
 
@@ -719,6 +795,7 @@
     buildConfigItemFromForm,
     buildAdminStatusSummary,
     getDispatchModeSummary,
+    formatDispatchSessionStatus,
     extractRuntimeStatusTags,
     getActiveConfigLabel,
     hasRefreshTokenConfig,

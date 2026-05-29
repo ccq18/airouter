@@ -73,6 +73,7 @@
 - 没有会话 key 时，token 请求按当前内存 `inFlight` 数做轻量分摊
 - `apikey` 配置项不参与 token 并发调度、hash ring 或 `inFlight` 计数
 - 管理页切换到 token 时，会把该 token 设为并发池锚点；切换到 `apikey` 时，会进入该 `apikey` 支持流量的覆盖模式
+- 管理页“调度模式”和 token 行会显示当前/最近命中的会话短 hash，用于观察实际调度账号；原始会话 ID 不会持久化或返回页面
 - 手动切换到 `apikey` 配置项时，会把该 `apikey` 的运行态恢复为可用
 
 

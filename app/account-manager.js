@@ -2,6 +2,7 @@ const { requestBuffered } = require('./upstream-request');
 const crypto = require('node:crypto');
 
 const HASH_RING_REPLICA_COUNT = 64;
+const SESSION_HASH_LENGTH = 12;
 
 /**
  * 封装账号状态、额度刷新和活动账号切换逻辑。
@@ -34,6 +35,7 @@ function createAccountManager(options) {
     ? Math.min(initialActiveConfigIndex, Math.max(configs.length - 1, 0))
     : 0;
   let anonymousDispatchCursor = activeConfigIndex;
+  let dispatchLeaseCounter = 0;
   let quotaMonitorRunning = false;
   let currentQuotaMonitorTimer = null;
   let allQuotaMonitorTimer = null;
@@ -144,6 +146,7 @@ function createAccountManager(options) {
       lastCheckedAt: config.runtime.lastCheckedAt,
       reason: config.runtime.reason,
       inFlight: isDispatchManagedConfig(config) ? normalizeInFlight(config) : null,
+      dispatchSession: isDispatchManagedConfig(config) ? serializeDispatchSession(config.runtime.dispatchSession) : null,
       runtimeSummary: getRuntimeSummary(config),
       summaryLine: `${getAccountLabel(config)} | ${getRuntimeSummary(config)}`,
     };
@@ -524,13 +527,85 @@ function createAccountManager(options) {
     config.runtime.inFlight = Math.max(0, normalizeInFlight(config) - 1);
   }
 
+  function createDispatchLeaseId() {
+    dispatchLeaseCounter += 1;
+    return `${now()}:${dispatchLeaseCounter}`;
+  }
+
+  function serializeDispatchSession(dispatchSession) {
+    if (!dispatchSession || typeof dispatchSession !== 'object') {
+      return null;
+    }
+
+    const sessionHash = typeof dispatchSession.sessionHash === 'string' && dispatchSession.sessionHash
+      ? dispatchSession.sessionHash
+      : null;
+
+    return {
+      sessionHash,
+      label: typeof dispatchSession.label === 'string' && dispatchSession.label
+        ? dispatchSession.label
+        : sessionHash
+          ? `#${sessionHash}`
+          : '匿名请求',
+      hasSessionKey: Boolean(dispatchSession.hasSessionKey),
+      active: Boolean(dispatchSession.active),
+      sticky: Boolean(dispatchSession.sticky),
+      fallback: Boolean(dispatchSession.fallback),
+      reason: typeof dispatchSession.reason === 'string' ? dispatchSession.reason : '',
+      startedAt: Number.isFinite(dispatchSession.startedAt) ? dispatchSession.startedAt : null,
+      lastSeenAt: Number.isFinite(dispatchSession.lastSeenAt) ? dispatchSession.lastSeenAt : null,
+    };
+  }
+
+  function observeDispatchAcquire(config, metadata, leaseId) {
+    if (!isDispatchManagedConfig(config) || !config.runtime) {
+      return;
+    }
+
+    const sessionKey = normalizeString(metadata.sessionKey);
+    const sessionHash = sessionKey ? hashText(sessionKey).slice(0, SESSION_HASH_LENGTH) : null;
+    const timestamp = now();
+
+    config.runtime.dispatchSession = {
+      leaseId,
+      sessionHash,
+      label: sessionHash ? `#${sessionHash}` : '匿名请求',
+      hasSessionKey: Boolean(sessionHash),
+      active: true,
+      sticky: Boolean(metadata.sticky),
+      fallback: Boolean(metadata.fallback),
+      reason: normalizeString(metadata.reason) || 'dispatch',
+      startedAt: timestamp,
+      lastSeenAt: timestamp,
+    };
+  }
+
+  function observeDispatchRelease(config, leaseId) {
+    if (!isDispatchManagedConfig(config) || !config.runtime || !config.runtime.dispatchSession) {
+      return;
+    }
+
+    if (config.runtime.dispatchSession.leaseId !== leaseId) {
+      return;
+    }
+
+    config.runtime.dispatchSession = {
+      ...config.runtime.dispatchSession,
+      active: false,
+      lastSeenAt: now(),
+    };
+  }
+
   function createConfigLease(config, metadata = {}) {
     if (!config) {
       return null;
     }
 
     let released = false;
+    const leaseId = createDispatchLeaseId();
     incrementInFlight(config);
+    observeDispatchAcquire(config, metadata, leaseId);
 
     return {
       config,
@@ -544,6 +619,7 @@ function createAccountManager(options) {
 
         released = true;
         decrementInFlight(config);
+        observeDispatchRelease(config, leaseId);
       },
     };
   }
@@ -664,6 +740,7 @@ function createAccountManager(options) {
       return createConfigLease(selected, {
         sessionKey,
         sticky: Boolean(sessionKey),
+        reason,
       });
     }
 
@@ -684,6 +761,7 @@ function createAccountManager(options) {
       sessionKey,
       sticky: Boolean(sessionKey),
       fallback: true,
+      reason,
     });
   }
 

@@ -20,6 +20,8 @@ const {
   buildConfigItemFromForm,
   buildAdminStatusSummary,
   extractRuntimeStatusTags,
+  formatDispatchSessionStatus,
+  getDispatchModeSummary,
   getActiveConfigLabel,
   hasRefreshTokenConfig,
   extractResponseSummary,
@@ -544,6 +546,31 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
   );
 });
 
+test('getDispatchModeSummary shows the observed token session target when present', () => {
+  assert.deepEqual(
+    getDispatchModeSummary({
+      dispatch: {
+        mode: 'token_pool',
+        label: 'Token 并发池: 锚点配置 #1',
+        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        observed_session: {
+          config_index: 2,
+          session_hash: 'abc123def456',
+          label: '#abc123def456',
+          has_session_key: true,
+          active: true,
+          sticky: true,
+        },
+      },
+    }),
+    {
+      value: 'Token 并发池: 锚点配置 #1',
+      tone: 'active',
+      detail: '当前会话 #abc123def456 -> 配置 #3',
+    },
+  );
+});
+
 test('extractRuntimeStatusTags pulls readable status tags from runtime summary', () => {
   assert.deepEqual(
     extractRuntimeStatusTags({
@@ -555,6 +582,50 @@ test('extractRuntimeStatusTags pulls readable status tags from runtime summary',
       { label: '刷新 unknown', tone: 'warn' },
       { label: 'timeout', tone: 'danger' },
     ],
+  );
+});
+
+test('formatDispatchSessionStatus summarizes active and recent session observations', () => {
+  assert.deepEqual(
+    formatDispatchSessionStatus({
+      in_flight: 2,
+      dispatch_session: {
+        session_hash: 'abc123def456',
+        label: '#abc123def456',
+        has_session_key: true,
+        active: true,
+        sticky: true,
+        fallback: false,
+      },
+    }),
+    {
+      title: '当前会话',
+      label: '#abc123def456',
+      detail: '进行中 2 · 粘性',
+      active: true,
+      tone: 'active',
+    },
+  );
+
+  assert.deepEqual(
+    formatDispatchSessionStatus({
+      in_flight: 0,
+      dispatch_session: {
+        session_hash: null,
+        label: '匿名请求',
+        has_session_key: false,
+        active: false,
+        sticky: false,
+        fallback: true,
+      },
+    }),
+    {
+      title: '最近会话',
+      label: '匿名请求',
+      detail: '已释放 · fallback · 匿名',
+      active: false,
+      tone: 'muted',
+    },
   );
 });
 

@@ -142,6 +142,8 @@ Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `sessio
 
 token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态。额度低、登录态失效或账号不可用时，会跳过它。
 
+管理页会在“调度模式”和 token 账号摘要里显示安全的调度观测：正在请求时显示 `当前会话 #短hash -> 配置 #N`，请求结束后保留 `最近会话 #短hash`，用于观察某个会话实际命中了哪个账号。原始会话 ID 不会写入配置，也不会返回到页面。
+
 `/v1/messages` 会优先使用支持 `Claude` 的 API Key；没有可用 Claude 上游时，再走兼容转换。
 
 ## 端口说明

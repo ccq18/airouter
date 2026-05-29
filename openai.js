@@ -1064,6 +1064,17 @@ function serializeAccountStatus(accountStatus) {
         last_checked_at: accountStatus.lastCheckedAt,
         reason: accountStatus.reason,
         in_flight: accountStatus.inFlight,
+        dispatch_session: accountStatus.dispatchSession ? {
+            session_hash: accountStatus.dispatchSession.sessionHash,
+            label: accountStatus.dispatchSession.label,
+            has_session_key: accountStatus.dispatchSession.hasSessionKey,
+            active: accountStatus.dispatchSession.active,
+            sticky: accountStatus.dispatchSession.sticky,
+            fallback: accountStatus.dispatchSession.fallback,
+            reason: accountStatus.dispatchSession.reason,
+            started_at: accountStatus.dispatchSession.startedAt,
+            last_seen_at: accountStatus.dispatchSession.lastSeenAt,
+        } : null,
         runtime_summary: accountStatus.runtimeSummary,
         summary_line: accountStatus.summaryLine,
     };
@@ -1093,6 +1104,41 @@ function buildDispatchStatus(activeConfig) {
     };
 }
 
+function buildDispatchObservation(accountStatuses = []) {
+    const observations = accountStatuses
+        .filter(status => status && status.dispatchSession)
+        .map(status => ({
+            status,
+            session: status.dispatchSession,
+        }))
+        .sort((left, right) => {
+            if (left.session.active !== right.session.active) {
+                return left.session.active ? -1 : 1;
+            }
+
+            return Number(right.session.lastSeenAt || 0) - Number(left.session.lastSeenAt || 0);
+        });
+
+    const selected = observations[0];
+    if (!selected) {
+        return null;
+    }
+
+    return {
+        config_index: selected.status.index,
+        config_label: selected.status.label,
+        session_hash: selected.session.sessionHash,
+        label: selected.session.label,
+        has_session_key: selected.session.hasSessionKey,
+        active: selected.session.active,
+        sticky: selected.session.sticky,
+        fallback: selected.session.fallback,
+        reason: selected.session.reason,
+        started_at: selected.session.startedAt,
+        last_seen_at: selected.session.lastSeenAt,
+    };
+}
+
 function getDispatchRole(config, activeConfig) {
     if (!config || !config.runtime || !config.runtime.available) {
         return 'unavailable';
@@ -1109,6 +1155,16 @@ function buildConfigAdminResponse() {
     const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
     const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
     const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
+    const accountStatuses = currentParsedConfig.configs.map((item, index) => (
+        accountManager && apiConfigs[index] ? accountManager.getAccountStatus(apiConfigs[index]) : null
+    ));
+    const dispatchStatus = buildDispatchStatus(activeConfig);
+    const dispatchObservation = activeConfig && activeConfig.type === 'token'
+        ? buildDispatchObservation(accountStatuses)
+        : null;
+    if (dispatchObservation) {
+        dispatchStatus.observed_session = dispatchObservation;
+    }
 
     return {
         config_file: CONFIG_FILE_NAME,
@@ -1121,14 +1177,14 @@ function buildConfigAdminResponse() {
         apikey_required: configuredApiKeys.length > 0,
         claude_code: currentParsedConfig.claude_code ?? null,
         responses: currentParsedConfig.responses ?? null,
-        dispatch: buildDispatchStatus(activeConfig),
+        dispatch: dispatchStatus,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
             item,
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
             dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig) : 'unavailable',
-            runtime: apiConfigs[index] ? serializeAccountStatus(accountManager.getAccountStatus(apiConfigs[index])) : null
+            runtime: apiConfigs[index] ? serializeAccountStatus(accountStatuses[index]) : null
         }))
     };
 }

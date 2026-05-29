@@ -31,6 +31,7 @@ function cloneRuntime(runtime) {
 
     const cloned = { ...runtime };
     delete cloned.inFlight;
+    delete cloned.dispatchSession;
     return cloned;
 }
 

@@ -599,6 +599,37 @@
       overflow-wrap: anywhere;
     }
 
+    .dispatch-session {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      margin-top: 8px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: var(--surface-muted);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    .dispatch-session.active {
+      background: var(--active-soft);
+      color: var(--active);
+      font-weight: 700;
+    }
+
+    .dispatch-session .session-value {
+      color: inherit;
+      font-weight: 800;
+    }
+
+    .dispatch-session .session-detail {
+      color: inherit;
+      opacity: 0.78;
+    }
+
     .action-cell {
       width: 280px;
       white-space: nowrap;
@@ -896,6 +927,7 @@
       formatConfigItemCopyText,
       buildConfigItemFromForm,
       extractRuntimeStatusTags,
+      formatDispatchSessionStatus,
       hasRefreshTokenConfig,
       normalizePortValue,
       buildProxyAccessInfo,
@@ -1148,7 +1180,7 @@
       if (item.dispatch_role === 'token_anchor') {
         tags.push('<span class="badge active">锚点</span>');
       } else if (item.dispatch_role === 'token_dispatch') {
-        tags.push('<span class="badge ok">会话调度</span>');
+        tags.push('<span class="badge ok">池中</span>');
       } else if (item.dispatch_role === 'apikey_override') {
         tags.push('<span class="badge active">覆盖中</span>');
       } else if (item.dispatch_role === 'apikey_fallback') {
@@ -1186,12 +1218,28 @@
       `;
     }
 
+    function renderDispatchSession(runtime) {
+      const session = formatDispatchSessionStatus(runtime);
+      if (!session) {
+        return '';
+      }
+
+      return `
+        <div class="dispatch-session ${session.active ? 'active' : ''}">
+          <span>${escapeHtml(session.title)}</span>
+          <span class="mono session-value">${escapeHtml(session.label)}</span>
+          <span class="session-detail">${escapeHtml(session.detail)}</span>
+        </div>
+      `;
+    }
+
     function renderSummary(runtime) {
       const summaryText = runtime && runtime.runtime_summary ? runtime.runtime_summary : '暂无运行态数据';
 
       return `
         <div class="summary-cell">
           ${renderRuntimeTags(runtime)}
+          ${renderDispatchSession(runtime)}
           <div class="summary-raw">${escapeHtml(summaryText)}</div>
         </div>
       `;
