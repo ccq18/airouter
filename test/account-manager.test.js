@@ -74,7 +74,9 @@ function createManager(configs, overrides = {}) {
     initialActiveConfigIndex: overrides.initialActiveConfigIndex,
     quotaCheckPath: '/backend-api/wham/usage',
     quotaCheckTimeoutMs: overrides.quotaCheckTimeoutMs ?? 10 * 1000,
-    quotaCheckIntervalMs: 60 * 1000,
+    quotaCheckIntervalMs: overrides.quotaCheckIntervalMs ?? 60 * 1000,
+    allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 10 * 60 * 1000,
+    allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
     minRemainingPercent: 3,
     buildAuthHeadersForConfig: config => ({
       ...(config.type === 'apikey'
@@ -88,12 +90,19 @@ function createManager(configs, overrides = {}) {
     shouldUseQuotaMonitoring: overrides.shouldUseQuotaMonitoring || (type => type === 'token'),
     refreshTokenFn: overrides.refreshTokenFn,
     persistTokenRefreshFn: overrides.persistTokenRefreshFn,
+    sleepFn: overrides.sleepFn,
+    setIntervalFn: overrides.setIntervalFn,
+    clearIntervalFn: overrides.clearIntervalFn,
     log: (...args) => logs.push(args.join(' ')),
     warn: (...args) => warnings.push(args.join(' ')),
     now: () => 1713337200000,
   });
 
   return { manager, logs, warnings };
+}
+
+function flushAsyncWork() {
+  return new Promise(resolve => setImmediate(resolve));
 }
 
 test('createAccountManager honors the initial active config index', () => {
@@ -623,7 +632,7 @@ test('activateConfig restores an unavailable apikey config before switching to i
   assert.equal(configs[1].runtime.lastError, null);
 });
 
-test('refreshQuotas logs the active account summary after a poll', async () => {
+test('refreshQuotas refreshes only the active token account during a minute poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -652,10 +661,90 @@ test('refreshQuotas logs the active account summary after a poll', async () => {
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 2);
-  assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
+  assert.equal(quotaResponses.getCallCount(), 1);
+  assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
+  assert.equal(configs[1].runtime.lastCheckedAt, null);
   assert.equal(quotaResponses.getCalls()[0].timeoutMs, 10 * 1000);
   assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
+});
+
+test('startQuotaMonitor schedules minute active polls and ten-minute spaced all-account polls', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const intervalCallbacks = [];
+  const intervalMs = [];
+  const clearedTimers = [];
+  const delayCalls = [];
+  const quotaResponses = createBufferedRequestRecorder([
+    {
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 25, reset_at: 1713350000 },
+        secondary_window: { used_percent: 40, reset_at: 1713360000 },
+      },
+    },
+    {
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 30, reset_at: 1713351000 },
+        secondary_window: { used_percent: 45, reset_at: 1713361000 },
+      },
+    },
+    {
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 35, reset_at: 1713352000 },
+        secondary_window: { used_percent: 50, reset_at: 1713362000 },
+      },
+    },
+  ]);
+  const { manager } = createManager(configs, {
+    requestBufferedFn: quotaResponses.requestBuffered,
+    quotaCheckIntervalMs: 60 * 1000,
+    allQuotaCheckIntervalMs: 10 * 60 * 1000,
+    allQuotaCheckDelayMs: 1000,
+    sleepFn: async ms => {
+      delayCalls.push(ms);
+    },
+    setIntervalFn: (callback, ms) => {
+      intervalCallbacks.push(callback);
+      intervalMs.push(ms);
+      return `timer-${intervalCallbacks.length}`;
+    },
+    clearIntervalFn: timer => {
+      clearedTimers.push(timer);
+    },
+  });
+
+  manager.startQuotaMonitor();
+
+  assert.deepEqual(intervalMs, [60 * 1000, 10 * 60 * 1000]);
+
+  intervalCallbacks[0]();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
+    ['account-0'],
+  );
+
+  intervalCallbacks[1]();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
+    ['account-0', 'account-0', 'account-1'],
+  );
+  assert.deepEqual(delayCalls, [1000]);
+
+  manager.stopQuotaMonitor();
+
+  assert.deepEqual(clearedTimers, ['timer-1', 'timer-2']);
 });
 
 test('refreshQuotas switches to the next available account when the polled account becomes unavailable', async () => {
@@ -688,10 +777,10 @@ test('refreshQuotas switches to the next available account when the polled accou
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 2);
+  assert.equal(quotaResponses.getCallCount(), 1);
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-1'],
+    ['account-0'],
   );
   assert.equal(manager.getActiveConfig(), configs[1]);
   assert.match(warnings[0], /账号不可用: #1 account-1 \(remaining_below_3%\)/);
@@ -699,7 +788,7 @@ test('refreshQuotas switches to the next available account when the polled accou
   assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });
 
-test('refreshQuotas switches away from the active account when the quota check fails', async () => {
+test('refreshQuotas only marks the active account when a minute poll quota check fails', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: false, reason: 'quota_check_failed' }),
@@ -735,15 +824,15 @@ test('refreshQuotas switches away from the active account when the quota check f
 
   assert.deepEqual(
     calls.map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-1'],
+    ['account-0'],
   );
   assert.equal(configs[0].runtime.available, false);
   assert.equal(configs[0].runtime.reason, 'quota_check_failed');
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
   assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(quota_check_failed: network down\)/.test(line)), true);
-  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=75%\)/.test(line)), true);
-  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
-  assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
+  assert.equal(warnings.some(line => /账号恢复可用: #2 account-2/.test(line)), false);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), false);
+  assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=否/);
 });
 
 test('refreshQuotas refreshes an expired token with refresh_token and retries quota check', async () => {
@@ -928,7 +1017,7 @@ test('refreshQuotas still checks all accounts during startup', async () => {
   assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
 });
 
-test('refreshQuotas checks every token account during poll', async () => {
+test('refreshQuotas checks every token account during an all-account poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: false, reason: 'quota_check_failed' }),
@@ -964,7 +1053,7 @@ test('refreshQuotas checks every token account during poll', async () => {
     requestBufferedFn: quotaResponses.requestBuffered,
   });
 
-  await manager.refreshQuotas('poll');
+  await manager.refreshQuotas('all_poll');
 
   assert.equal(quotaResponses.getCallCount(), 3);
   assert.deepEqual(
@@ -1028,7 +1117,7 @@ test('ensureActiveConfig keeps an earlier apikey ahead of a later token config',
   assert.equal(manager.getActiveConfig().index, 0);
 });
 
-test('refreshQuotas keeps the current apikey when an earlier token config recovers', async () => {
+test('refreshQuotas skips token configs during a minute poll when the current config is apikey', async () => {
   const configs = [
     createConfig(0, { available: false, reason: 'quota_check_failed' }),
     createConfig(1, { reason: 'apikey' }, {
@@ -1055,13 +1144,13 @@ test('refreshQuotas keeps the current apikey when an earlier token config recove
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(quotaResponses.getCallCount(), 1);
+  assert.equal(quotaResponses.getCallCount(), 0);
   assert.equal(manager.getActiveConfig().index, 1);
-  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.available, false);
   assert.equal(configs[1].runtime.available, true);
 });
 
-test('refreshQuotas checks all token accounts and selects the first recovered account', async () => {
+test('refreshQuotas checks all token accounts and selects the first recovered account during an all-account poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: false, reason: 'quota_check_failed' }),
@@ -1097,7 +1186,7 @@ test('refreshQuotas checks all token accounts and selects the first recovered ac
     requestBufferedFn: quotaResponses.requestBuffered,
   });
 
-  await manager.refreshQuotas('poll');
+  await manager.refreshQuotas('all_poll');
 
   assert.equal(quotaResponses.getCallCount(), 3);
   assert.deepEqual(
@@ -1113,11 +1202,11 @@ test('refreshQuotas checks all token accounts and selects the first recovered ac
   assert.equal(configs[2].runtime.reason, 'rate_limit_not_allowed');
   assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(remaining_below_3%\)/.test(line)), true);
   assert.equal(warnings.some(line => /账号恢复可用: #2 account-2 \(remaining=80%\)/.test(line)), true);
-  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(all_poll\)/.test(line)), true);
   assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
 });
 
-test('refreshQuotas keeps using apikey fallback when all token accounts are unavailable', async () => {
+test('refreshQuotas keeps using apikey fallback when all token accounts are unavailable during an all-account poll', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: false, reason: 'quota_check_failed' }),
@@ -1164,7 +1253,7 @@ test('refreshQuotas keeps using apikey fallback when all token accounts are unav
     requestBufferedFn: quotaResponses.requestBuffered,
   });
 
-  await manager.refreshQuotas('poll');
+  await manager.refreshQuotas('all_poll');
 
   assert.equal(quotaResponses.getCallCount(), 3);
   assert.deepEqual(

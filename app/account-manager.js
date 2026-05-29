@@ -10,6 +10,8 @@ function createAccountManager(options) {
     quotaCheckPath,
     quotaCheckTimeoutMs = 0,
     quotaCheckIntervalMs,
+    allQuotaCheckIntervalMs = 10 * 60 * 1000,
+    allQuotaCheckDelayMs = 1000,
     minRemainingPercent,
     minWeeklyRemainingPercent = 1,
     buildAuthHeadersForConfig,
@@ -17,6 +19,9 @@ function createAccountManager(options) {
     shouldUseQuotaMonitoring,
     refreshTokenFn = null,
     persistTokenRefreshFn = async () => {},
+    sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
+    setIntervalFn = setInterval,
+    clearIntervalFn = clearInterval,
     log,
     warn,
     now,
@@ -26,7 +31,8 @@ function createAccountManager(options) {
     ? Math.min(initialActiveConfigIndex, Math.max(configs.length - 1, 0))
     : 0;
   let quotaMonitorRunning = false;
-  let quotaMonitorTimer = null;
+  let currentQuotaMonitorTimer = null;
+  let allQuotaMonitorTimer = null;
 
   /**
    * 生成日志里使用的账号标识。
@@ -594,10 +600,46 @@ function createAccountManager(options) {
     }
   }
 
+  function getQuotaMonitoredConfigs() {
+    return configs.filter(config => shouldUseQuotaMonitoring(config.type));
+  }
+
+  function shouldRefreshAllQuotas(reason, options = {}) {
+    if (typeof options.refreshAll === 'boolean') {
+      return options.refreshAll;
+    }
+
+    return reason !== 'poll';
+  }
+
+  function getQuotaRefreshTargets(reason, options = {}) {
+    if (shouldRefreshAllQuotas(reason, options)) {
+      return getQuotaMonitoredConfigs();
+    }
+
+    const currentConfig = getActiveConfig();
+    return currentConfig && shouldUseQuotaMonitoring(currentConfig.type)
+      ? [currentConfig]
+      : [];
+  }
+
+  function normalizeDelayMs(value) {
+    const numberValue = Number(value);
+    return Number.isFinite(numberValue) && numberValue > 0 ? Math.floor(numberValue) : 0;
+  }
+
+  async function waitBetweenFullQuotaChecks(index, delayMs) {
+    if (index === 0 || delayMs <= 0) {
+      return;
+    }
+
+    await sleepFn(delayMs);
+  }
+
   /**
-   * 轮询所有 token 账号额度；活动配置统一按 configs[] 顺序选择。
+   * 轮询 token 账号额度；后台分钟级轮询只检查当前账号，全量轮询按 configs[] 顺序选择。
    */
-  async function refreshQuotas(reason = 'poll') {
+  async function refreshQuotas(reason = 'poll', options = {}) {
     if (!configs.some(config => shouldUseQuotaMonitoring(config.type))) {
       return;
     }
@@ -608,12 +650,15 @@ function createAccountManager(options) {
 
     quotaMonitorRunning = true;
     const previousActiveIndex = activeConfigIndex;
+    const targets = getQuotaRefreshTargets(reason, options);
+    const delayBetweenAccountsMs = shouldRefreshAllQuotas(reason, options)
+      ? normalizeDelayMs(options.delayBetweenAccountsMs)
+      : 0;
 
     try {
-      for (const config of configs) {
-        if (shouldUseQuotaMonitoring(config.type)) {
-          await refreshSingleConfigWithLogging(config, reason);
-        }
+      for (let index = 0; index < targets.length; index += 1) {
+        await waitBetweenFullQuotaChecks(index, delayBetweenAccountsMs);
+        await refreshSingleConfigWithLogging(targets[index], reason);
       }
 
       const currentConfig = ensureActiveConfig(reason);
@@ -622,7 +667,7 @@ function createAccountManager(options) {
         warn(`当前活动账号: ${getAccountLabel(currentConfig)}`);
       }
 
-      if (reason === 'poll' && currentConfig) {
+      if ((reason === 'poll' || reason === 'all_poll') && currentConfig) {
         log(`轮询额度: ${getAccountStatus(currentConfig).summaryLine}`);
       }
     } finally {
@@ -638,22 +683,38 @@ function createAccountManager(options) {
       return;
     }
 
-    if (quotaMonitorTimer) {
-      clearInterval(quotaMonitorTimer);
+    if (currentQuotaMonitorTimer) {
+      clearIntervalFn(currentQuotaMonitorTimer);
     }
 
-    quotaMonitorTimer = setInterval(() => {
+    if (allQuotaMonitorTimer) {
+      clearIntervalFn(allQuotaMonitorTimer);
+    }
+
+    currentQuotaMonitorTimer = setIntervalFn(() => {
       void refreshQuotas('poll');
     }, quotaCheckIntervalMs);
+
+    allQuotaMonitorTimer = setIntervalFn(() => {
+      void refreshQuotas('all_poll', {
+        refreshAll: true,
+        delayBetweenAccountsMs: allQuotaCheckDelayMs,
+      });
+    }, allQuotaCheckIntervalMs);
   }
 
   /**
    * 停止后台额度轮询定时器。
    */
   function stopQuotaMonitor() {
-    if (quotaMonitorTimer) {
-      clearInterval(quotaMonitorTimer);
-      quotaMonitorTimer = null;
+    if (currentQuotaMonitorTimer) {
+      clearIntervalFn(currentQuotaMonitorTimer);
+      currentQuotaMonitorTimer = null;
+    }
+
+    if (allQuotaMonitorTimer) {
+      clearIntervalFn(allQuotaMonitorTimer);
+      allQuotaMonitorTimer = null;
     }
   }
 
