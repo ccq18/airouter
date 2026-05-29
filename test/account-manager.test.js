@@ -343,6 +343,29 @@ test('acquireConfig keeps the same session on the same available account', () =>
   secondLease.release();
 });
 
+test('acquireConfig distributes sticky sessions across candidates with rendezvous hashing', () => {
+  const configs = Array.from({ length: 7 }, (_, index) => createConfig(index, {
+    available: true,
+    reason: 'ok',
+  }));
+  const { manager } = createManager(configs);
+  const counts = new Map(configs.map(config => [config.index, 0]));
+
+  for (let index = 0; index < 1400; index += 1) {
+    const lease = manager.acquireConfig('proxy_request', () => true, {
+      sessionKey: `session-${index}`,
+    });
+    counts.set(lease.config.index, counts.get(lease.config.index) + 1);
+    lease.release();
+  }
+
+  const values = [...counts.values()];
+  assert.equal(values.length, 7);
+  assert.ok(values.every(value => value > 0));
+  assert.ok(Math.min(...values) >= 140);
+  assert.ok(Math.max(...values) <= 260);
+});
+
 test('acquireConfig moves a sticky session when the hashed account is unavailable', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
@@ -460,6 +483,47 @@ test('getDispatchIdentity keeps token routing stable across access token refresh
   assert.equal(manager.getDispatchIdentity(config), previousIdentity);
 });
 
+test('observeResponseModel records requested and upstream response models', () => {
+  const config = createConfig(0, { available: true, reason: 'ok' });
+  const { manager } = createManager([config]);
+
+  manager.observeResponseModel(config, {
+    requestModel: 'gpt-5.5',
+    active: true,
+    source: 'proxy_request',
+  });
+
+  let status = manager.getAccountStatus(config);
+  assert.deepEqual(status.responseModel, {
+    requestModel: 'gpt-5.5',
+    responseModel: null,
+    active: true,
+    source: 'proxy_request',
+    statusCode: null,
+    observedAt: null,
+    lastSeenAt: 1713337200000,
+  });
+
+  manager.observeResponseModel(config, {
+    responseModel: 'gpt-5.4-mini',
+    statusCode: 200,
+  });
+  manager.observeResponseModel(config, {
+    active: false,
+  });
+
+  status = manager.getAccountStatus(config);
+  assert.deepEqual(status.responseModel, {
+    requestModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+    active: false,
+    source: 'proxy_request',
+    statusCode: 200,
+    observedAt: 1713337200000,
+    lastSeenAt: 1713337200000,
+  });
+});
+
 test('getAccountStatus returns the view model used by callers', () => {
   const config = createConfig(0, {
     available: false,
@@ -510,6 +574,7 @@ test('getAccountStatus returns the view model used by callers', () => {
   assert.match(status.runtimeSummary, /状态=剩余额度低于 3%/);
   assert.equal(status.inFlight, 0);
   assert.equal(status.dispatchSession, null);
+  assert.equal(status.responseModel, null);
   assert.equal(status.summaryLine, `${status.label} | ${status.runtimeSummary}`);
 });
 

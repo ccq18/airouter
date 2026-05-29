@@ -69,7 +69,7 @@ test('reconcileRuntimeConfigs preserves existing runtime state for unchanged con
     assert.equal(reconciled.initialActiveConfigIndex, 1);
 });
 
-test('reconcileRuntimeConfigs does not carry transient dispatch runtime across reloads', () => {
+test('reconcileRuntimeConfigs does not carry active request runtime across reloads', () => {
     const previousConfigs = [
         createTokenConfig(0, {
             available: true,
@@ -77,6 +77,11 @@ test('reconcileRuntimeConfigs does not carry transient dispatch runtime across r
             inFlight: 3,
             dispatchSession: {
                 label: '#abc123def456',
+                active: true,
+            },
+            responseModel: {
+                requestModel: 'gpt-5.5',
+                responseModel: 'gpt-5.4-mini',
                 active: true,
             },
         }),
@@ -93,6 +98,11 @@ test('reconcileRuntimeConfigs does not carry transient dispatch runtime across r
     assert.equal(nextConfigs[0].runtime.reason, 'ok');
     assert.equal(nextConfigs[0].runtime.inFlight, undefined);
     assert.equal(nextConfigs[0].runtime.dispatchSession, undefined);
+    assert.deepEqual(nextConfigs[0].runtime.responseModel, {
+        requestModel: 'gpt-5.5',
+        responseModel: 'gpt-5.4-mini',
+        active: false,
+    });
 });
 
 test('reconcileRuntimeConfigs prefers runtime overrides for newly added configs', () => {

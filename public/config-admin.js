@@ -495,6 +495,49 @@
     };
   }
 
+  function formatResponseModelStatus(runtime) {
+    const model = runtime && typeof runtime === 'object'
+      ? runtime.response_model || runtime.responseModel
+      : null;
+    if (!model || typeof model !== 'object') {
+      return null;
+    }
+
+    const requestModel = typeof model.request_model === 'string' && model.request_model.trim()
+      ? model.request_model.trim()
+      : typeof model.requestModel === 'string' && model.requestModel.trim()
+        ? model.requestModel.trim()
+        : '';
+    const responseModel = typeof model.response_model === 'string' && model.response_model.trim()
+      ? model.response_model.trim()
+      : typeof model.responseModel === 'string' && model.responseModel.trim()
+        ? model.responseModel.trim()
+        : '';
+    const statusCode = Number(model.status_code ?? model.statusCode);
+    const active = Boolean(model.active);
+    const detailParts = [];
+
+    if (active) {
+      detailParts.push('进行中');
+    }
+
+    if (requestModel && responseModel && requestModel !== responseModel) {
+      detailParts.push(`请求 ${requestModel}`);
+    }
+
+    if (Number.isInteger(statusCode) && statusCode > 0) {
+      detailParts.push(`HTTP ${statusCode}`);
+    }
+
+    return {
+      title: responseModel ? '响应模型' : '请求模型',
+      label: responseModel || requestModel || '等待响应',
+      detail: detailParts.join(' · '),
+      active,
+      tone: responseModel && requestModel && responseModel !== requestModel ? 'warn' : active ? 'active' : 'muted',
+    };
+  }
+
   function extractRuntimeStatusTags(runtime) {
     const text = getRuntimeSummaryText(runtime);
 
@@ -794,6 +837,7 @@
     buildAdminStatusSummary,
     getDispatchModeSummary,
     formatDispatchSessionStatus,
+    formatResponseModelStatus,
     extractRuntimeStatusTags,
     getActiveConfigLabel,
     hasRefreshTokenConfig,

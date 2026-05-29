@@ -21,6 +21,7 @@ const {
   buildAdminStatusSummary,
   extractRuntimeStatusTags,
   formatDispatchSessionStatus,
+  formatResponseModelStatus,
   getDispatchModeSummary,
   getActiveConfigLabel,
   hasRefreshTokenConfig,
@@ -625,6 +626,43 @@ test('formatDispatchSessionStatus summarizes active and recent session observati
       detail: '已释放 · fallback · 匿名',
       active: false,
       tone: 'muted',
+    },
+  );
+});
+
+test('formatResponseModelStatus summarizes requested and actual response models', () => {
+  assert.deepEqual(
+    formatResponseModelStatus({
+      response_model: {
+        request_model: 'gpt-5.5',
+        response_model: 'gpt-5.4-mini',
+        active: true,
+        status_code: 200,
+      },
+    }),
+    {
+      title: '响应模型',
+      label: 'gpt-5.4-mini',
+      detail: '进行中 · 请求 gpt-5.5 · HTTP 200',
+      active: true,
+      tone: 'warn',
+    },
+  );
+
+  assert.deepEqual(
+    formatResponseModelStatus({
+      response_model: {
+        request_model: 'gpt-5.5',
+        response_model: null,
+        active: true,
+      },
+    }),
+    {
+      title: '请求模型',
+      label: 'gpt-5.5',
+      detail: '进行中',
+      active: true,
+      tone: 'active',
     },
   );
 });

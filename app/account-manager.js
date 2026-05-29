@@ -1,7 +1,6 @@
 const { requestBuffered } = require('./upstream-request');
 const crypto = require('node:crypto');
 
-const HASH_RING_REPLICA_COUNT = 64;
 const SESSION_HASH_LENGTH = 12;
 
 /**
@@ -147,6 +146,7 @@ function createAccountManager(options) {
       reason: config.runtime.reason,
       inFlight: isDispatchManagedConfig(config) ? normalizeInFlight(config) : null,
       dispatchSession: isDispatchManagedConfig(config) ? serializeDispatchSession(config.runtime.dispatchSession) : null,
+      responseModel: serializeResponseModel(config.runtime.responseModel),
       runtimeSummary: getRuntimeSummary(config),
       summaryLine: `${getAccountLabel(config)} | ${getRuntimeSummary(config)}`,
     };
@@ -456,12 +456,12 @@ function createAccountManager(options) {
       .digest('hex');
   }
 
-  function hashTextToUInt32(value) {
+  function hashTextToUInt64(value) {
     return crypto
       .createHash('sha256')
       .update(String(value))
       .digest()
-      .readUInt32BE(0);
+      .readBigUInt64BE(0);
   }
 
   function getDispatchIdentity(config) {
@@ -558,6 +558,56 @@ function createAccountManager(options) {
     };
   }
 
+  function serializeResponseModel(responseModel) {
+    if (!responseModel || typeof responseModel !== 'object') {
+      return null;
+    }
+
+    return {
+      requestModel: typeof responseModel.requestModel === 'string' && responseModel.requestModel
+        ? responseModel.requestModel
+        : null,
+      responseModel: typeof responseModel.responseModel === 'string' && responseModel.responseModel
+        ? responseModel.responseModel
+        : null,
+      active: Boolean(responseModel.active),
+      source: typeof responseModel.source === 'string' ? responseModel.source : '',
+      statusCode: Number.isInteger(responseModel.statusCode) ? responseModel.statusCode : null,
+      observedAt: Number.isFinite(responseModel.observedAt) ? responseModel.observedAt : null,
+      lastSeenAt: Number.isFinite(responseModel.lastSeenAt) ? responseModel.lastSeenAt : null,
+    };
+  }
+
+  function observeResponseModel(config, observation = {}) {
+    if (!config || !config.runtime) {
+      return null;
+    }
+
+    const previous = config.runtime.responseModel && typeof config.runtime.responseModel === 'object'
+      ? config.runtime.responseModel
+      : {};
+    const requestModel = normalizeString(observation.requestModel) || previous.requestModel || null;
+    const hasObservedResponseModel = Object.prototype.hasOwnProperty.call(observation, 'responseModel');
+    const observedResponseModel = normalizeString(observation.responseModel);
+    const responseModel = observedResponseModel || (observation.active === true ? null : previous.responseModel || null);
+    const timestamp = now();
+    const statusCode = Number(observation.statusCode);
+
+    config.runtime.responseModel = {
+      requestModel,
+      responseModel,
+      active: Object.prototype.hasOwnProperty.call(observation, 'active')
+        ? Boolean(observation.active)
+        : Boolean(previous.active),
+      source: normalizeString(observation.source) || previous.source || 'responses',
+      statusCode: Number.isInteger(statusCode) && statusCode > 0 ? statusCode : previous.statusCode ?? null,
+      observedAt: hasObservedResponseModel && responseModel ? timestamp : previous.observedAt ?? null,
+      lastSeenAt: timestamp,
+    };
+
+    return serializeResponseModel(config.runtime.responseModel);
+  }
+
   function observeDispatchAcquire(config, metadata, leaseId) {
     if (!isDispatchManagedConfig(config) || !config.runtime) {
       return;
@@ -643,31 +693,7 @@ function createAccountManager(options) {
     return configs.find(config => isDispatchManagedConfig(config) && predicate(config) && !excluded.has(getDispatchIdentity(config))) || null;
   }
 
-  function buildHashRing(candidates) {
-    const ring = [];
-
-    for (const config of candidates) {
-      const identity = getDispatchIdentity(config);
-      for (let replica = 0; replica < HASH_RING_REPLICA_COUNT; replica += 1) {
-        ring.push({
-          hash: hashTextToUInt32(`${identity}:${replica}`),
-          config,
-        });
-      }
-    }
-
-    ring.sort((left, right) => {
-      if (left.hash !== right.hash) {
-        return left.hash - right.hash;
-      }
-
-      return getDispatchIdentity(left.config).localeCompare(getDispatchIdentity(right.config));
-    });
-
-    return ring;
-  }
-
-  function pickByHashRing(sessionKey, candidates) {
+  function pickByRendezvousHash(sessionKey, candidates) {
     if (!sessionKey || candidates.length === 0) {
       return null;
     }
@@ -676,23 +702,26 @@ function createAccountManager(options) {
       return candidates[0];
     }
 
-    const ring = buildHashRing(candidates);
-    const requestHash = hashTextToUInt32(sessionKey);
-    let left = 0;
-    let right = ring.length - 1;
-    let selectedIndex = 0;
+    let selected = null;
+    let selectedScore = null;
+    let selectedIdentity = '';
 
-    while (left <= right) {
-      const middle = Math.floor((left + right) / 2);
-      if (ring[middle].hash >= requestHash) {
-        selectedIndex = middle;
-        right = middle - 1;
-      } else {
-        left = middle + 1;
+    for (const config of candidates) {
+      const identity = getDispatchIdentity(config);
+      const score = hashTextToUInt64(`${sessionKey}:${identity}`);
+
+      if (
+        selected === null ||
+        score > selectedScore ||
+        (score === selectedScore && identity.localeCompare(selectedIdentity) < 0)
+      ) {
+        selected = config;
+        selectedScore = score;
+        selectedIdentity = identity;
       }
     }
 
-    return ring[selectedIndex].config;
+    return selected;
   }
 
   function pickLeastInFlight(candidates) {
@@ -733,7 +762,7 @@ function createAccountManager(options) {
     const allowFallback = options.allowFallback !== false;
     const candidates = getAvailableDispatchCandidates(predicate, options.exclude);
     const selected = sessionKey
-      ? pickByHashRing(sessionKey, candidates)
+      ? pickByRendezvousHash(sessionKey, candidates)
       : pickLeastInFlight(candidates);
 
     if (selected) {
@@ -1060,6 +1089,7 @@ function createAccountManager(options) {
     markConfigUnavailable,
     acquireConfig,
     getDispatchIdentity,
+    observeResponseModel,
   };
 }
 

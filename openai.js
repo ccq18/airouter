@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('path');
 const { spawn } = require('node:child_process');
 const { inspect } = require('node:util');
+const { StringDecoder } = require('node:string_decoder');
 const zlib = require('zlib');
 const express = require('express');
 const { createUpstreamRequest, consumeResponseBody, requestBuffered } = require('./app/upstream-request');
@@ -813,6 +814,11 @@ function createClaudeMessagesRequestHandler() {
                 exclude: [config],
                 allowFallback: false,
             });
+        },
+        observeResponseModel: (config, observation) => {
+            if (accountManager && typeof accountManager.observeResponseModel === 'function') {
+                accountManager.observeResponseModel(config, observation);
+            }
         }
     });
 }
@@ -1074,6 +1080,15 @@ function serializeAccountStatus(accountStatus) {
             reason: accountStatus.dispatchSession.reason,
             started_at: accountStatus.dispatchSession.startedAt,
             last_seen_at: accountStatus.dispatchSession.lastSeenAt,
+        } : null,
+        response_model: accountStatus.responseModel ? {
+            request_model: accountStatus.responseModel.requestModel,
+            response_model: accountStatus.responseModel.responseModel,
+            active: accountStatus.responseModel.active,
+            source: accountStatus.responseModel.source,
+            status_code: accountStatus.responseModel.statusCode,
+            observed_at: accountStatus.responseModel.observedAt,
+            last_seen_at: accountStatus.responseModel.lastSeenAt,
         } : null,
         runtime_summary: accountStatus.runtimeSummary,
         summary_line: accountStatus.summaryLine,
@@ -1618,6 +1633,153 @@ function applyResponseHeaders(res, statusCode, rawHeaders) {
     };
 }
 
+function normalizeObservedModel(value) {
+    return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function extractResponseModelFromPayload(payload) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return '';
+    }
+
+    return normalizeObservedModel(payload.response?.model) || normalizeObservedModel(payload.model);
+}
+
+function extractRequestModelFromBody(body) {
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+        return '';
+    }
+
+    try {
+        const payload = JSON.parse(body.toString('utf8'));
+        return normalizeObservedModel(payload && payload.model);
+    } catch (err) {
+        return '';
+    }
+}
+
+function createResponseModelObserver(options = {}) {
+    const {
+        contentType = '',
+        contentEncoding = '',
+        maxBufferBytes = 64 * 1024,
+        onModel = () => {},
+    } = options;
+    const normalizedContentType = String(contentType || '').toLowerCase();
+    const normalizedEncoding = normalizeContentEncoding(contentEncoding);
+    const isEventStream = normalizedContentType.includes('text/event-stream');
+    const isJson = normalizedContentType.includes('json') || normalizedContentType.includes('application/problem+json');
+    const decoder = new StringDecoder('utf8');
+    let bufferedText = '';
+    let bufferedBytes = 0;
+    let lastModel = '';
+
+    function notify(model) {
+        const normalizedModel = normalizeObservedModel(model);
+        if (!normalizedModel || normalizedModel === lastModel) {
+            return;
+        }
+
+        lastModel = normalizedModel;
+        onModel(normalizedModel);
+    }
+
+    function inspectEventBlock(eventBlock) {
+        const dataLines = String(eventBlock || '')
+            .split(/\r?\n/)
+            .filter(line => line.startsWith('data:'))
+            .map(line => line.slice(5).replace(/^ /, ''));
+        if (dataLines.length === 0) {
+            return;
+        }
+
+        const payloadText = dataLines.join('\n');
+        if (!payloadText || payloadText === '[DONE]') {
+            return;
+        }
+
+        try {
+            notify(extractResponseModelFromPayload(JSON.parse(payloadText)));
+        } catch (err) {
+            // Ignore partial or non-JSON SSE payloads; the response still passes through unchanged.
+        }
+    }
+
+    function inspectBufferedEvents() {
+        while (true) {
+            const match = /\r?\n\r?\n/.exec(bufferedText);
+            if (!match) {
+                return;
+            }
+
+            const eventBlock = bufferedText.slice(0, match.index);
+            bufferedText = bufferedText.slice(match.index + match[0].length);
+            inspectEventBlock(eventBlock);
+        }
+    }
+
+    function inspectJsonBuffer() {
+        if (!bufferedText.trim()) {
+            return;
+        }
+
+        try {
+            notify(extractResponseModelFromPayload(JSON.parse(bufferedText)));
+        } catch (err) {
+            // Keep observation best-effort; malformed/non-JSON bodies are still forwarded normally.
+        }
+    }
+
+    function inspectJsonPrefix() {
+        const match = bufferedText.match(/"model"\s*:\s*"((?:\\.|[^"\\]){1,200})"/);
+        if (!match) {
+            return;
+        }
+
+        try {
+            notify(JSON.parse(`"${match[1]}"`));
+        } catch (err) {
+            notify(match[1]);
+        }
+    }
+
+    return {
+        push(chunk) {
+            if (normalizedEncoding || (!isEventStream && !isJson)) {
+                return;
+            }
+
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            bufferedBytes += buffer.length;
+            if (bufferedBytes > maxBufferBytes) {
+                return;
+            }
+
+            bufferedText += decoder.write(buffer);
+            if (isEventStream) {
+                inspectBufferedEvents();
+            } else {
+                inspectJsonPrefix();
+            }
+        },
+        finish() {
+            if (normalizedEncoding || (!isEventStream && !isJson) || bufferedBytes > maxBufferBytes) {
+                return lastModel;
+            }
+
+            bufferedText += decoder.end();
+            if (isEventStream) {
+                inspectEventBlock(bufferedText);
+                bufferedText = '';
+            } else {
+                inspectJsonBuffer();
+            }
+
+            return lastModel;
+        },
+    };
+}
+
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
@@ -1627,6 +1789,8 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const retrySelector = typeof options.retrySelector === 'function' ? options.retrySelector : null;
     let currentLease = options.lease || null;
     let leaseReleased = false;
+    const shouldObserveResponseModel = isResponsesPath(req.url);
+    const requestedResponseModel = shouldObserveResponseModel ? extractRequestModelFromBody(body) : '';
     const headers = applyResponsesFailoverRequestHeaders(
         buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined),
         req.url
@@ -1650,12 +1814,27 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     let upstreamResponseHeaders = {};
     let upstreamResponse = null;
 
+    function observeCurrentResponseModel(observation = {}) {
+        if (!shouldObserveResponseModel || !accountManager || typeof accountManager.observeResponseModel !== 'function') {
+            return;
+        }
+
+        accountManager.observeResponseModel(config, {
+            requestModel: requestedResponseModel,
+            source: 'proxy_request',
+            ...observation,
+        });
+    }
+
+    observeCurrentResponseModel({ active: true });
+
     function releaseCurrentLease() {
         if (leaseReleased) {
             return;
         }
 
         leaseReleased = true;
+        observeCurrentResponseModel({ active: false });
         if (currentLease && typeof currentLease.release === 'function') {
             currentLease.release();
         }
@@ -1700,8 +1879,24 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         upstreamResponseHeaders = responseMeta.headers;
         headersApplied = true;
         res.flushHeaders();
+        observeCurrentResponseModel({
+            active: true,
+            statusCode,
+        });
+        const responseModelObserver = createResponseModelObserver({
+            contentType: getHeaderValue(rawHeaders, 'content-type'),
+            contentEncoding: getHeaderValue(rawHeaders, 'content-encoding'),
+            onModel: responseModel => {
+                observeCurrentResponseModel({
+                    active: true,
+                    responseModel,
+                    statusCode,
+                });
+            },
+        });
 
         const writeChunk = chunk => {
+            responseModelObserver.push(chunk);
             if (shouldLogQuotaUsage) {
                 responseBodyChunks.push(chunk);
             }
@@ -1716,6 +1911,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
         response.on('end', () => {
             responseFinished = true;
+            responseModelObserver.finish();
             handleQuotaUsageResponseComplete();
             releaseCurrentLease();
 
@@ -1747,6 +1943,22 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         });
 
         response.resume();
+    }
+
+    function observeBufferedResponseModel(statusCode, rawHeaders, bodyBuffer) {
+        const responseModelObserver = createResponseModelObserver({
+            contentType: getHeaderValue(rawHeaders, 'content-type'),
+            contentEncoding: getHeaderValue(rawHeaders, 'content-encoding'),
+            onModel: responseModel => {
+                observeCurrentResponseModel({
+                    active: true,
+                    responseModel,
+                    statusCode,
+                });
+            },
+        });
+        responseModelObserver.push(bodyBuffer || Buffer.alloc(0));
+        responseModelObserver.finish();
     }
 
     upstream.responsePromise.then(async response => {
@@ -1819,6 +2031,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 }
 
                 if (inspection.forwardMode === 'buffered') {
+                    observeBufferedResponseModel(statusCode, response.headers, inspection.bodyBuffer || Buffer.alloc(0));
                     upstreamResponseHeaders = writeBufferedUpstreamResponse(
                         res,
                         statusCode,
@@ -1836,6 +2049,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
 
             if (inspection.action === 'forward-buffered') {
+                observeBufferedResponseModel(statusCode, response.headers, inspection.bodyBuffer || Buffer.alloc(0));
                 upstreamResponseHeaders = writeBufferedUpstreamResponse(
                     res,
                     statusCode,
@@ -2852,6 +3066,8 @@ module.exports = {
     LOCAL_ONLY_AUTH_HEADERS,
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
+    createResponseModelObserver,
+    extractResponseModelFromPayload,
     isResponsesFailoverInspectionCandidate,
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,

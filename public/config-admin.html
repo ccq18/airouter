@@ -620,6 +620,12 @@
       font-weight: 700;
     }
 
+    .dispatch-session.warn {
+      background: var(--warning-soft);
+      color: var(--warning);
+      font-weight: 700;
+    }
+
     .dispatch-session .session-value {
       color: inherit;
       font-weight: 800;
@@ -928,6 +934,7 @@
       buildConfigItemFromForm,
       extractRuntimeStatusTags,
       formatDispatchSessionStatus,
+      formatResponseModelStatus,
       hasRefreshTokenConfig,
       normalizePortValue,
       buildProxyAccessInfo,
@@ -1233,6 +1240,21 @@
       `;
     }
 
+    function renderResponseModel(runtime) {
+      const model = formatResponseModelStatus(runtime);
+      if (!model) {
+        return '';
+      }
+
+      return `
+        <div class="dispatch-session ${model.active ? 'active' : ''} ${model.tone === 'warn' ? 'warn' : ''}">
+          <span>${escapeHtml(model.title)}</span>
+          <span class="mono session-value">${escapeHtml(model.label)}</span>
+          <span class="session-detail">${escapeHtml(model.detail)}</span>
+        </div>
+      `;
+    }
+
     function renderSummary(runtime) {
       const summaryText = runtime && runtime.runtime_summary ? runtime.runtime_summary : '暂无运行态数据';
 
@@ -1240,6 +1262,7 @@
         <div class="summary-cell">
           ${renderRuntimeTags(runtime)}
           ${renderDispatchSession(runtime)}
+          ${renderResponseModel(runtime)}
           <div class="summary-raw">${escapeHtml(summaryText)}</div>
         </div>
       `;

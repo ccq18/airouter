@@ -32,6 +32,12 @@ function cloneRuntime(runtime) {
     const cloned = { ...runtime };
     delete cloned.inFlight;
     delete cloned.dispatchSession;
+    if (cloned.responseModel && typeof cloned.responseModel === 'object') {
+        cloned.responseModel = {
+            ...cloned.responseModel,
+            active: false,
+        };
+    }
     return cloned;
 }
 

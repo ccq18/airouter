@@ -100,7 +100,7 @@
    - `runtime.available = false`
    - `runtime.reason = responses_*`
    - `runtime.lastError = <retrySource>:<retryKey>`
-3. 如果当前请求有会话 key，沿 token 一致性 hash ring 排除失败账号后选择下一个可用 token 账号
+3. 如果当前请求有会话 key，排除失败账号后按 HRW/Rendezvous 一致性哈希重新选择可用 token 账号
 4. 如果当前请求没有会话 key，按可用 token 账号的 `inFlight` 计数选择重试账号
 5. 用新账号重放同一个 `/responses` 请求
 

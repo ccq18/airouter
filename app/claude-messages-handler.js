@@ -575,7 +575,8 @@ function createClaudeMessagesHandler({
     upstreamRequestTimeoutMs = 0,
     createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest,
     handleRetryableUpstreamError = null,
-    getSessionKey = () => ''
+    getSessionKey = () => '',
+    observeResponseModel = null
 }) {
     return async function handleMessagesRequest(req, res) {
         const incomingUrl = buildIncomingUrl(req);
@@ -731,12 +732,27 @@ function createClaudeMessagesHandler({
             return currentConfigSelection;
         }
 
+        function observeActiveResponseModel(activeConfig, observation = {}) {
+            if (typeof observeResponseModel !== 'function' || !activeConfig) {
+                return;
+            }
+
+            observeResponseModel(activeConfig, {
+                requestModel: responsesRequest && responsesRequest.model,
+                source: 'claude_messages',
+                ...observation
+            });
+        }
+
         function releaseCurrentConfigSelection() {
             if (currentConfigReleased) {
                 return;
             }
 
             currentConfigReleased = true;
+            observeActiveResponseModel(currentConfigSelection && currentConfigSelection.config, {
+                active: false
+            });
             if (currentConfigSelection && typeof currentConfigSelection.release === 'function') {
                 currentConfigSelection.release();
             }
@@ -747,6 +763,9 @@ function createClaudeMessagesHandler({
             const activeConfig = normalizedSelection.config;
             const attemptResponsesApiPath = resolveResponsesApiPath(activeConfig);
             const upstreamHeaders = buildUpstreamHeaders(req.headers, activeConfig, upstreamBody.length, true, clientVersion);
+            observeActiveResponseModel(activeConfig, {
+                active: true
+            });
 
             if (accessLogEnabled && typeof logRequestSnapshot === 'function') {
                 logRequestSnapshot({
@@ -797,6 +816,17 @@ function createClaudeMessagesHandler({
             }
 
             function handleUpstreamSseEvent(upstreamEventName, payload) {
+                const responseModel = typeof payload?.response?.model === 'string' && payload.response.model.trim()
+                    ? payload.response.model.trim()
+                    : '';
+                if (responseModel) {
+                    observeActiveResponseModel(activeConfig, {
+                        active: true,
+                        responseModel,
+                        statusCode: upstreamMeta ? upstreamMeta.statusCode : null
+                    });
+                }
+
                 const classification = classifyRetryableResponsesStreamPayload(payload);
                 if (classification && !streamInitialized && !collector.build()) {
                     retryClassification = classification;

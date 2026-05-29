@@ -8,6 +8,8 @@ const { PassThrough } = require('node:stream');
 const {
   buildProxyHeaders,
   classifyApiKeyUpstreamFailure,
+  createResponseModelObserver,
+  extractResponseModelFromPayload,
   isResponsesFailoverInspectionCandidate,
   normalizeProxyJsonBody,
   shouldForceResponsesStoreFalse,
@@ -157,6 +159,48 @@ test('normalizeProxyJsonBody adapts store true for token-backed Codex responses 
   }, {});
 
   assert.equal(normalized.store, false);
+});
+
+test('extractResponseModelFromPayload reads Responses model locations', () => {
+  assert.equal(extractResponseModelFromPayload({
+    type: 'response.created',
+    response: {
+      model: 'gpt-5.4-mini',
+    },
+  }), 'gpt-5.4-mini');
+  assert.equal(extractResponseModelFromPayload({
+    id: 'resp_1',
+    model: 'gpt-5.5',
+  }), 'gpt-5.5');
+  assert.equal(extractResponseModelFromPayload({
+    response: {},
+  }), '');
+});
+
+test('createResponseModelObserver extracts response models from SSE and JSON bodies', () => {
+  const observed = [];
+  const sseObserver = createResponseModelObserver({
+    contentType: 'text/event-stream; charset=utf-8',
+    onModel: model => observed.push(model),
+  });
+  sseObserver.push(Buffer.from([
+    'event: response.created',
+    'data: {"type":"response.created","response":{"model":"gpt-5.4-mini"}}',
+    '',
+  ].join('\n')));
+  sseObserver.finish();
+
+  const jsonObserver = createResponseModelObserver({
+    contentType: 'application/json',
+    onModel: model => observed.push(model),
+  });
+  jsonObserver.push(Buffer.from(JSON.stringify({
+    id: 'resp_1',
+    model: 'gpt-5.5',
+  })));
+  jsonObserver.finish();
+
+  assert.deepEqual(observed, ['gpt-5.4-mini', 'gpt-5.5']);
 });
 
 test('server registers Claude messages compatibility on /v1/messages only', () => {
@@ -359,6 +403,7 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
   ];
   const upstreamAccountIds = [];
   const classifications = [];
+  const modelObservations = [];
   const handler = createClaudeMessagesHandler({
     getConfig: () => configs[0],
     handleRetryableUpstreamError: (config, classification) => {
@@ -402,6 +447,12 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
         abort() {},
       };
     },
+    observeResponseModel: (config, observation) => {
+      modelObservations.push({
+        config,
+        observation,
+      });
+    },
   });
 
   const res = createJsonResponseRecorder();
@@ -421,6 +472,11 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
 
   assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
   assert.equal(classifications[0].classification.reason, 'responses_usage_limit_reached');
+  assert.ok(modelObservations.some(item => (
+    item.config === configs[1] &&
+    item.observation.requestModel === 'gpt-5.4' &&
+    item.observation.responseModel === 'gpt-5.4'
+  )));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.payload.content, [
     {
