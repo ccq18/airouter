@@ -1,6 +1,6 @@
 # Airouter
 
-Airouter 是一个本地 API 转发 App。
+Airouter 是一个本地 API 转发服务。
 
 你可以把 ChatGPT/Codex 登录态、OpenAI 兼容 API、Claude Messages 兼容 API 放进 Airouter，然后让 Codex、Claude Code、cc-switch 等工具统一访问一个本地地址：
 
@@ -10,24 +10,30 @@ http://localhost:3009/v1
 
 Airouter 会在本机转发请求，并在账号不可用时自动切换到其他可用账号。
 
-## 下载和启动
+## 安装和启动
 
-打开 [GitHub Releases](https://github.com/ccq18/airouter/releases) 下载最新版。
+在项目目录里安装依赖并启动服务：
 
-- macOS：下载 `Airouter_*.app.zip`，解压后打开 `Airouter.app`。
-- Windows：下载 `Airouter_*.exe`，安装后打开 Airouter。
+```bash
+npm install
+npm start
+```
 
-打开 App 后，它会自动启动本地服务，并打开管理页面。退出 App 时，本地服务也会一起关闭。
+服务会在本机启动，默认端口是 `3009`。管理页面地址会写入日志，可以用下面的命令查看：
+
+```bash
+npm run logs
+```
 
 ## 第一次使用
 
-第一次打开时，App 会让你完成基础设置：
+第一次启动时，如果项目目录里还没有 `openai.json`，命令行会进入配置引导：
 
 1. 服务端口：默认 `3009`，一般不用改。
 2. 本地代理端口：如果你访问 ChatGPT 需要代理，常见填 `7890`；不需要可以留空。
 3. 入口 apikey：可选。开启后，客户端访问 Airouter 时需要带这个 apikey。
 
-完成后会进入管理页面。
+完成后访问日志里显示的管理页面。
 ![cc-switch Codex 配置](docs/img/img.png)
 
 ## 添加账号
@@ -38,23 +44,11 @@ Airouter 会在本机转发请求，并在账号不可用时自动切换到其�
 
 适合使用 ChatGPT/Codex 账号额度。
 
-有两种添加方式。
-
-方式一：App 自动获取。
-
-在 `AuthSession JSON` 旁边点击 `App 自动获取`，App 会打开一个新的 ChatGPT 登录窗口。你登录成功后，Airouter 会自动读取登录态并填回表单。
-
-方式二：手动粘贴 JSON。
-
-如果你已经有 AuthSession JSON 文件或别人提供给你的 JSON 内容，直接打开文件，复制完整 JSON，粘贴到 `AuthSession JSON` 文本框。
-
-无论用哪种方式，确认文本框里已经有 JSON 后，点击 `新增配置项`。
+打开 `https://chatgpt.com/api/auth/session` 获取 AuthSession JSON，复制完整 JSON，粘贴到 `AuthSession JSON` 文本框，然后点击 `新增配置项`。
 
 注意：
 
-- 登录窗口是临时窗口，不会复用上次登录信息。
-- 如果你手动关闭登录窗口，`App 自动获取`按钮会恢复可点。
-- 手动粘贴时请复制完整 JSON，不要只复制 `accessToken`。
+- 请复制完整 JSON，不要只复制 `accessToken`。
 - 登录态添加成功后，不要主动退出这个 ChatGPT 登录态，否则 token 可能失效。
 
 ### 第三方 API Key
@@ -161,31 +155,27 @@ token 账号不可用时，同一会话会自动漂移到其他可用 token 账�
 
 ### 管理页面打不开
 
-重新打开 App。App 会尝试启动本地服务，并清理旧进程占用的端口。
+先确认服务正在运行：
+
+```bash
+npm start
+npm run logs
+```
 
 ### 提示 auth_token 无效
 
-管理页面地址里的 `auth_token` 不对。请使用 App 自动打开的管理页面，不要手动删改 URL 后面的参数。
+管理页面地址里的 `auth_token` 不对。请使用日志里显示的完整管理页面地址，不要手动删改 URL 后面的参数。
 
 ### 请求返回 401 或 token_revoked
 
-通常是 ChatGPT 登录态失效。重新点击 `App 自动获取`，登录 ChatGPT 后添加新的配置项。
+通常是 ChatGPT 登录态失效。重新获取 AuthSession JSON 后添加新的配置项。
 
 ### API Key 有两种，怎么区分
 
 - 上游 API Key：填在 `API Key 模式`里，Airouter 用它访问上游。
 - 入口 apikey：填在客户端里，客户端用它访问 Airouter。
 
-## 命令行运行
-
-推荐使用桌面 App。确实需要命令行时，可以这样运行：
-
-```bash
-npm install
-npm start
-```
-
-常用命令：
+## 常用命令
 
 ```bash
 npm start        # 启动
@@ -194,4 +184,4 @@ npm run restart  # 重启
 npm run logs     # 查看日志
 ```
 
-命令行版本会使用项目目录下的 `openai.json`。桌面 App 会使用系统应用数据目录里的配置文件，升级 App 不会覆盖你的配置。
+服务会使用项目目录下的 `openai.json`。

@@ -10,7 +10,6 @@ Airouter 是一个本地 OpenAI/Claude 兼容 API 转发工具。主进程是 No
 - `/v1/responses` 默认值、模型别名和 token 账号 failover。
 - `/v1/messages` Claude Messages 兼容入口，优先原样转发到 `support: ["claude"]` 的 apikey 上游，否则转换到 responses 链路。
 - `/admin/configs` 网页管理台和 `/admin/api/*` 配置管理接口。
-- `desktop/` 下的 Tauri 桌面壳，打包时把 Node 服务和前端资源放进应用资源目录。
 
 ## 重要路径
 
@@ -19,7 +18,6 @@ Airouter 是一个本地 OpenAI/Claude 兼容 API 转发工具。主进程是 No
 - `app/`：可测试的业务模块。新增逻辑优先放这里，再由 `openai.js` 串接。
 - `public/config-admin.html`、`public/config-admin.js`：管理台页面。
 - `test/*.test.js`：Node 内置测试。
-- `desktop/`：Tauri 桌面应用、资源准备脚本和 Rust 外壳。
 - `docs/`：配置、运行逻辑和特性设计说明。
 
 ## 常用命令
@@ -32,28 +30,16 @@ npm run restart
 npm run logs
 ```
 
-桌面端命令在 `desktop/` 目录内运行：
-
-```bash
-npm install
-npm run dev
-npm run build
-npm run build:macos
-npm run build:windows
-```
-
 ## 测试要求
 
 - 修改共享业务模块、代理行为、配置解析或管理接口时，运行 `npm test`。
 - 可用 Node 的内置测试过滤单个文件，例如 `node --test test/responses-failover.test.js`。
 - 涉及 `run.js` 启停行为时，重点跑 `test/run.test.js`。
 - 涉及管理台 HTML/JS 时，重点跑 `test/config-admin.test.js` 和相关 API 测试。
-- 涉及桌面壳或资源准备时，至少跑 `test/desktop-boot.test.js`；能本地构建时再跑对应 `desktop` 构建命令。
 
 ## 代码风格
 
 - 根项目使用 CommonJS：`require(...)` 和 `module.exports`。
-- `desktop/` 前端和脚本使用 ESM；不要把根项目风格机械搬到 `desktop/`。
 - 保持现有缩进和文件风格：多数根项目业务模块使用 2 空格或 4 空格混合的既有格式，局部修改时跟随所在文件。
 - 优先写小的纯函数到 `app/` 并导出测试，避免把新业务逻辑直接堆进 `openai.js`。
 - 错误信息、管理台文案和日志当前主要是中文；新增用户可见文案请保持中文。

@@ -1,7 +1,6 @@
 openai.json
 openai.log
 openai.control.json
-airouter.auth-session.request.json
 node_modules
 openai.pid
 
@@ -13,12 +12,3 @@ openai.pid
 *.key
 *.p12
 *.pfx
-
-# Desktop wrapper generated artifacts
-desktop/node_modules
-desktop/package-lock.json
-desktop/dist
-desktop/src-tauri/target
-desktop/src-tauri/gen
-desktop/src-tauri/resources/airouter
-desktop/src-tauri/binaries/node*

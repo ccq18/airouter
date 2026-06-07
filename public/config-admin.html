@@ -888,8 +888,6 @@
     const cardsEl = document.getElementById('cards');
     const messageEl = document.getElementById('message');
     const rawJsonInput = document.getElementById('rawJsonInput');
-    let desktopAuthSessionActions = null;
-    let autoAuthSessionButton = null;
     const tokenConfigPanel = document.getElementById('tokenConfigPanel');
     const apiKeyConfigPanel = document.getElementById('apiKeyConfigPanel');
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
@@ -910,11 +908,7 @@
     const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
     const RUNTIME_SYNC_INTERVAL_MS = 10000;
-    const DESKTOP_AUTH_SESSION_POLL_INTERVAL_MS = 2000;
-    const DESKTOP_AUTH_SESSION_POLL_TIMEOUT_MS = 10 * 60 * 1000;
-    const pageParams = new URLSearchParams(window.location.search);
-    const adminAuthToken = pageParams.get('auth_token') || '';
-    const isDesktopApp = pageParams.get('desktop_app') === '1';
+    const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
     const {
       buildConfigSnapshotRequest,
       buildJsonRequestOptions,
@@ -1025,118 +1019,6 @@
       tokenConfigPanel.hidden = mode !== 'token';
       apiKeyConfigPanel.hidden = mode !== 'apikey';
     }
-
-    function selectTokenMode() {
-      const tokenModeInput = document.querySelector('input[name="configMode"][value="token"]');
-      if (tokenModeInput) {
-        tokenModeInput.checked = true;
-      }
-      updateConfigMode();
-    }
-
-    function ensureDesktopAuthSessionButton() {
-      if (autoAuthSessionButton) {
-        return autoAuthSessionButton;
-      }
-
-      desktopAuthSessionActions = document.createElement('div');
-      desktopAuthSessionActions.className = 'actions';
-      desktopAuthSessionActions.id = 'desktopAuthSessionActions';
-
-      autoAuthSessionButton = document.createElement('button');
-      autoAuthSessionButton.className = 'secondary';
-      autoAuthSessionButton.type = 'button';
-      autoAuthSessionButton.id = 'autoAuthSessionButton';
-      autoAuthSessionButton.textContent = 'App 自动获取';
-      desktopAuthSessionActions.appendChild(autoAuthSessionButton);
-      rawJsonInput.before(desktopAuthSessionActions);
-      return autoAuthSessionButton;
-    }
-
-    function receiveDesktopAuthSession(payload = {}) {
-      if (!isDesktopApp || !autoAuthSessionButton) {
-        return;
-      }
-
-      if (payload.ok && payload.session) {
-        window.__airouterDesktopAuthSessionDone = true;
-        selectTokenMode();
-        rawJsonInput.value = JSON.stringify(payload.session, null, 2);
-        rawJsonInput.focus();
-        autoAuthSessionButton.disabled = false;
-        setMessage('info', '已自动获取 AuthSession JSON，请确认后点击“新增配置项”。');
-        return;
-      }
-
-      autoAuthSessionButton.disabled = false;
-      if (payload.message) {
-        setMessage('error', payload.message);
-      }
-    }
-
-    async function pollDesktopAuthSession(startedAt) {
-      if (window.__airouterDesktopAuthSessionDone) {
-        return;
-      }
-
-      if (Date.now() - startedAt > DESKTOP_AUTH_SESSION_POLL_TIMEOUT_MS) {
-        autoAuthSessionButton.disabled = false;
-        setMessage('error', '等待 ChatGPT 登录超时，请重新点击 App 自动获取。');
-        return;
-      }
-
-      try {
-        const payload = await requestJson('/admin/api/desktop/auth-session', {
-          method: 'GET',
-        });
-        if (payload && payload.ok && payload.session) {
-          receiveDesktopAuthSession(payload);
-          return;
-        }
-        if (payload && payload.cancelled) {
-          autoAuthSessionButton.disabled = false;
-          setMessage('info', payload.message || 'ChatGPT 登录窗口已关闭，可重新点击 App 自动获取。');
-          return;
-        }
-      } catch (error) {
-        autoAuthSessionButton.disabled = false;
-        setMessage('error', `自动获取 AuthSession 失败：${error.message}`);
-        return;
-      }
-
-      window.setTimeout(() => {
-        pollDesktopAuthSession(startedAt);
-      }, DESKTOP_AUTH_SESSION_POLL_INTERVAL_MS);
-    }
-
-    function initializeDesktopAuthSessionImport() {
-      if (!isDesktopApp) {
-        return;
-      }
-
-      ensureDesktopAuthSessionButton();
-      if (autoAuthSessionButton.dataset.initialized === 'true') {
-        return;
-      }
-
-      autoAuthSessionButton.dataset.initialized = 'true';
-      autoAuthSessionButton.addEventListener('click', async () => {
-        autoAuthSessionButton.disabled = true;
-        try {
-          await requestJson('/admin/api/desktop/auth-session', {
-            method: 'POST',
-            body: JSON.stringify({}),
-          });
-          setMessage('info', '已打开 ChatGPT 登录窗口；登录完成后会自动回填 AuthSession JSON。');
-          pollDesktopAuthSession(Date.now());
-        } catch (error) {
-          autoAuthSessionButton.disabled = false;
-          setMessage('error', `无法触发 App 自动获取：${error.message}`);
-        }
-      });
-    }
-
-    window.AirouterReceiveAuthSession = receiveDesktopAuthSession;
 
     function getSelectedApiKeySupport() {
       return [...document.querySelectorAll('input[name="apiKeySupport"]:checked')]
@@ -1723,7 +1605,6 @@
     document.querySelectorAll('input[name="configMode"]').forEach(input => {
       input.addEventListener('change', updateConfigMode);
     });
-    initializeDesktopAuthSessionImport();
 
     document.addEventListener('click', async event => {
       const externalLink = event.target.closest('a[data-open-external]');
