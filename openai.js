@@ -1467,10 +1467,15 @@ function shouldForceResponsesStoreFalse(config, rewrittenUrl) {
     return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
 }
 
+function shouldUseCodexResponsesCompatibility(config, rewrittenUrl) {
+    return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
+}
+
 function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions) {
     return normalizeResponsesRequestBody(rewrittenUrl, body, {
         ...responsesOptions,
         forceStoreFalse: shouldForceResponsesStoreFalse(config, rewrittenUrl),
+        codexCompatibility: shouldUseCodexResponsesCompatibility(config, rewrittenUrl),
     });
 }
 
@@ -1547,8 +1552,11 @@ function normalizeUpstreamResponseHeaders(rawHeaders) {
     return headers;
 }
 
-function applyResponseHeaders(res, statusCode, rawHeaders) {
+function applyResponseHeaders(res, statusCode, rawHeaders, options = {}) {
     const headers = normalizeUpstreamResponseHeaders(rawHeaders);
+    if (!headers['content-type'] && options.defaultContentType) {
+        headers['content-type'] = options.defaultContentType;
+    }
 
     res.status(statusCode);
     for (const [name, value] of Object.entries(headers)) {
@@ -1559,6 +1567,29 @@ function applyResponseHeaders(res, statusCode, rawHeaders) {
         statusCode,
         headers
     };
+}
+
+function isStreamingResponsesRequest(requestPath, body) {
+    if (!isResponsesPath(requestPath)) {
+        return false;
+    }
+
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+        return true;
+    }
+
+    try {
+        const payload = JSON.parse(body.toString('utf8'));
+        return payload && payload.stream !== false;
+    } catch (err) {
+        return true;
+    }
+}
+
+function defaultContentTypeForProxyResponse(requestPath, body) {
+    return isStreamingResponsesRequest(requestPath, body)
+        ? 'text/event-stream; charset=utf-8'
+        : null;
 }
 
 function normalizeObservedModel(value) {
@@ -1803,7 +1834,9 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     }
 
     function startForwardingResponse(response, statusCode, rawHeaders, initialChunks = []) {
-        const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders);
+        const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders, {
+            defaultContentType: defaultContentTypeForProxyResponse(req.url, body),
+        });
         upstreamResponseHeaders = responseMeta.headers;
         headersApplied = true;
         res.flushHeaders();
@@ -1812,8 +1845,8 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             statusCode,
         });
         const responseModelObserver = createResponseModelObserver({
-            contentType: getHeaderValue(rawHeaders, 'content-type'),
-            contentEncoding: getHeaderValue(rawHeaders, 'content-encoding'),
+            contentType: getHeaderValue(responseMeta.headers, 'content-type'),
+            contentEncoding: getHeaderValue(responseMeta.headers, 'content-encoding'),
             onModel: responseModel => {
                 observeCurrentResponseModel({
                     active: true,
@@ -2895,7 +2928,9 @@ module.exports = {
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
     createResponseModelObserver,
+    defaultContentTypeForProxyResponse,
     extractResponseModelFromPayload,
+    isStreamingResponsesRequest,
     isResponsesFailoverInspectionCandidate,
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,

@@ -9,7 +9,9 @@ const {
   buildProxyHeaders,
   classifyApiKeyUpstreamFailure,
   createResponseModelObserver,
+  defaultContentTypeForProxyResponse,
   extractResponseModelFromPayload,
+  isStreamingResponsesRequest,
   isResponsesFailoverInspectionCandidate,
   normalizeProxyJsonBody,
   shouldForceResponsesStoreFalse,
@@ -149,16 +151,71 @@ test('classifyApiKeyUpstreamFailure marks auth, rate limit, and server failures 
   assert.equal(classifyApiKeyUpstreamFailure({ type: 'token' }, 503), null);
 });
 
-test('normalizeProxyJsonBody adapts store true for token-backed Codex responses requests', () => {
+test('normalizeProxyJsonBody adapts OpenAI Responses payloads for token-backed Codex requests', () => {
   const normalized = normalizeProxyJsonBody({
     type: 'token',
   }, '/backend-api/codex/responses', {
     model: 'gpt-5.5',
     input: 'hello',
+    max_output_tokens: 128,
+    temperature: 0,
     store: true,
   }, {});
 
+  assert.deepEqual(normalized.input, [
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'hello',
+        },
+      ],
+    },
+  ]);
   assert.equal(normalized.store, false);
+  assert.equal(Object.hasOwn(normalized, 'max_output_tokens'), false);
+  assert.equal(Object.hasOwn(normalized, 'temperature'), false);
+});
+
+test('normalizeProxyJsonBody preserves OpenAI Responses parameters for apikey upstreams', () => {
+  const normalized = normalizeProxyJsonBody({
+    type: 'apikey',
+  }, '/v1/responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    max_output_tokens: 128,
+    temperature: 0,
+    store: true,
+  }, {});
+
+  assert.equal(normalized.input, 'hello');
+  assert.equal(normalized.max_output_tokens, 128);
+  assert.equal(normalized.temperature, 0);
+  assert.equal(normalized.store, true);
+});
+
+test('defaultContentTypeForProxyResponse fills SSE content type for streaming Responses requests', () => {
+  assert.equal(
+    defaultContentTypeForProxyResponse('/backend-api/codex/responses', Buffer.from(JSON.stringify({ stream: true }))),
+    'text/event-stream; charset=utf-8',
+  );
+  assert.equal(
+    defaultContentTypeForProxyResponse('/v1/responses', Buffer.from(JSON.stringify({ input: 'hello' }))),
+    'text/event-stream; charset=utf-8',
+  );
+  assert.equal(
+    defaultContentTypeForProxyResponse('/v1/responses', Buffer.from(JSON.stringify({ stream: false }))),
+    null,
+  );
+  assert.equal(defaultContentTypeForProxyResponse('/v1/models', Buffer.from('{}')), null);
+});
+
+test('isStreamingResponsesRequest treats malformed Responses bodies as stream-compatible', () => {
+  assert.equal(isStreamingResponsesRequest('/v1/responses', Buffer.from('{')), true);
+  assert.equal(isStreamingResponsesRequest('/v1/responses', Buffer.from(JSON.stringify({ stream: false }))), false);
+  assert.equal(isStreamingResponsesRequest('/v1/chat/completions', Buffer.from(JSON.stringify({ stream: true }))), false);
 });
 
 test('extractResponseModelFromPayload reads Responses model locations', () => {

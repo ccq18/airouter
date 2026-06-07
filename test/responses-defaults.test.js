@@ -51,6 +51,48 @@ test('normalizeResponsesRequestBody forces store false when the upstream require
   assert.equal(normalized.store, false);
 });
 
+test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex upstream compatibility', () => {
+  const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    max_output_tokens: 128,
+    temperature: 0,
+    store: true,
+  }, {
+    codexCompatibility: true,
+    forceStoreFalse: true,
+  });
+
+  assert.deepEqual(normalized.input, [
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'hello',
+        },
+      ],
+    },
+  ]);
+  assert.equal(normalized.store, false);
+  assert.equal(Object.hasOwn(normalized, 'max_output_tokens'), false);
+  assert.equal(Object.hasOwn(normalized, 'temperature'), false);
+});
+
+test('normalizeResponsesRequestBody preserves OpenAI Responses fields unless Codex compatibility is requested', () => {
+  const normalized = normalizeResponsesRequestBody('/v1/responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    max_output_tokens: 128,
+    temperature: 0,
+  });
+
+  assert.equal(normalized.input, 'hello');
+  assert.equal(normalized.max_output_tokens, 128);
+  assert.equal(normalized.temperature, 0);
+});
+
 test('normalizeResponsesRequestBody leaves the model unchanged outside responses paths', () => {
   const normalized = normalizeResponsesRequestBody('/v1/chat/completions', {
     model: 'gpt-5.4-mini',
