@@ -68,10 +68,18 @@ test('config admin exposes manual runtime config activation controls', () => {
 
 test('config admin exposes copy controls for config item JSON', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+  const copyFunctionStart = html.indexOf('async function copyConfigItemJson(index)');
+  const copyFunctionEnd = html.indexOf('async function deleteConfig(index)', copyFunctionStart);
+  const copyFunction = copyFunctionStart >= 0 && copyFunctionEnd > copyFunctionStart
+    ? html.slice(copyFunctionStart, copyFunctionEnd)
+    : '';
 
   assert.match(html, /data-action="copy-config"/);
   assert.match(html, /copyConfigItemJson\(copyButton\.dataset\.index\)/);
   assert.match(html, /navigator\.clipboard\.writeText/);
+  assert.ok(copyFunction, 'copyConfigItemJson should be present');
+  assert.match(copyFunction, /copyTextToClipboard\(formatConfigItemCopyText\(config\)\)/);
+  assert.doesNotMatch(copyFunction, /当前浏览器不支持剪贴板写入/);
 });
 
 test('config admin keeps the upstream config column compact after adding activation controls', () => {

@@ -1480,10 +1480,6 @@
     }
 
     async function copyConfigItemJson(index) {
-      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
-        throw new Error('当前浏览器不支持剪贴板写入');
-      }
-
       const numericIndex = Number(index);
       const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
       const config = configs.find(item => item && item.index === numericIndex);
@@ -1491,7 +1487,7 @@
         throw new Error('配置项不存在，请刷新后重试');
       }
 
-      await navigator.clipboard.writeText(formatConfigItemCopyText(config));
+      await copyTextToClipboard(formatConfigItemCopyText(config));
       setMessage('info', `配置 #${numericIndex + 1} JSON 已复制到剪贴板。`);
     }
 
