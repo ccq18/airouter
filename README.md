@@ -132,7 +132,8 @@ Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `sessio
 - 用 `置顶` 调整优先级。
 - 在 token 行用 `设为锚点` 指定 token 并发池的调度焦点。
 - 在 apikey 行用 `全量切换` 进入 API Key 覆盖模式。
-- 删除不可用或不再需要的账号。
+- 用 `停用` 将账号移入停用列表。停用账号对服务不可见，后续请求、额度刷新和 fallback 都不会读取它，但可以在管理页重新启用。
+- 用 `删除` 永久移除不再需要的账号。
 
 token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态。额度低、登录态失效或账号不可用时，会跳过它。
 

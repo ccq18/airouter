@@ -107,19 +107,14 @@ function parseOpenAiConfigFile(raw) {
         throw new Error('配置文件 configs 必须是数组');
     }
 
-    for (const [index, config] of parsed.configs.entries()) {
-        if (!isPlainObject(config)) {
-            throw new Error(`配置文件 configs[${index}] 必须是对象`);
+    validateConfigItemArray(parsed.configs, 'configs');
+
+    if (parsed.disabled_configs !== undefined) {
+        if (!Array.isArray(parsed.disabled_configs)) {
+            throw new Error('配置文件 disabled_configs 必须是数组');
         }
 
-        const configType = getConfigItemType(config);
-        if (configType !== 'token' && configType !== 'apikey') {
-            throw new Error('配置项 type 仅支持 token 或 apikey');
-        }
-
-        if (configType === 'apikey') {
-            normalizeApiKeySupport(config.support);
-        }
+        validateConfigItemArray(parsed.disabled_configs, 'disabled_configs');
     }
 
     if (parsed.apikeys !== undefined) {
@@ -198,6 +193,27 @@ function parseOpenAiConfigFile(raw) {
     }
 
     return parsed;
+}
+
+function validateConfigItemArray(configs, fieldName) {
+    for (const [index, config] of configs.entries()) {
+        if (!isPlainObject(config)) {
+            throw new Error(`配置文件 ${fieldName}[${index}] 必须是对象`);
+        }
+
+        const configType = getConfigItemType(config);
+        if (configType !== 'token' && configType !== 'apikey') {
+            throw new Error(`配置文件 ${fieldName}[${index}] type 仅支持 token 或 apikey`);
+        }
+
+        if (configType === 'apikey') {
+            try {
+                normalizeApiKeySupport(config.support);
+            } catch (err) {
+                throw new Error(`配置文件 ${fieldName}[${index}] ${err.message}`);
+            }
+        }
+    }
 }
 
 function resolveClaudeCodeOptions(parsed) {

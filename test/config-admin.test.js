@@ -66,10 +66,21 @@ test('config admin exposes manual runtime config activation controls', () => {
   assert.match(html, /已设置 token 调度锚点/);
 });
 
+test('config admin exposes enable and disable controls for soft-deleted configs', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+
+  assert.match(html, /disabled_configs/);
+  assert.match(html, /data-action="disable"/);
+  assert.match(html, /data-action="enable"/);
+  assert.match(html, /\/admin\/api\/disabled-configs\/\$\{index\}\/enable/);
+  assert.match(html, /配置项已停用并热重载/);
+  assert.match(html, /配置项已启用并热重载/);
+});
+
 test('config admin exposes copy controls for config item JSON', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const copyFunctionStart = html.indexOf('async function copyConfigItemJson(index)');
-  const copyFunctionEnd = html.indexOf('async function deleteConfig(index)', copyFunctionStart);
+  const copyFunctionEnd = html.indexOf('async function disableConfig(index)', copyFunctionStart);
   const copyFunction = copyFunctionStart >= 0 && copyFunctionEnd > copyFunctionStart
     ? html.slice(copyFunctionStart, copyFunctionEnd)
     : '';
@@ -88,7 +99,7 @@ test('config admin keeps the upstream config column compact after adding activat
   assert.match(html, /min-width:\s*1040px;/);
   assert.match(html, /\.account-id-col,\s*\.account-id-cell\s*\{\s*width:\s*240px;\s*min-width:\s*240px;/);
   assert.match(html, /\.account-id-cell\s*\{\s*white-space:\s*normal;\s*word-break:\s*break-word;\s*overflow-wrap:\s*anywhere;/);
-  assert.match(html, /\.action-cell\s*\{\s*width:\s*280px;\s*white-space:\s*nowrap;/);
+  assert.match(html, /\.action-cell\s*\{\s*width:\s*360px;\s*white-space:\s*nowrap;/);
 });
 
 test('config admin keeps all console controls after UI refresh', () => {
@@ -146,10 +157,12 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, />置顶<\/button>/);
   assert.doesNotMatch(html, />上移<\/button>/);
   assert.match(html, /配置项已置顶，当前使用账号未改变/);
-  assert.match(html, /data-action="delete"/);
+  assert.match(html, /data-action="disable"/);
+  assert.match(html, /data-action="enable"/);
   assert.match(html, /data-action="delete-apikey"/);
   assert.match(html, /可刷新/);
   assert.match(html, /确认删除/);
+  assert.match(html, /确认停用/);
   assert.doesNotMatch(html, /window\.confirm/);
   assert.ok(accessControlSection, 'access control section should be present');
   assert.match(accessControlSection, /id="addApiKeyButton"/);
@@ -701,6 +714,22 @@ test('getConfigIdentityColumnLabel uses upstream config when any apikey item exi
       },
     ],
   }), 'account_id');
+  assert.equal(getConfigIdentityColumnLabel({
+    configs: [
+      {
+        item: {
+          account_id: 'account-1',
+        },
+      },
+    ],
+    disabled_configs: [
+      {
+        item: {
+          type: 'apikey',
+        },
+      },
+    ],
+  }), '上游配置');
 });
 
 test('getConfigIdentityValue shows base_url and masks apikey config secrets', () => {

@@ -8,6 +8,9 @@ const {
   ConfigEditorError,
   addConfigItem,
   buildImportedConfigItem,
+  disableConfigItem,
+  deleteDisabledConfigItem,
+  enableConfigItem,
   moveConfigItem,
   updateConfigItem,
   updateConfigSettings,
@@ -233,6 +236,74 @@ test('deleteConfigItem allows removing the last remaining config', () => {
   const next = deleteConfigItem(createTokenConfig(), 0);
 
   assert.deepEqual(next.configs, []);
+  assert.equal(next.disabled_configs, undefined);
+});
+
+test('disableConfigItem moves an enabled config into disabled_configs', () => {
+  const next = disableConfigItem(createTokenConfig(), 0);
+
+  assert.deepEqual(next.configs, []);
+  assert.deepEqual(next.disabled_configs, [
+    {
+      access_token: 'token-1',
+      account_id: 'account-1',
+      description: 'primary',
+    },
+  ]);
+});
+
+test('disableConfigItem appends to an existing disabled config list', () => {
+  const next = disableConfigItem(createTokenConfig({
+    disabled_configs: [
+      {
+        access_token: 'disabled-token',
+        account_id: 'disabled-account',
+        description: 'disabled',
+      },
+    ],
+  }), 0);
+
+  assert.deepEqual(next.configs, []);
+  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled', 'primary']);
+});
+
+test('enableConfigItem moves a disabled config back to enabled configs', () => {
+  const next = enableConfigItem(createTokenConfig({
+    configs: [],
+    disabled_configs: [
+      {
+        type: 'apikey',
+        apikey: 'sk-disabled',
+        base_url: 'https://api.example.com/v1',
+        description: 'disabled key',
+      },
+    ],
+  }), 0);
+
+  assert.deepEqual(next.disabled_configs, []);
+  assert.deepEqual(next.configs, [
+    {
+      type: 'apikey',
+      apikey: 'sk-disabled',
+      base_url: 'https://api.example.com/v1',
+      description: 'disabled key',
+    },
+  ]);
+});
+
+test('deleteDisabledConfigItem permanently removes a disabled config only', () => {
+  const next = deleteDisabledConfigItem(createTokenConfig({
+    disabled_configs: [
+      {
+        access_token: 'disabled-token',
+        account_id: 'disabled-account',
+        description: 'disabled',
+      },
+    ],
+  }), 0);
+
+  assert.deepEqual(next.configs.map(item => item.description), ['primary']);
+  assert.deepEqual(next.disabled_configs, []);
 });
 
 test('moveConfigItem moves a config earlier while preserving top-level settings', () => {

@@ -12,5 +12,6 @@
       "gpt-5.2": "gpt-5.5"
     }
   },
-  "configs": []
+  "configs": [],
+  "disabled_configs": []
 }

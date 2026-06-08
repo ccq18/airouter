@@ -315,7 +315,8 @@
 
   function hasApiKeyConfig(snapshot) {
     const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
-    return configs.some(item => {
+    const disabledConfigs = Array.isArray(snapshot && snapshot.disabled_configs) ? snapshot.disabled_configs : [];
+    return [...configs, ...disabledConfigs].some(item => {
       const configItem = item && item.item ? item.item : item;
       return configItem && configItem.type === 'apikey';
     });

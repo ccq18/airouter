@@ -178,6 +178,50 @@ test('createRuntimeConfigs supports item-level apikey configs', () => {
   assert.deepEqual(runtimeConfigs[1].support, ['gpt', 'claude']);
 });
 
+test('createRuntimeConfigs ignores disabled_configs', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        access_token: 'token-active',
+        account_id: 'account-active',
+        description: 'active token',
+      },
+    ],
+    disabled_configs: [
+      {
+        type: 'apikey',
+        base_url: 'https://api.disabled.example/v1',
+        apikey: 'sk-disabled',
+        description: 'disabled key',
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.equal(runtimeConfigs.length, 1);
+  assert.equal(runtimeConfigs[0].description, 'active token');
+  assert.equal(parsed.disabled_configs[0].description, 'disabled key');
+});
+
+test('parseOpenAiConfigFile rejects invalid disabled_configs entries', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify({
+      configs: [],
+      disabled_configs: [
+        {
+          type: 'apikey',
+          support: ['chat'],
+        },
+      ],
+    }));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /disabled_configs\[0\]/);
+    return true;
+  });
+});
+
 test('createRuntimeConfigs supports apikey configs that only support Claude messages', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify({
     configs: [

@@ -117,10 +117,16 @@ function validateParsedConfig(parsed) {
 }
 
 function cloneParsedConfig(parsed) {
-    return {
+    const cloned = {
         ...parsed,
         configs: parsed.configs.map(item => ({ ...item })),
     };
+
+    if (Array.isArray(parsed.disabled_configs)) {
+        cloned.disabled_configs = parsed.disabled_configs.map(item => ({ ...item }));
+    }
+
+    return cloned;
 }
 
 function readParsedConfigFile(configFile) {
@@ -244,6 +250,15 @@ function getConfigIndex(index, parsed) {
     return index;
 }
 
+function getDisabledConfigIndex(index, parsed) {
+    const disabledConfigs = Array.isArray(parsed.disabled_configs) ? parsed.disabled_configs : [];
+    if (!Number.isInteger(index) || index < 0 || index >= disabledConfigs.length) {
+        throw new ConfigEditorError('停用配置项索引不合法');
+    }
+
+    return index;
+}
+
 function addConfigItem(parsed, item) {
     const nextParsed = cloneParsedConfig(parsed);
     nextParsed.configs.push(normalizeConfigItem(item));
@@ -262,6 +277,43 @@ function deleteConfigItem(parsed, index) {
     const targetIndex = getConfigIndex(index, nextParsed);
 
     nextParsed.configs.splice(targetIndex, 1);
+    return validateParsedConfig(nextParsed);
+}
+
+function disableConfigItem(parsed, index) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const targetIndex = getConfigIndex(index, nextParsed);
+    const [item] = nextParsed.configs.splice(targetIndex, 1);
+
+    nextParsed.disabled_configs = Array.isArray(nextParsed.disabled_configs)
+        ? nextParsed.disabled_configs
+        : [];
+    nextParsed.disabled_configs.push(item);
+    return validateParsedConfig(nextParsed);
+}
+
+function enableConfigItem(parsed, index) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
+        ? nextParsed.disabled_configs
+        : [];
+    const targetIndex = getDisabledConfigIndex(index, nextParsed);
+    const [item] = disabledConfigs.splice(targetIndex, 1);
+
+    nextParsed.disabled_configs = disabledConfigs;
+    nextParsed.configs.push(normalizeConfigItem(item));
+    return validateParsedConfig(nextParsed);
+}
+
+function deleteDisabledConfigItem(parsed, index) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
+        ? nextParsed.disabled_configs
+        : [];
+    const targetIndex = getDisabledConfigIndex(index, nextParsed);
+
+    disabledConfigs.splice(targetIndex, 1);
+    nextParsed.disabled_configs = disabledConfigs;
     return validateParsedConfig(nextParsed);
 }
 
@@ -339,6 +391,9 @@ module.exports = {
     updateConfigItem,
     updateConfigSettings,
     deleteConfigItem,
+    deleteDisabledConfigItem,
+    disableConfigItem,
+    enableConfigItem,
     moveConfigItem,
     readParsedConfigFile,
     writeParsedConfigFile,

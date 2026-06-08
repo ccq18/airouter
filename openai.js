@@ -44,6 +44,9 @@ const {
     addConfigItem,
     buildImportedConfigItem,
     deleteConfigItem,
+    deleteDisabledConfigItem,
+    disableConfigItem,
+    enableConfigItem,
     moveConfigItem,
     readParsedConfigFile,
     updateConfigSettings,
@@ -1198,6 +1201,10 @@ function buildConfigAdminResponse() {
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
             dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig) : 'unavailable',
             runtime: apiConfigs[index] ? serializeAccountStatus(accountStatuses[index]) : null
+        })),
+        disabled_configs: (Array.isArray(currentParsedConfig.disabled_configs) ? currentParsedConfig.disabled_configs : []).map((item, index) => ({
+            index,
+            item
         }))
     };
 }
@@ -2571,6 +2578,30 @@ app.post('/admin/api/configs/:index/move-up', async (req, res) => {
     );
 });
 
+app.post('/admin/api/configs/:index/disable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => disableConfigItem(parsed, parseConfigIndex(req.params.index)),
+        'admin_disable_config',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
+});
+
+app.post('/admin/api/disabled-configs/:index/enable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => enableConfigItem(parsed, parseConfigIndex(req.params.index)),
+        'admin_enable_config',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
+});
+
 app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
     try {
         const targetIndex = parseConfigIndex(req.params.index);
@@ -2788,6 +2819,18 @@ app.delete('/admin/api/configs/:index', async (req, res) => {
         res,
         parsed => deleteConfigItem(parsed, parseConfigIndex(req.params.index)),
         'admin_delete',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
+});
+
+app.delete('/admin/api/disabled-configs/:index', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteDisabledConfigItem(parsed, parseConfigIndex(req.params.index)),
+        'admin_delete_disabled_config',
         200,
         {
             skipQuotaRefresh: true

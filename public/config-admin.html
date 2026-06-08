@@ -125,6 +125,10 @@
       margin-bottom: 14px;
     }
 
+    .panel-head.compact {
+      margin-top: 18px;
+    }
+
     .panel-title {
       margin: 0;
       font-size: 18px;
@@ -637,7 +641,7 @@
     }
 
     .action-cell {
-      width: 280px;
+      width: 360px;
       white-space: nowrap;
     }
 
@@ -647,6 +651,10 @@
 
     .action-cell button + button {
       margin-left: 6px;
+    }
+
+    .disabled-configs {
+      margin-top: 18px;
     }
 
     .empty {
@@ -1150,13 +1158,13 @@
       `;
     }
 
-    function renderCards(data) {
-      if (!data.configs.length) {
-        cardsEl.innerHTML = '<div class="empty">当前没有配置项。</div>';
-        return;
+    function renderEnabledConfigs(data) {
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      if (!configs.length) {
+        return '<div class="empty">当前没有启用配置项。</div>';
       }
 
-      cardsEl.innerHTML = `
+      return `
         <div class="table-wrap">
           <table>
             <thead>
@@ -1169,7 +1177,7 @@
               </tr>
             </thead>
             <tbody>
-              ${data.configs.map(item => `
+              ${configs.map(item => `
                 <tr>
                   <td>
                     <div class="config-name">
@@ -1184,6 +1192,7 @@
                     <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
                     <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
                     <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${getActivateButtonText(item)}</button>
+                    <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
                     <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
                   </td>
                 </tr>
@@ -1191,6 +1200,70 @@
             </tbody>
           </table>
         </div>
+      `;
+    }
+
+    function renderDisabledConfigs(data) {
+      const disabledConfigs = Array.isArray(data && data.disabled_configs) ? data.disabled_configs : [];
+      if (!disabledConfigs.length) {
+        return '';
+      }
+
+      return `
+        <div class="disabled-configs">
+          <div class="panel-head compact">
+            <div>
+              <h3 class="panel-title">停用配置</h3>
+              <p class="panel-note">停用配置不会参与请求调度、额度刷新或 fallback，只保留在配置文件里。</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="config-col">配置</th>
+                  <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
+                  <th>description</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${disabledConfigs.map(item => `
+                  <tr>
+                    <td>
+                      <div class="config-name">
+                        <div>停用 #${item.index + 1}</div>
+                        <div><span class="badge note">已停用</span></div>
+                      </div>
+                    </td>
+                    <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
+                    <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
+                    <td class="cell-text">服务不可见</td>
+                    <td class="action-cell">
+                      <button class="secondary" type="button" data-action="enable" data-index="${item.index}">启用</button>
+                      <button class="danger" type="button" data-action="delete-disabled" data-index="${item.index}">删除</button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderCards(data) {
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      const disabledConfigs = Array.isArray(data && data.disabled_configs) ? data.disabled_configs : [];
+      if (!configs.length && !disabledConfigs.length) {
+        cardsEl.innerHTML = '<div class="empty">当前没有配置项。</div>';
+        return;
+      }
+
+      cardsEl.innerHTML = `
+        ${renderEnabledConfigs(data)}
+        ${renderDisabledConfigs(data)}
       `;
     }
 
@@ -1217,7 +1290,7 @@
       return payload;
     }
 
-    function armDeleteButton(button, message) {
+    function armDeleteButton(button, message, confirmText = '确认删除', fallbackText = '删除') {
       if (button.dataset.confirm === 'true') {
         window.clearTimeout(Number(button.dataset.confirmTimer || 0));
         delete button.dataset.confirm;
@@ -1228,7 +1301,7 @@
 
       button.dataset.confirm = 'true';
       button.dataset.originalText = button.textContent;
-      button.textContent = '确认删除';
+      button.textContent = confirmText;
       button.classList.add('confirming');
       setMessage('info', message);
 
@@ -1236,7 +1309,7 @@
         delete button.dataset.confirm;
         delete button.dataset.confirmTimer;
         button.classList.remove('confirming');
-        button.textContent = button.dataset.originalText || '删除';
+        button.textContent = button.dataset.originalText || fallbackText;
         delete button.dataset.originalText;
       }, 5000);
       button.dataset.confirmTimer = String(timer);
@@ -1491,6 +1564,32 @@
       setMessage('info', `配置 #${numericIndex + 1} JSON 已复制到剪贴板。`);
     }
 
+    async function disableConfig(index) {
+      const result = await requestJson(`/admin/api/configs/${index}/disable`, {
+        method: 'POST',
+      });
+
+      snapshot = result;
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '配置项已停用并热重载。');
+    }
+
+    async function enableConfig(index) {
+      const result = await requestJson(`/admin/api/disabled-configs/${index}/enable`, {
+        method: 'POST',
+      });
+
+      snapshot = result;
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '配置项已启用并热重载。');
+    }
+
     async function deleteConfig(index) {
       const result = await requestJson(`/admin/api/configs/${index}`, {
         method: 'DELETE',
@@ -1502,6 +1601,19 @@
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已删除并热重载。');
+    }
+
+    async function deleteDisabledConfig(index) {
+      const result = await requestJson(`/admin/api/disabled-configs/${index}`, {
+        method: 'DELETE',
+      });
+
+      snapshot = result;
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '停用配置项已删除。');
     }
 
     async function sendHelloTestRequest() {
@@ -1687,6 +1799,51 @@
           setMessage('error', error.message);
         } finally {
           moveUpButton.disabled = false;
+        }
+        return;
+      }
+
+      const disableButton = event.target.closest('[data-action="disable"]');
+      if (disableButton) {
+        if (!armDeleteButton(disableButton, '再次点击确认停用这个配置项。', '确认停用', '停用')) {
+          return;
+        }
+        disableButton.disabled = true;
+        try {
+          await disableConfig(disableButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          disableButton.disabled = false;
+        }
+        return;
+      }
+
+      const enableButton = event.target.closest('[data-action="enable"]');
+      if (enableButton) {
+        enableButton.disabled = true;
+        try {
+          await enableConfig(enableButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          enableButton.disabled = false;
+        }
+        return;
+      }
+
+      const deleteDisabledButton = event.target.closest('[data-action="delete-disabled"]');
+      if (deleteDisabledButton) {
+        if (!armDeleteButton(deleteDisabledButton, '再次点击确认删除这个停用配置项。')) {
+          return;
+        }
+        deleteDisabledButton.disabled = true;
+        try {
+          await deleteDisabledConfig(deleteDisabledButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          deleteDisabledButton.disabled = false;
         }
         return;
       }

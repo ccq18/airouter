@@ -30,7 +30,8 @@
         "apikey": "sk-xxx",
         "description": "third-party provider"
       }
-    ]
+    ],
+  "disabled_configs": []
 }
 
 ```
@@ -59,6 +60,9 @@
 - `apikeys` 为空时，不校验入口请求；只要数组非空，请求就必须命中其中一个 key
 - `auth_token` 为管理后台访问令牌；配置页必须通过 `.../admin/configs?auth_token=<token>` 访问
 - `auth_token` 为空或缺失时，服务启动后会自动生成并写回配置文件
+- `configs` 是启用配置列表，只有这里的配置会进入运行时请求调度、额度刷新和 fallback
+- `disabled_configs` 是停用配置列表。管理页点“停用”会把配置从 `configs` 移到这里；停用配置对服务不可见，后续请求不会读取它。管理页点“启用”会把它移回 `configs`
+- 管理页“删除”仍是永久删除；停用不是删除，只是从服务可见列表中移出
 - `claude_code.model` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时上游实际使用的模型
 - `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
 - 以上 `claude_code` 配置只作用于 `/v1/messages` 的 token 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
