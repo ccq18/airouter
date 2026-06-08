@@ -1209,6 +1209,17 @@ function buildConfigAdminResponse() {
     };
 }
 
+function getConfigRuntimeSummary(index) {
+    if (!accountManager || !apiConfigs[index]) {
+        return '';
+    }
+
+    const accountStatus = accountManager.getAccountStatus(apiConfigs[index]);
+    return accountStatus && typeof accountStatus.runtimeSummary === 'string'
+        ? accountStatus.runtimeSummary
+        : '';
+}
+
 async function refreshConfigAdminResponse(options = {}) {
     const manager = options.accountManager || accountManager;
     const shouldRefreshQuota = Object.prototype.hasOwnProperty.call(options, 'shouldRefreshQuota')
@@ -2581,7 +2592,12 @@ app.post('/admin/api/configs/:index/move-up', async (req, res) => {
 app.post('/admin/api/configs/:index/disable', async (req, res) => {
     await handleConfigMutation(
         res,
-        parsed => disableConfigItem(parsed, parseConfigIndex(req.params.index)),
+        parsed => {
+            const targetIndex = parseConfigIndex(req.params.index);
+            return disableConfigItem(parsed, targetIndex, {
+                disabledStatus: getConfigRuntimeSummary(targetIndex)
+            });
+        },
         'admin_disable_config',
         200,
         {

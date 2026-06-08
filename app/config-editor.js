@@ -280,15 +280,23 @@ function deleteConfigItem(parsed, index) {
     return validateParsedConfig(nextParsed);
 }
 
-function disableConfigItem(parsed, index) {
+function disableConfigItem(parsed, index, options = {}) {
     const nextParsed = cloneParsedConfig(parsed);
     const targetIndex = getConfigIndex(index, nextParsed);
     const [item] = nextParsed.configs.splice(targetIndex, 1);
+    const disabledStatus = normalizeString(options.disabledStatus);
+    const disabledItem = { ...item };
+
+    if (disabledStatus) {
+        disabledItem.disabled_status = disabledStatus;
+    } else {
+        delete disabledItem.disabled_status;
+    }
 
     nextParsed.disabled_configs = Array.isArray(nextParsed.disabled_configs)
         ? nextParsed.disabled_configs
         : [];
-    nextParsed.disabled_configs.push(item);
+    nextParsed.disabled_configs.push(disabledItem);
     return validateParsedConfig(nextParsed);
 }
 
@@ -299,6 +307,7 @@ function enableConfigItem(parsed, index) {
         : [];
     const targetIndex = getDisabledConfigIndex(index, nextParsed);
     const [item] = disabledConfigs.splice(targetIndex, 1);
+    delete item.disabled_status;
 
     nextParsed.disabled_configs = disabledConfigs;
     nextParsed.configs.push(normalizeConfigItem(item));

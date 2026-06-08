@@ -62,6 +62,7 @@
 - `auth_token` 为空或缺失时，服务启动后会自动生成并写回配置文件
 - `configs` 是启用配置列表，只有这里的配置会进入运行时请求调度、额度刷新和 fallback
 - `disabled_configs` 是停用配置列表。管理页点“停用”会把配置从 `configs` 移到这里；停用配置对服务不可见，后续请求不会读取它。管理页点“启用”会把它移回 `configs`
+- `disabled_configs[]` 中的配置项会额外记录 `disabled_status` 文本字段，用来保存停用瞬间的运行态摘要，例如 `可用=否 | 额度=99% | ...`；启用回 `configs[]` 时会移除该字段
 - 管理页“删除”仍是永久删除；停用不是删除，只是从服务可见列表中移出
 - `claude_code.model` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时上游实际使用的模型
 - `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`

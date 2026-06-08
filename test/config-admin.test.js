@@ -73,6 +73,7 @@ test('config admin exposes enable and disable controls for soft-deleted configs'
   assert.match(html, /data-action="disable"/);
   assert.match(html, /data-action="enable"/);
   assert.match(html, /\/admin\/api\/disabled-configs\/\$\{index\}\/enable/);
+  assert.match(html, /item\.item\.disabled_status \|\| '服务不可见'/);
   assert.match(html, /配置项已停用并热重载/);
   assert.match(html, /配置项已启用并热重载/);
 });

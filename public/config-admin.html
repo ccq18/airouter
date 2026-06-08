@@ -1239,7 +1239,7 @@
                     </td>
                     <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
                     <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
-                    <td class="cell-text">服务不可见</td>
+                    <td class="cell-text">${escapeHtml(item.item.disabled_status || '服务不可见')}</td>
                     <td class="action-cell">
                       <button class="secondary" type="button" data-action="enable" data-index="${item.index}">启用</button>
                       <button class="danger" type="button" data-action="delete-disabled" data-index="${item.index}">删除</button>

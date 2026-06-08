@@ -240,7 +240,10 @@ test('deleteConfigItem allows removing the last remaining config', () => {
 });
 
 test('disableConfigItem moves an enabled config into disabled_configs', () => {
-  const next = disableConfigItem(createTokenConfig(), 0);
+  const disabledStatus = '可用=否 | 额度=99% | 刷新时间=2026/7/9 00:52:23 | 周额度=unknown | 刷新时间=unknown | 状态=额度检查失败 | 错误=OpenAI token refresh failed: [object Object]';
+  const next = disableConfigItem(createTokenConfig(), 0, {
+    disabledStatus,
+  });
 
   assert.deepEqual(next.configs, []);
   assert.deepEqual(next.disabled_configs, [
@@ -248,6 +251,7 @@ test('disableConfigItem moves an enabled config into disabled_configs', () => {
       access_token: 'token-1',
       account_id: 'account-1',
       description: 'primary',
+      disabled_status: disabledStatus,
     },
   ]);
 });
@@ -276,6 +280,7 @@ test('enableConfigItem moves a disabled config back to enabled configs', () => {
         apikey: 'sk-disabled',
         base_url: 'https://api.example.com/v1',
         description: 'disabled key',
+        disabled_status: '可用=否 | 状态=已停用',
       },
     ],
   }), 0);
