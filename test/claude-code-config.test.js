@@ -178,6 +178,28 @@ test('createRuntimeConfigs supports item-level apikey configs', () => {
   assert.deepEqual(runtimeConfigs[1].support, ['gpt', 'claude']);
 });
 
+test('createRuntimeConfigs preserves configured GPT apikey health model', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        type: 'apikey',
+        base_url: 'https://api.example.com/v1',
+        apikey: 'sk-1',
+        support: ['gpt'],
+        health: {
+          model: '  gpt-4.1-mini  ',
+        },
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.deepEqual(runtimeConfigs[0].health, {
+    model: 'gpt-4.1-mini',
+  });
+});
+
 test('createRuntimeConfigs ignores disabled_configs', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify({
     configs: [
@@ -261,6 +283,27 @@ test('parseOpenAiConfigFile rejects unsupported apikey support values', () => {
   }, err => {
     assert.equal(err instanceof Error, true);
     assert.match(err.message, /support 仅支持 gpt 或 claude/);
+    return true;
+  });
+});
+
+test('parseOpenAiConfigFile rejects invalid apikey health model values', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify({
+      configs: [
+        {
+          type: 'apikey',
+          base_url: 'https://api.example.com/v1',
+          apikey: 'sk-1',
+          health: {
+            model: '',
+          },
+        },
+      ],
+    }));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /health\.model 必须是非空字符串/);
     return true;
   });
 });

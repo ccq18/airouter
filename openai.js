@@ -800,6 +800,21 @@ function createClaudeMessagesRequestHandler() {
         upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
+            if (config && config.type === 'apikey') {
+                const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
+                    ok: false,
+                    reason: classification.reason,
+                    lastError: `${classification.retrySource}:${classification.retryKey}`,
+                    switchReason: 'apikey_upstream_failover',
+                });
+
+                if (apiKeyResult.unavailable) {
+                    warn(`claude apikey 上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                }
+
+                return null;
+            }
+
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
             accountManager.markConfigUnavailable(config, classification.reason, {
                 lastError: `${classification.retrySource}:${classification.retryKey}`,
@@ -820,6 +835,13 @@ function createClaudeMessagesRequestHandler() {
             if (accountManager && typeof accountManager.observeResponseModel === 'function') {
                 accountManager.observeResponseModel(config, observation);
             }
+        },
+        observeApiKeyRequestResult: (config, result) => {
+            if (accountManager && typeof accountManager.recordApiKeyRequestResult === 'function') {
+                return accountManager.recordApiKeyRequestResult(config, result);
+            }
+
+            return null;
         }
     });
 }
@@ -1786,6 +1808,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     let headersApplied = false;
     let responseFinished = false;
     let requestClosed = false;
+    let apiKeyRequestResultRecorded = false;
     const shouldLogQuotaUsage = req.method === 'GET' && isQuotaUsagePath(req.url);
     const responseBodyChunks = [];
     let upstreamResponseHeaders = {};
@@ -1815,6 +1838,15 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         if (currentLease && typeof currentLease.release === 'function') {
             currentLease.release();
         }
+    }
+
+    function recordCurrentApiKeyRequestResult(result) {
+        if (!config || config.type !== 'apikey' || apiKeyRequestResultRecorded) {
+            return null;
+        }
+
+        apiKeyRequestResultRecorded = true;
+        return accountManager.recordApiKeyRequestResult(config, result);
     }
 
     function acquireFailoverLease(reason) {
@@ -1891,6 +1923,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         response.on('end', () => {
             responseFinished = true;
             responseModelObserver.finish();
+            recordCurrentApiKeyRequestResult({ ok: true });
             handleQuotaUsageResponseComplete();
             releaseCurrentLease();
 
@@ -1905,6 +1938,12 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
 
             error('代理请求失败:', err.message);
+            recordCurrentApiKeyRequestResult({
+                ok: false,
+                reason: 'apikey_upstream_error',
+                lastError: err.message,
+                switchReason: 'apikey_upstream_failover',
+            });
             if (!res.headersSent) {
                 const gatewayStatusCode = getGatewayStatusCode(err);
                 releaseCurrentLease();
@@ -1945,32 +1984,37 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         const statusCode = Number(response.statusCode || 502);
         const apiKeyFailure = classifyApiKeyUpstreamFailure(config, statusCode);
         if (apiKeyFailure) {
-            warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey})`);
-            accountManager.markConfigUnavailable(config, apiKeyFailure.reason, {
+            const apiKeyResult = recordCurrentApiKeyRequestResult({
+                ok: false,
+                reason: apiKeyFailure.reason,
                 lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
                 switchReason: 'apikey_upstream_failover',
             });
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
-            const nextConfig = nextLease ? nextLease.config : null;
 
-            if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
-                responseFinished = true;
-                void drainAbandonedResponse(response);
-                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
-                releaseCurrentLease();
-                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
-                    failoverAttempt: failoverAttempt + 1,
-                    lease: nextLease,
-                    sessionKey: requestSessionKey,
-                    predicate: requestPredicate,
-                    excludedConfigs: [...excludedConfigs, config],
-                    retrySelector,
-                });
-                return;
-            }
+            if (apiKeyResult.unavailable) {
+                warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                const nextLease = acquireFailoverLease('apikey_upstream_failover');
+                const nextConfig = nextLease ? nextLease.config : null;
 
-            if (nextLease) {
-                nextLease.release();
+                if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
+                    responseFinished = true;
+                    void drainAbandonedResponse(response);
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    releaseCurrentLease();
+                    proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                        failoverAttempt: failoverAttempt + 1,
+                        lease: nextLease,
+                        sessionKey: requestSessionKey,
+                        predicate: requestPredicate,
+                        excludedConfigs: [...excludedConfigs, config],
+                        retrySelector,
+                    });
+                    return;
+                }
+
+                if (nextLease) {
+                    nextLease.release();
+                }
             }
         }
 
@@ -2055,30 +2099,35 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
         error('代理请求失败:', err.message);
         if (config && config.type === 'apikey') {
-            warn(`apikey 上游请求失败: #${config.index + 1} ${config.description} (${err.message})`);
-            accountManager.markConfigUnavailable(config, 'apikey_upstream_error', {
+            const apiKeyResult = recordCurrentApiKeyRequestResult({
+                ok: false,
+                reason: 'apikey_upstream_error',
                 lastError: err.message,
                 switchReason: 'apikey_upstream_failover',
             });
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
-            const nextConfig = nextLease ? nextLease.config : null;
 
-            if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
-                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
-                releaseCurrentLease();
-                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
-                    failoverAttempt: failoverAttempt + 1,
-                    lease: nextLease,
-                    sessionKey: requestSessionKey,
-                    predicate: requestPredicate,
-                    excludedConfigs: [...excludedConfigs, config],
-                    retrySelector,
-                });
-                return;
-            }
+            if (apiKeyResult.unavailable) {
+                warn(`apikey 上游请求失败并标记不可用: #${config.index + 1} ${config.description} (${err.message}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                const nextLease = acquireFailoverLease('apikey_upstream_failover');
+                const nextConfig = nextLease ? nextLease.config : null;
 
-            if (nextLease) {
-                nextLease.release();
+                if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    releaseCurrentLease();
+                    proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                        failoverAttempt: failoverAttempt + 1,
+                        lease: nextLease,
+                        sessionKey: requestSessionKey,
+                        predicate: requestPredicate,
+                        excludedConfigs: [...excludedConfigs, config],
+                        retrySelector,
+                    });
+                    return;
+                }
+
+                if (nextLease) {
+                    nextLease.release();
+                }
             }
         }
 

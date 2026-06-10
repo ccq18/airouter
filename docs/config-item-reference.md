@@ -28,6 +28,10 @@
         "type": "apikey",
         "base_url": "https://api.example.com/v1",
         "apikey": "sk-xxx",
+        "support": ["gpt"],
+        "health": {
+          "model": "gpt-4.1-mini"
+        },
         "description": "third-party provider"
       }
     ],
@@ -73,6 +77,8 @@
 - 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
 - `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时使用 `token` 配置项走 responses 兼容转换
 - 每分钟额度轮询会检查所有 `token` 配置项
+- `apikey` 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，401/403、429、5xx、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换
+- 每 10 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.5`，可通过该配置项的 `health.model` 覆盖
 - token 请求调度：有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择
 - 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
 - 没有会话 key 时，token 请求按当前内存 `inFlight` 数做轻量分摊
@@ -118,6 +124,9 @@
   "base_url": "https://api.openai.com/v1",
   "apikey": "sk-xxx",
   "support": ["gpt"],
+  "health": {
+    "model": "gpt-4.1-mini"
+  },
   "description": "primary key"
 }
 ```
@@ -137,10 +146,16 @@
   - 不填写时默认是 `["gpt"]`
   - 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，包括 `/v1/responses`
   - 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路
+- `health`
+  - 可选对象，目前只支持 `model`
+  - 只影响已不可用 GPT apikey 的 10 分钟恢复探测请求
+  - 未配置时恢复探测默认发送 `model: "gpt-5.5"`、`input: "hello"`、`stream: false`
+  - 如果第三方上游不支持 `gpt-5.5`，可以配置为上游可用的轻量模型，例如 `"health": {"model": "gpt-4.1-mini"}`
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
-- `apikey` 配置项在直连上游时收到 401/403、429 或 5xx，会被临时标记为不可用；普通 `/v1/*` 链路会尝试切到下一个可用配置
+- `apikey` 配置项在直连上游最近 30 分钟内最多 10 个已完成真实请求中累计 3 次 401/403、429、5xx、请求失败或响应体中断时，会被临时标记为不可用；普通 `/v1/*` 链路会尝试切到下一个可用配置，未达到阈值前会透传上游原响应
+- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 2xx 时恢复为可用
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
 

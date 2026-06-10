@@ -2,6 +2,16 @@ const { requestBuffered } = require('./upstream-request');
 const crypto = require('node:crypto');
 
 const SESSION_HASH_LENGTH = 12;
+const APIKEY_RECOVERY_RESPONSES_PATH = '/v1/responses';
+const APIKEY_REQUEST_WINDOW_SIZE = 10;
+const APIKEY_REQUEST_FAILURE_THRESHOLD = 3;
+const APIKEY_REQUEST_SAMPLE_TTL_MS = 30 * 60 * 1000;
+const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
+const APIKEY_RECOVERY_REQUEST_BODY = {
+  model: 'gpt-5.5',
+  input: 'hello',
+  stream: false,
+};
 
 /**
  * 封装账号状态、额度刷新和活动账号切换逻辑。
@@ -101,6 +111,30 @@ function createAccountManager(options) {
     return reasonMap[reason] || reason || '未知';
   }
 
+  function supportsGptApiKey(config) {
+    if (!config || config.type !== 'apikey') {
+      return false;
+    }
+
+    if (!Array.isArray(config.support)) {
+      return true;
+    }
+
+    return config.support.includes('gpt');
+  }
+
+  function shouldUseApiKeyRecoveryMonitoring(config) {
+    return supportsGptApiKey(config);
+  }
+
+  function hasQuotaOrApiKeyRecoveryTargets(reason = 'poll') {
+    if (configs.some(config => shouldUseQuotaMonitoring(config.type))) {
+      return true;
+    }
+
+    return reason === 'all_poll' && configs.some(shouldUseApiKeyRecoveryMonitoring);
+  }
+
   /**
    * 汇总单个账号当前的运行时状态，供日志打印。
    */
@@ -144,6 +178,8 @@ function createAccountManager(options) {
       secondaryResetAfterSeconds: config.runtime.secondaryResetAfterSeconds,
       lastCheckedAt: config.runtime.lastCheckedAt,
       reason: config.runtime.reason,
+      quotaCheckFailures: isDispatchManagedConfig(config) ? getQuotaCheckFailures(config) : null,
+      apiKeyRequestWindow: config.type === 'apikey' ? summarizeApiKeyRequestResults(config) : null,
       inFlight: isDispatchManagedConfig(config) ? normalizeInFlight(config) : null,
       dispatchSession: isDispatchManagedConfig(config) ? serializeDispatchSession(config.runtime.dispatchSession) : null,
       responseModel: serializeResponseModel(config.runtime.responseModel),
@@ -329,6 +365,7 @@ function createAccountManager(options) {
     config.runtime.secondaryResetAt = quotaState.secondaryResetAt;
     config.runtime.secondaryResetAfterSeconds = quotaState.secondaryResetAfterSeconds;
     config.runtime.lastError = null;
+    config.runtime.quotaCheckFailures = 0;
   }
 
   /**
@@ -372,6 +409,139 @@ function createAccountManager(options) {
     return config;
   }
 
+  function getQuotaCheckFailures(config) {
+    const value = Number(config?.runtime?.quotaCheckFailures || 0);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+
+  function recordQuotaCheckFailure(config, err) {
+    const failureCount = getQuotaCheckFailures(config) + 1;
+    config.runtime.quotaCheckFailures = failureCount;
+    config.runtime.lastCheckedAt = now();
+    config.runtime.lastError = err.message;
+
+    if (failureCount >= TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD) {
+      config.runtime.available = false;
+      config.runtime.reason = 'quota_check_failed';
+    }
+
+    return failureCount;
+  }
+
+  function getApiKeyRequestResults(config) {
+    if (!config || !config.runtime) {
+      return [];
+    }
+
+    if (!Array.isArray(config.runtime.apiKeyRequestResults)) {
+      config.runtime.apiKeyRequestResults = [];
+    }
+
+    return config.runtime.apiKeyRequestResults;
+  }
+
+  function resetApiKeyRequestResults(config) {
+    if (!config || !config.runtime) {
+      return;
+    }
+
+    config.runtime.apiKeyRequestResults = [];
+  }
+
+  function normalizeApiKeyRequestSample(sample, observedAt) {
+    if (sample && typeof sample === 'object') {
+      return {
+        ok: Boolean(sample.ok),
+        at: Number.isFinite(sample.at) ? sample.at : observedAt,
+        reason: typeof sample.reason === 'string' ? sample.reason : null,
+        lastError: typeof sample.lastError === 'string' ? sample.lastError : null,
+      };
+    }
+
+    return {
+      ok: Boolean(sample),
+      at: observedAt,
+      reason: null,
+      lastError: null,
+    };
+  }
+
+  function pruneApiKeyRequestResults(config, observedAt = now()) {
+    const cutoff = observedAt - APIKEY_REQUEST_SAMPLE_TTL_MS;
+    const results = getApiKeyRequestResults(config)
+      .map(sample => normalizeApiKeyRequestSample(sample, observedAt))
+      .filter(sample => sample.at >= cutoff);
+    if (results.length > APIKEY_REQUEST_WINDOW_SIZE) {
+      results.splice(0, results.length - APIKEY_REQUEST_WINDOW_SIZE);
+    }
+
+    config.runtime.apiKeyRequestResults = results;
+    return results;
+  }
+
+  function summarizeApiKeyRequestResults(config) {
+    const results = pruneApiKeyRequestResults(config);
+    const failureCount = results.reduce((count, sample) => sample.ok ? count : count + 1, 0);
+
+    return {
+      failureCount,
+      sampleSize: results.length,
+      failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+      windowSize: APIKEY_REQUEST_WINDOW_SIZE,
+      sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
+    };
+  }
+
+  function recordApiKeyRequestResult(config, result = {}) {
+    if (!config || config.type !== 'apikey' || !config.runtime) {
+      return {
+        unavailable: false,
+        failureCount: 0,
+        sampleSize: 0,
+        failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+        windowSize: APIKEY_REQUEST_WINDOW_SIZE,
+      };
+    }
+
+    const observedAt = now();
+    const results = pruneApiKeyRequestResults(config, observedAt);
+    results.push({
+      ok: Boolean(result.ok),
+      at: observedAt,
+      reason: result.reason || null,
+      lastError: result.lastError || null,
+    });
+    if (results.length > APIKEY_REQUEST_WINDOW_SIZE) {
+      results.splice(0, results.length - APIKEY_REQUEST_WINDOW_SIZE);
+    }
+    config.runtime.apiKeyRequestResults = results;
+
+    const failureCount = results.reduce((count, sample) => sample.ok ? count : count + 1, 0);
+    const summary = {
+      failureCount,
+      sampleSize: results.length,
+      failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+      windowSize: APIKEY_REQUEST_WINDOW_SIZE,
+      sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
+    };
+    const unavailable = summary.failureCount >= APIKEY_REQUEST_FAILURE_THRESHOLD;
+    let selectedConfig = config;
+
+    if (unavailable && config.runtime.available !== false) {
+      selectedConfig = markConfigUnavailable(config, result.reason || 'apikey_upstream_error', {
+        allowSwitch: result.allowSwitch,
+        lastError: result.lastError || null,
+        switchReason: result.switchReason || 'apikey_upstream_failover',
+      });
+    }
+
+    return {
+      ...summary,
+      unavailable,
+      selectedConfig,
+    };
+  }
+
   /**
    * 判断账号当前是否可用。
    */
@@ -412,6 +582,7 @@ function createAccountManager(options) {
       nextConfig.runtime.reason = 'apikey';
       nextConfig.runtime.lastCheckedAt = now();
       nextConfig.runtime.lastError = null;
+      resetApiKeyRequestResults(nextConfig);
     }
     activeConfigIndex = index;
     if (nextConfig.type === 'token') {
@@ -930,10 +1101,7 @@ function createAccountManager(options) {
 
       applyQuotaPayload(config, payload, { allowSwitch });
     } catch (err) {
-      config.runtime.available = false;
-      config.runtime.reason = 'quota_check_failed';
-      config.runtime.lastCheckedAt = now();
-      config.runtime.lastError = err.message;
+      recordQuotaCheckFailure(config, err);
     }
 
     return config.runtime;
@@ -979,6 +1147,112 @@ function createAccountManager(options) {
       : [];
   }
 
+  function shouldRefreshApiKeyRecoveryTargets(reason, options = {}) {
+    if (typeof options.refreshApiKeys === 'boolean') {
+      return options.refreshApiKeys;
+    }
+
+    return reason === 'all_poll';
+  }
+
+  function getApiKeyRecoveryTargets(reason, options = {}) {
+    if (!shouldRefreshApiKeyRecoveryTargets(reason, options)) {
+      return [];
+    }
+
+    return configs.filter(config => (
+      shouldUseApiKeyRecoveryMonitoring(config) &&
+      config.runtime &&
+      config.runtime.enabled &&
+      !config.runtime.available
+    ));
+  }
+
+  function classifyApiKeyRecoveryStatus(statusCode, previousReason) {
+    const normalizedStatusCode = Number(statusCode);
+    if (normalizedStatusCode === 401 || normalizedStatusCode === 403) {
+      return 'apikey_auth_failed';
+    }
+
+    if (normalizedStatusCode === 429) {
+      return 'apikey_rate_limited';
+    }
+
+    if (normalizedStatusCode >= 500 && normalizedStatusCode <= 599) {
+      return 'apikey_upstream_5xx';
+    }
+
+    return previousReason || 'apikey_upstream_error';
+  }
+
+  function getApiKeyRecoveryModel(config) {
+    const healthModel = normalizeString(config && config.health && config.health.model);
+    return healthModel || APIKEY_RECOVERY_REQUEST_BODY.model;
+  }
+
+  function buildApiKeyRecoveryRequestBody(config) {
+    return Buffer.from(JSON.stringify({
+      ...APIKEY_RECOVERY_REQUEST_BODY,
+      model: getApiKeyRecoveryModel(config),
+    }));
+  }
+
+  async function checkApiKeyRecovery(config) {
+    const targetUrl = new URL(APIKEY_RECOVERY_RESPONSES_PATH, config.baseUrl).toString();
+    const body = buildApiKeyRecoveryRequestBody(config);
+    const headers = {
+      ...buildAuthHeadersForConfig(config),
+      accept: 'application/json',
+      'content-type': 'application/json',
+      'content-length': String(body.length),
+    };
+
+    const result = await withQuotaCheckTimeout(requestBufferedFn({
+      method: 'POST',
+      targetUrl,
+      headers,
+      body,
+      timeoutMs: quotaCheckTimeoutMs,
+    }));
+
+    const statusCode = Number(result && result.statusCode);
+    config.runtime.lastCheckedAt = now();
+
+    if (statusCode >= 200 && statusCode < 300) {
+      config.runtime.available = true;
+      config.runtime.reason = 'apikey';
+      config.runtime.lastError = null;
+      resetApiKeyRequestResults(config);
+      return config.runtime;
+    }
+
+    config.runtime.available = false;
+    config.runtime.reason = classifyApiKeyRecoveryStatus(statusCode, config.runtime.reason);
+    config.runtime.lastError = Number.isFinite(statusCode) ? `http:${statusCode}` : 'invalid_status';
+    return config.runtime;
+  }
+
+  async function refreshApiKeyRecoveryWithLogging(config) {
+    const previousAvailability = config.runtime.available;
+    const previousReason = config.runtime.reason;
+
+    try {
+      await checkApiKeyRecovery(config);
+    } catch (err) {
+      config.runtime.available = false;
+      config.runtime.reason = 'apikey_upstream_error';
+      config.runtime.lastCheckedAt = now();
+      config.runtime.lastError = err.message;
+    }
+
+    const availabilityChanged = previousAvailability !== config.runtime.available || previousReason !== config.runtime.reason;
+    if (availabilityChanged && config.runtime.available && previousAvailability === false) {
+      warn(`API Key 恢复可用: ${getAccountLabel(config)}`);
+    } else if (availabilityChanged && !config.runtime.available) {
+      warn(`API Key 仍不可用: ${getAccountLabel(config)} (${config.runtime.reason}${config.runtime.lastError ? `: ${config.runtime.lastError}` : ''})`);
+    }
+  }
+
   function normalizeDelayMs(value) {
     const numberValue = Number(value);
     return Number.isFinite(numberValue) && numberValue > 0 ? Math.floor(numberValue) : 0;
@@ -993,10 +1267,10 @@ function createAccountManager(options) {
   }
 
   /**
-   * 轮询 token 账号额度；后台分钟级轮询只检查当前账号，全量轮询按 configs[] 顺序选择。
+   * 轮询 token 账号额度；十分钟全量校正会额外探测已不可用的 GPT API Key。
    */
   async function refreshQuotas(reason = 'poll', options = {}) {
-    if (!configs.some(config => shouldUseQuotaMonitoring(config.type))) {
+    if (!hasQuotaOrApiKeyRecoveryTargets(reason)) {
       return;
     }
 
@@ -1006,7 +1280,10 @@ function createAccountManager(options) {
 
     quotaMonitorRunning = true;
     const previousActiveIndex = activeConfigIndex;
-    const targets = getQuotaRefreshTargets(reason, options);
+    const targets = [
+      ...getQuotaRefreshTargets(reason, options).map(config => ({ type: 'quota', config })),
+      ...getApiKeyRecoveryTargets(reason, options).map(config => ({ type: 'apikey_recovery', config })),
+    ];
     const delayBetweenAccountsMs = shouldRefreshAllQuotas(reason, options)
       ? normalizeDelayMs(options.delayBetweenAccountsMs)
       : 0;
@@ -1014,7 +1291,11 @@ function createAccountManager(options) {
     try {
       for (let index = 0; index < targets.length; index += 1) {
         await waitBetweenFullQuotaChecks(index, delayBetweenAccountsMs);
-        await refreshSingleConfigWithLogging(targets[index], reason);
+        if (targets[index].type === 'apikey_recovery') {
+          await refreshApiKeyRecoveryWithLogging(targets[index].config);
+        } else {
+          await refreshSingleConfigWithLogging(targets[index].config, reason);
+        }
       }
 
       const currentConfig = ensureActiveConfig(reason);
@@ -1035,7 +1316,7 @@ function createAccountManager(options) {
    * 启动后台额度轮询定时器。
    */
   function startQuotaMonitor() {
-    if (!configs.some(config => shouldUseQuotaMonitoring(config.type))) {
+    if (!hasQuotaOrApiKeyRecoveryTargets('all_poll')) {
       return;
     }
 
@@ -1087,6 +1368,7 @@ function createAccountManager(options) {
     getAccountStatus,
     applyQuotaPayload,
     markConfigUnavailable,
+    recordApiKeyRequestResult,
     acquireConfig,
     getDispatchIdentity,
     observeResponseModel,

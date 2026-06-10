@@ -417,6 +417,7 @@ function forwardClaudeApiKeyMessagesRequest({
     createUpstreamRequestImpl,
     upstreamRequestTimeoutMs,
     handleRetryableUpstreamError,
+    observeApiKeyRequestResult = null,
     releaseConfig = null,
     error
 }) {
@@ -464,6 +465,14 @@ function forwardClaudeApiKeyMessagesRequest({
         }
     }
 
+    function observeDirectApiKeyResult(result) {
+        if (config.type !== 'apikey' || typeof observeApiKeyRequestResult !== 'function') {
+            return null;
+        }
+
+        return observeApiKeyRequestResult(config, result);
+    }
+
     upstream.responsePromise.then(response => {
         const statusCode = Number(response.statusCode || 502);
         const upstreamHeaders = normalizeUpstreamHeaders(response.headers);
@@ -471,6 +480,15 @@ function forwardClaudeApiKeyMessagesRequest({
         const apiKeyFailure = classifyApiKeyUpstreamStatus(statusCode);
         if (apiKeyFailure && typeof handleRetryableUpstreamError === 'function') {
             handleRetryableUpstreamError(config, apiKeyFailure);
+        } else if (apiKeyFailure) {
+            observeDirectApiKeyResult({
+                ok: false,
+                reason: apiKeyFailure.reason,
+                lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
+                switchReason: 'apikey_upstream_failover'
+            });
+        } else {
+            observeDirectApiKeyResult({ ok: true });
         }
 
         if (isClientStream) {
@@ -543,6 +561,12 @@ function forwardClaudeApiKeyMessagesRequest({
 
         const message = err.message || 'upstream request failed';
         error(`代理请求失败: ${message}`);
+        observeDirectApiKeyResult({
+            ok: false,
+            reason: 'apikey_upstream_error',
+            lastError: message,
+            switchReason: 'apikey_upstream_failover'
+        });
         releaseCurrentConfig();
         sendJsonError(res, getGatewayStatusCode(err), {
             error: 'Bad Gateway',
@@ -576,7 +600,8 @@ function createClaudeMessagesHandler({
     createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest,
     handleRetryableUpstreamError = null,
     getSessionKey = () => '',
-    observeResponseModel = null
+    observeResponseModel = null,
+    observeApiKeyRequestResult = null
 }) {
     return async function handleMessagesRequest(req, res) {
         const incomingUrl = buildIncomingUrl(req);
@@ -670,6 +695,7 @@ function createClaudeMessagesHandler({
                     createUpstreamRequestImpl,
                     upstreamRequestTimeoutMs,
                     handleRetryableUpstreamError,
+                    observeApiKeyRequestResult,
                     releaseConfig: configSelection.release,
                     error
                 });

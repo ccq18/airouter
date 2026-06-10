@@ -287,6 +287,20 @@ test('server defaults upstream requests to the official SDK timeout window', () 
   assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);
 });
 
+test('generic apikey proxy records success only after the upstream response body completes', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const startForwardingIndex = source.indexOf('function startForwardingResponse');
+  const responseEndIndex = source.indexOf("response.on('end'", startForwardingIndex);
+  const responseErrorIndex = source.indexOf("response.on('error'", startForwardingIndex);
+
+  assert.notEqual(startForwardingIndex, -1);
+  assert.notEqual(responseEndIndex, -1);
+  assert.notEqual(responseErrorIndex, -1);
+  assert.notEqual(source.indexOf('recordCurrentApiKeyRequestResult({ ok: true })', responseEndIndex), -1);
+  assert.notEqual(source.indexOf('recordCurrentApiKeyRequestResult({', responseErrorIndex), -1);
+  assert.equal(source.includes('accountManager.recordApiKeyRequestResult(config, { ok: true })'), false);
+});
+
 test('createClaudeMessagesHandler rejects apikey configs with a clear error before contacting upstream', async () => {
   let upstreamCalled = false;
   const handler = createClaudeMessagesHandler({
@@ -327,6 +341,7 @@ test('createClaudeMessagesHandler rejects apikey configs with a clear error befo
 
 test('createClaudeMessagesHandler forwards apikey configs with claude support without responses conversion', async () => {
   const upstreamRequests = [];
+  const apiKeyResults = [];
   const handler = createClaudeMessagesHandler({
     getConfig: () => ({
       type: 'apikey',
@@ -354,6 +369,9 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
         }))),
         abort() {},
       };
+    },
+    observeApiKeyRequestResult: (config, result) => {
+      apiKeyResults.push({ config, result });
     },
   });
 
@@ -384,9 +402,12 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
       text: 'hello',
     },
   ]);
+  assert.equal(apiKeyResults.length, 1);
+  assert.equal(apiKeyResults[0].config.description, 'Claude API config');
+  assert.deepEqual(apiKeyResults[0].result, { ok: true });
 });
 
-test('createClaudeMessagesHandler marks direct claude apikey upstream failures unavailable', async () => {
+test('createClaudeMessagesHandler reports direct claude apikey retryable upstream failures', async () => {
   const config = {
     type: 'apikey',
     index: 0,

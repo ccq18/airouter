@@ -88,6 +88,28 @@ function normalizeApiKeySupport(value) {
     return support;
 }
 
+function normalizeApiKeyHealth(value) {
+    if (typeof value === 'undefined' || value === null) {
+        return {};
+    }
+
+    if (!isPlainObject(value)) {
+        throw new Error('apikey health 必须是对象');
+    }
+
+    const health = {};
+    if (Object.prototype.hasOwnProperty.call(value, 'model')) {
+        const model = normalizeString(value.model);
+        if (!model) {
+            throw new Error('apikey health.model 必须是非空字符串');
+        }
+
+        health.model = model;
+    }
+
+    return health;
+}
+
 function configSupportsCapability(config, capability) {
     if (!config || config.type !== 'apikey') {
         return false;
@@ -209,6 +231,7 @@ function validateConfigItemArray(configs, fieldName) {
         if (configType === 'apikey') {
             try {
                 normalizeApiKeySupport(config.support);
+                normalizeApiKeyHealth(config.health);
             } catch (err) {
                 throw new Error(`配置文件 ${fieldName}[${index}] ${err.message}`);
             }
@@ -280,6 +303,7 @@ function createApiKeyRuntimeConfig(config, index) {
         apiBasePath: '',
         apiKey: apikey,
         support: normalizeApiKeySupport(config.support),
+        health: normalizeApiKeyHealth(config.health),
         description: config.description || `APIKey 配置 #${index + 1}`,
         runtime: createDefaultApiKeyRuntime()
     };
@@ -327,6 +351,7 @@ module.exports = {
     createApiKeyRuntimeConfig,
     getConfigItemType,
     normalizeApiKeySupport,
+    normalizeApiKeyHealth,
     configSupportsCapability,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring
