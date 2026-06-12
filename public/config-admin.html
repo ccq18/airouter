@@ -630,6 +630,12 @@
       font-weight: 700;
     }
 
+    .dispatch-session.danger {
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-weight: 700;
+    }
+
     .dispatch-session .session-value {
       color: inherit;
       font-weight: 800;
@@ -937,6 +943,7 @@
       extractRuntimeStatusTags,
       formatDispatchSessionStatus,
       formatResponseModelStatus,
+      formatApiKeyRecoveryStatus,
       hasRefreshTokenConfig,
       normalizePortValue,
       buildProxyAccessInfo,
@@ -1145,6 +1152,21 @@
       `;
     }
 
+    function renderApiKeyRecovery(runtime) {
+      const recovery = formatApiKeyRecoveryStatus(runtime);
+      if (!recovery) {
+        return '';
+      }
+
+      return `
+        <div class="dispatch-session ${recovery.tone === 'danger' ? 'danger' : recovery.tone === 'warn' ? 'warn' : recovery.active ? 'active' : ''}">
+          <span>${escapeHtml(recovery.title)}</span>
+          <span class="session-value">${escapeHtml(recovery.label)}</span>
+          <span class="session-detail">${escapeHtml(recovery.detail)}</span>
+        </div>
+      `;
+    }
+
     function renderSummary(runtime) {
       const summaryText = runtime && runtime.runtime_summary ? runtime.runtime_summary : '暂无运行态数据';
 
@@ -1153,6 +1175,7 @@
           ${renderRuntimeTags(runtime)}
           ${renderDispatchSession(runtime)}
           ${renderResponseModel(runtime)}
+          ${renderApiKeyRecovery(runtime)}
           <div class="summary-raw">${escapeHtml(summaryText)}</div>
         </div>
       `;

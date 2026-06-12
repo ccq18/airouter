@@ -13,6 +13,7 @@ const {
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
   selectReloadedActiveConfig,
+  serializeAccountStatus,
 } = require('../openai');
 
 test('refreshConfigAdminResponse refreshes all quotas before building the admin snapshot in token mode', async () => {
@@ -57,6 +58,61 @@ test('refreshConfigAdminResponse skips quota refresh when no token configs exist
 
   assert.equal(called, false);
   assert.equal(response, expectedResponse);
+});
+
+test('serializeAccountStatus includes apikey recovery probe observability', () => {
+  assert.deepEqual(
+    serializeAccountStatus({
+      index: 1,
+      description: 'gpt key',
+      label: '#2 gpt key',
+      available: false,
+      remainingPercent: null,
+      primaryRemainingPercent: null,
+      primaryResetAt: null,
+      primaryResetAfterSeconds: null,
+      secondaryRemainingPercent: null,
+      secondaryResetAt: null,
+      secondaryResetAfterSeconds: null,
+      lastCheckedAt: 1713337200000,
+      reason: 'apikey_rate_limited',
+      quotaCheckFailures: null,
+      apiKeyRequestWindow: {
+        failureCount: 3,
+        sampleSize: 5,
+        failureThreshold: 3,
+        windowSize: 10,
+        sampleTtlMs: 1800000,
+      },
+      apiKeyRecovery: {
+        enabled: true,
+        pending: true,
+        intervalMs: 600000,
+        lastCheckedAt: 1713337200000,
+        result: 'failed',
+        statusCode: 429,
+        reason: 'apikey_rate_limited',
+        lastError: 'http:429',
+        model: 'gpt-5.5',
+      },
+      inFlight: null,
+      dispatchSession: null,
+      responseModel: null,
+      runtimeSummary: '可用=否 | 状态=API Key 被限流',
+      summaryLine: '#2 gpt key | 可用=否 | 状态=API Key 被限流',
+    }).api_key_recovery,
+    {
+      enabled: true,
+      pending: true,
+      interval_ms: 600000,
+      last_checked_at: 1713337200000,
+      result: 'failed',
+      status_code: 429,
+      reason: 'apikey_rate_limited',
+      last_error: 'http:429',
+      model: 'gpt-5.5',
+    },
+  );
 });
 
 test('activateConfigAdminResponse switches the active runtime config without refreshing quotas', async () => {

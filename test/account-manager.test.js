@@ -605,6 +605,17 @@ test('getAccountStatus exposes token quota failure and apikey request window sum
     windowSize: 10,
     sampleTtlMs: 30 * 60 * 1000,
   });
+  assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRecovery, {
+    enabled: true,
+    pending: false,
+    intervalMs: 10 * 60 * 1000,
+    lastCheckedAt: null,
+    result: 'never',
+    statusCode: null,
+    reason: null,
+    lastError: null,
+    model: 'gpt-5.5',
+  });
 });
 
 test('ensureActiveConfig keeps the current account when no account is marked available', () => {
@@ -1766,12 +1777,35 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
   assert.equal(configs[1].runtime.reason, 'apikey');
   assert.equal(configs[1].runtime.lastError, null);
   assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
+  assert.deepEqual(manager.getAccountStatus(configs[1]).apiKeyRecovery, {
+    enabled: true,
+    pending: false,
+    intervalMs: 10 * 60 * 1000,
+    lastCheckedAt: 1713337200000,
+    result: 'success',
+    statusCode: 200,
+    reason: 'apikey',
+    lastError: null,
+    model: 'gpt-5.5',
+  });
   assert.equal(configs[2].runtime.available, false);
   assert.equal(configs[2].runtime.reason, 'apikey_rate_limited');
   assert.equal(configs[2].runtime.lastError, 'http:429');
   assert.equal(configs[2].runtime.lastCheckedAt, 1713337200000);
+  assert.deepEqual(manager.getAccountStatus(configs[2]).apiKeyRecovery, {
+    enabled: true,
+    pending: true,
+    intervalMs: 10 * 60 * 1000,
+    lastCheckedAt: 1713337200000,
+    result: 'failed',
+    statusCode: 429,
+    reason: 'apikey_rate_limited',
+    lastError: 'http:429',
+    model: 'gpt-5.5',
+  });
   assert.equal(configs[3].runtime.available, false);
   assert.equal(configs[3].runtime.lastCheckedAt, null);
+  assert.equal(manager.getAccountStatus(configs[3]).apiKeyRecovery.enabled, false);
   assert.equal(warnings.some(line => /API Key 恢复可用: #2 account-2/.test(line)), true);
 });
 

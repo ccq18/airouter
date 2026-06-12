@@ -22,6 +22,7 @@ const {
   extractRuntimeStatusTags,
   formatDispatchSessionStatus,
   formatResponseModelStatus,
+  formatApiKeyRecoveryStatus,
   getDispatchModeSummary,
   getActiveConfigLabel,
   hasRefreshTokenConfig,
@@ -685,6 +686,60 @@ test('formatResponseModelStatus summarizes requested and actual response models'
       tone: 'active',
     },
   );
+});
+
+test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {
+  assert.deepEqual(
+    formatApiKeyRecoveryStatus({
+      api_key_recovery: {
+        enabled: true,
+        pending: true,
+        interval_ms: 600000,
+        last_checked_at: 1713337200000,
+        result: 'failed',
+        status_code: 429,
+        reason: 'apikey_rate_limited',
+        last_error: 'http:429',
+        model: 'gpt-4.1-mini',
+      },
+    }, {
+      locale: 'en-US',
+      timeZone: 'UTC',
+    }),
+    {
+      title: 'API Key 探测',
+      label: '仍不可用',
+      detail: '上次 07:00:00 · 模型 gpt-4.1-mini · HTTP 429 · http:429 · 仅不可用时每 10 分钟恢复探测',
+      active: false,
+      tone: 'danger',
+    },
+  );
+
+  assert.deepEqual(
+    formatApiKeyRecoveryStatus({
+      api_key_recovery: {
+        enabled: true,
+        pending: true,
+        interval_ms: 600000,
+        last_checked_at: null,
+        result: 'never',
+        model: 'gpt-5.5',
+      },
+    }),
+    {
+      title: 'API Key 探测',
+      label: '等待探测',
+      detail: '模型 gpt-5.5 · 仅不可用时每 10 分钟恢复探测',
+      active: false,
+      tone: 'warn',
+    },
+  );
+
+  assert.equal(formatApiKeyRecoveryStatus({
+    api_key_recovery: {
+      enabled: false,
+    },
+  }), null);
 });
 
 test('extractRuntimeStatusTags falls back when runtime data is missing', () => {

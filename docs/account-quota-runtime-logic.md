@@ -29,6 +29,7 @@
 - 普通 apikey 代理只有在上游响应体完整结束后才记录成功；请求失败或响应体错误会记录失败
 - 已被标记为不可用且 `support` 包含 `gpt` 时，会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 2xx 时恢复为可用
 - GPT apikey 恢复探测默认使用模型 `gpt-5.5`，可通过配置项里的 `health.model` 覆盖
+- 管理页会显示 GPT apikey 恢复探测是否启用、是否待恢复、上次探测时间、结果、HTTP 状态/错误和探测模型
 - 只支持 `claude` 的 apikey 不做 `/v1/responses` 恢复探测
 - 手动切换到某个 `apikey` 配置项时，会把该配置恢复为可用
 

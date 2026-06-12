@@ -180,6 +180,7 @@ function createAccountManager(options) {
       reason: config.runtime.reason,
       quotaCheckFailures: isDispatchManagedConfig(config) ? getQuotaCheckFailures(config) : null,
       apiKeyRequestWindow: config.type === 'apikey' ? summarizeApiKeyRequestResults(config) : null,
+      apiKeyRecovery: config.type === 'apikey' ? summarizeApiKeyRecovery(config) : null,
       inFlight: isDispatchManagedConfig(config) ? normalizeInFlight(config) : null,
       dispatchSession: isDispatchManagedConfig(config) ? serializeDispatchSession(config.runtime.dispatchSession) : null,
       responseModel: serializeResponseModel(config.runtime.responseModel),
@@ -489,6 +490,40 @@ function createAccountManager(options) {
       failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
       windowSize: APIKEY_REQUEST_WINDOW_SIZE,
       sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
+    };
+  }
+
+  function summarizeApiKeyRecovery(config) {
+    const enabled = shouldUseApiKeyRecoveryMonitoring(config);
+    const recovery = config && config.runtime && config.runtime.apiKeyRecovery && typeof config.runtime.apiKeyRecovery === 'object'
+      ? config.runtime.apiKeyRecovery
+      : {};
+
+    return {
+      enabled,
+      pending: Boolean(enabled && config.runtime && config.runtime.enabled && !config.runtime.available),
+      intervalMs: allQuotaCheckIntervalMs,
+      lastCheckedAt: Number.isFinite(Number(recovery.lastCheckedAt)) ? Number(recovery.lastCheckedAt) : null,
+      result: typeof recovery.result === 'string' && recovery.result ? recovery.result : 'never',
+      statusCode: Number.isFinite(Number(recovery.statusCode)) ? Number(recovery.statusCode) : null,
+      reason: typeof recovery.reason === 'string' && recovery.reason ? recovery.reason : null,
+      lastError: typeof recovery.lastError === 'string' && recovery.lastError ? recovery.lastError : null,
+      model: getApiKeyRecoveryModel(config),
+    };
+  }
+
+  function recordApiKeyRecoveryResult(config, result = {}) {
+    if (!config || config.type !== 'apikey' || !config.runtime) {
+      return;
+    }
+
+    config.runtime.apiKeyRecovery = {
+      lastCheckedAt: Number.isFinite(Number(result.lastCheckedAt)) ? Number(result.lastCheckedAt) : now(),
+      result: typeof result.result === 'string' && result.result ? result.result : 'failed',
+      statusCode: Number.isFinite(Number(result.statusCode)) ? Number(result.statusCode) : null,
+      reason: typeof result.reason === 'string' && result.reason ? result.reason : null,
+      lastError: typeof result.lastError === 'string' && result.lastError ? result.lastError : null,
+      model: getApiKeyRecoveryModel(config),
     };
   }
 
@@ -1216,12 +1251,20 @@ function createAccountManager(options) {
     }));
 
     const statusCode = Number(result && result.statusCode);
-    config.runtime.lastCheckedAt = now();
+    const checkedAt = now();
+    config.runtime.lastCheckedAt = checkedAt;
 
     if (statusCode >= 200 && statusCode < 300) {
       config.runtime.available = true;
       config.runtime.reason = 'apikey';
       config.runtime.lastError = null;
+      recordApiKeyRecoveryResult(config, {
+        lastCheckedAt: checkedAt,
+        result: 'success',
+        statusCode,
+        reason: 'apikey',
+        lastError: null,
+      });
       resetApiKeyRequestResults(config);
       return config.runtime;
     }
@@ -1229,6 +1272,13 @@ function createAccountManager(options) {
     config.runtime.available = false;
     config.runtime.reason = classifyApiKeyRecoveryStatus(statusCode, config.runtime.reason);
     config.runtime.lastError = Number.isFinite(statusCode) ? `http:${statusCode}` : 'invalid_status';
+    recordApiKeyRecoveryResult(config, {
+      lastCheckedAt: checkedAt,
+      result: 'failed',
+      statusCode: Number.isFinite(statusCode) ? statusCode : null,
+      reason: config.runtime.reason,
+      lastError: config.runtime.lastError,
+    });
     return config.runtime;
   }
 
@@ -1241,8 +1291,16 @@ function createAccountManager(options) {
     } catch (err) {
       config.runtime.available = false;
       config.runtime.reason = 'apikey_upstream_error';
-      config.runtime.lastCheckedAt = now();
+      const checkedAt = now();
+      config.runtime.lastCheckedAt = checkedAt;
       config.runtime.lastError = err.message;
+      recordApiKeyRecoveryResult(config, {
+        lastCheckedAt: checkedAt,
+        result: 'error',
+        statusCode: null,
+        reason: config.runtime.reason,
+        lastError: config.runtime.lastError,
+      });
     }
 
     const availabilityChanged = previousAvailability !== config.runtime.available || previousReason !== config.runtime.reason;

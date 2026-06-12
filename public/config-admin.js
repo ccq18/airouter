@@ -539,6 +539,106 @@
     };
   }
 
+  function formatProbeTime(value, options = {}) {
+    const timestamp = Number(value);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+      return '';
+    }
+
+    const checkedAt = new Date(timestamp);
+    if (Number.isNaN(checkedAt.getTime())) {
+      return '';
+    }
+
+    const formatOptions = {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    };
+    if (options.timeZone) {
+      formatOptions.timeZone = options.timeZone;
+    }
+
+    return checkedAt.toLocaleTimeString(options.locale || 'zh-CN', formatOptions);
+  }
+
+  function formatProbeInterval(value) {
+    const intervalMs = Number(value);
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return '';
+    }
+
+    const minutes = Math.max(1, Math.round(intervalMs / 60000));
+    return `每 ${minutes} 分钟`;
+  }
+
+  function formatApiKeyRecoveryStatus(runtime, options = {}) {
+    const recovery = runtime && typeof runtime === 'object'
+      ? runtime.api_key_recovery || runtime.apiKeyRecovery
+      : null;
+    if (!recovery || typeof recovery !== 'object' || recovery.enabled === false) {
+      return null;
+    }
+
+    const result = normalizeText(recovery.result || 'never').toLowerCase();
+    const pending = Boolean(recovery.pending);
+    const checkedAt = formatProbeTime(recovery.last_checked_at ?? recovery.lastCheckedAt, options);
+    const model = normalizeText(recovery.model);
+    const statusCode = Number(recovery.status_code ?? recovery.statusCode);
+    const lastError = normalizeText(recovery.last_error ?? recovery.lastError);
+    const intervalText = formatProbeInterval(recovery.interval_ms ?? recovery.intervalMs);
+    const detailParts = [];
+
+    if (checkedAt) {
+      detailParts.push(`上次 ${checkedAt}`);
+    }
+
+    if (model) {
+      detailParts.push(`模型 ${model}`);
+    }
+
+    if (Number.isInteger(statusCode) && statusCode > 0) {
+      detailParts.push(`HTTP ${statusCode}`);
+    }
+
+    if (lastError) {
+      detailParts.push(lastError);
+    }
+
+    if (intervalText) {
+      detailParts.push(`仅不可用时${intervalText}恢复探测`);
+    }
+
+    if (result === 'success') {
+      return {
+        title: 'API Key 探测',
+        label: '恢复成功',
+        detail: detailParts.join(' · '),
+        active: false,
+        tone: 'ok',
+      };
+    }
+
+    if (result === 'failed' || result === 'error') {
+      return {
+        title: 'API Key 探测',
+        label: '仍不可用',
+        detail: detailParts.join(' · '),
+        active: false,
+        tone: 'danger',
+      };
+    }
+
+    return {
+      title: 'API Key 探测',
+      label: pending ? '等待探测' : '未触发',
+      detail: detailParts.join(' · '),
+      active: false,
+      tone: pending ? 'warn' : 'muted',
+    };
+  }
+
   function extractRuntimeStatusTags(runtime) {
     const text = getRuntimeSummaryText(runtime);
 
@@ -839,6 +939,7 @@
     getDispatchModeSummary,
     formatDispatchSessionStatus,
     formatResponseModelStatus,
+    formatApiKeyRecoveryStatus,
     extractRuntimeStatusTags,
     getActiveConfigLabel,
     hasRefreshTokenConfig,
