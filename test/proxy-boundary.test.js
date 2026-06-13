@@ -179,6 +179,36 @@ test('normalizeProxyJsonBody adapts OpenAI Responses payloads for token-backed C
   assert.equal(Object.hasOwn(normalized, 'temperature'), false);
 });
 
+test('normalizeProxyJsonBody applies CPA style only when explicitly requested', () => {
+  const normalized = normalizeProxyJsonBody({
+    type: 'token',
+  }, '/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    instructions: 'project rules',
+    input: [
+      {
+        type: 'message',
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text: 'system rules',
+          },
+        ],
+      },
+    ],
+    store: true,
+  }, {}, {
+    cpaStyleCompatibility: true,
+  });
+
+  assert.equal(normalized.instructions, '');
+  assert.equal(normalized.input[0].role, 'developer');
+  assert.equal(normalized.input[0].content[0].text, 'project rules');
+  assert.equal(normalized.input[1].role, 'developer');
+  assert.equal(normalized.store, false);
+});
+
 test('normalizeProxyJsonBody preserves OpenAI Responses parameters for apikey upstreams', () => {
   const normalized = normalizeProxyJsonBody({
     type: 'apikey',

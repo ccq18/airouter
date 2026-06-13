@@ -10,8 +10,12 @@ const RESPONSES_DEFAULTS = {
 
 const CODEX_UNSUPPORTED_RESPONSES_PARAMETERS = [
     'max_output_tokens',
+    'temperature'
+];
+
+const CPA_UNSUPPORTED_RESPONSES_PARAMETERS = [
+    ...CODEX_UNSUPPORTED_RESPONSES_PARAMETERS,
     'max_completion_tokens',
-    'temperature',
     'top_p',
     'truncation',
     'context_management',
@@ -56,7 +60,7 @@ function buildCodexTextMessage(text, role = 'user') {
     };
 }
 
-function normalizeCodexResponsesInput(input) {
+function normalizeCodexResponsesInput(input, options = {}) {
     if (typeof input === 'string') {
         return [buildCodexTextMessage(input)];
     }
@@ -67,7 +71,7 @@ function normalizeCodexResponsesInput(input) {
                 return item;
             }
 
-            if (item.type === 'message' && item.role === 'system') {
+            if (options.cpaStyleCompatibility && item.type === 'message' && item.role === 'system') {
                 return {
                     ...item,
                     role: 'developer'
@@ -134,40 +138,49 @@ function normalizeCodexBuiltinTools(body) {
     return body;
 }
 
-function normalizeCodexResponsesRequestBody(body) {
+function normalizeCodexResponsesRequestBody(body, options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const normalizedBody = {
         ...body
     };
 
     const instructions = normalizeInstructionText(body.instructions);
     const normalizedInput = Object.prototype.hasOwnProperty.call(body, 'input')
-        ? normalizeCodexResponsesInput(body.input)
+        ? normalizeCodexResponsesInput(body.input, { cpaStyleCompatibility })
         : body.input;
 
-    if (Array.isArray(normalizedInput)) {
+    if (cpaStyleCompatibility && Array.isArray(normalizedInput)) {
         normalizedBody.input = instructions
             ? [buildCodexTextMessage(instructions, 'developer'), ...normalizedInput]
             : normalizedInput;
-    } else if (instructions) {
+    } else if (cpaStyleCompatibility && instructions) {
         normalizedBody.input = [buildCodexTextMessage(instructions, 'developer')];
+    } else if (Object.prototype.hasOwnProperty.call(body, 'input')) {
+        normalizedBody.input = normalizedInput;
     }
 
-    normalizedBody.stream = true;
-    normalizedBody.store = false;
-    normalizedBody.parallel_tool_calls = true;
-    normalizedBody.include = ['reasoning.encrypted_content'];
+    if (cpaStyleCompatibility) {
+        normalizedBody.stream = true;
+        normalizedBody.store = false;
+        normalizedBody.parallel_tool_calls = true;
+        normalizedBody.include = ['reasoning.encrypted_content'];
+        normalizedBody.instructions = '';
+    }
 
-    delete normalizedBody.instructions;
-
-    for (const parameterName of CODEX_UNSUPPORTED_RESPONSES_PARAMETERS) {
+    const unsupportedParameters = cpaStyleCompatibility
+        ? CPA_UNSUPPORTED_RESPONSES_PARAMETERS
+        : CODEX_UNSUPPORTED_RESPONSES_PARAMETERS;
+    for (const parameterName of unsupportedParameters) {
         delete normalizedBody[parameterName];
     }
 
-    if (normalizedBody.service_tier !== 'priority') {
+    if (cpaStyleCompatibility && normalizedBody.service_tier !== 'priority') {
         delete normalizedBody.service_tier;
     }
 
-    return normalizeCodexBuiltinTools(normalizedBody);
+    return cpaStyleCompatibility
+        ? normalizeCodexBuiltinTools(normalizedBody)
+        : normalizedBody;
 }
 
 function normalizeResponsesRequestBody(requestPath, body, options = {}) {
@@ -184,7 +197,9 @@ function normalizeResponsesRequestBody(requestPath, body, options = {}) {
         normalizedBody.store = false;
     }
     if (options.codexCompatibility) {
-        return normalizeCodexResponsesRequestBody(normalizedBody);
+        return normalizeCodexResponsesRequestBody(normalizedBody, {
+            cpaStyleCompatibility: options.cpaStyleCompatibility === true
+        });
     }
 
     return normalizedBody;
@@ -192,6 +207,7 @@ function normalizeResponsesRequestBody(requestPath, body, options = {}) {
 
 module.exports = {
     CODEX_UNSUPPORTED_RESPONSES_PARAMETERS,
+    CPA_UNSUPPORTED_RESPONSES_PARAMETERS,
     RESPONSES_DEFAULTS,
     normalizeCodexResponsesInput,
     normalizeModelAlias,

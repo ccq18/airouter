@@ -143,7 +143,7 @@ token 账号不可用时，同一会话会自动漂移到其他可用 token 账�
 
 `/v1/messages` 会优先使用支持 `Claude` 的 API Key 原样转发；没有可用 Claude 上游时，先使用 token 做兼容转换，token 不可用时可使用支持 `GPT` 的 API Key 做同样的 Responses 转换。
 
-`/cpa/v1/*` 提供 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路。走 Codex/Responses 转换时，Airouter 会把 `instructions` 或 Claude `system` 转成 `developer` input，不再向上游发送 system/instructions 字段。
+`/cpa/v1/*` 提供 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路。走 Codex/Responses 转换时，Airouter 会把原始 `instructions` 或 Claude `system` 转成 `developer` input，并保留空字符串 `instructions` 字段，避免把系统提示直接作为 system/instructions 发给上游。
 
 ## 端口说明
 

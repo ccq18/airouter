@@ -633,7 +633,8 @@ function createClaudeMessagesHandler({
     handleRetryableUpstreamError = null,
     getSessionKey = () => '',
     observeResponseModel = null,
-    observeApiKeyRequestResult = null
+    observeApiKeyRequestResult = null,
+    cpaStyleCompatibility = false
 }) {
     return async function handleMessagesRequest(req, res) {
         const incomingUrl = buildIncomingUrl(req);
@@ -729,7 +730,8 @@ function createClaudeMessagesHandler({
                 reasoningEffort,
                 responsesOptions,
                 stream: true,
-                includeMaxOutputTokens: false
+                includeMaxOutputTokens: false,
+                cpaStyleCompatibility
             });
         } catch (err) {
             if (typeof configSelection.release === 'function') {

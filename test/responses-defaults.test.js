@@ -51,7 +51,7 @@ test('normalizeResponsesRequestBody forces store false when the upstream require
   assert.equal(normalized.store, false);
 });
 
-test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex upstream compatibility', () => {
+test('normalizeResponsesRequestBody adapts OpenAI Responses fields for CPA Codex upstream compatibility', () => {
   const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
     model: 'gpt-5.5',
     instructions: 'follow project rules',
@@ -90,6 +90,7 @@ test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex ups
     store: true,
   }, {
     codexCompatibility: true,
+    cpaStyleCompatibility: true,
     forceStoreFalse: true,
   });
 
@@ -126,7 +127,7 @@ test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex ups
     },
   ]);
   assert.equal(normalized.store, false);
-  assert.equal(Object.hasOwn(normalized, 'instructions'), false);
+  assert.equal(normalized.instructions, '');
   assert.equal(Object.hasOwn(normalized, 'max_output_tokens'), false);
   assert.equal(Object.hasOwn(normalized, 'max_completion_tokens'), false);
   assert.equal(Object.hasOwn(normalized, 'temperature'), false);
@@ -140,6 +141,44 @@ test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex ups
   assert.deepEqual(normalized.include, ['reasoning.encrypted_content']);
 });
 
+test('normalizeResponsesRequestBody keeps empty instructions for Codex upstream compatibility', () => {
+  const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    instructions: '',
+    input: [
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'hello',
+          },
+        ],
+      },
+    ],
+    store: true,
+  }, {
+    codexCompatibility: true,
+    forceStoreFalse: true,
+  });
+
+  assert.equal(normalized.instructions, '');
+  assert.equal(normalized.store, false);
+  assert.deepEqual(normalized.input, [
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'hello',
+        },
+      ],
+    },
+  ]);
+});
+
 test('normalizeResponsesRequestBody preserves Codex priority service tier', () => {
   const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
     model: 'gpt-5.5',
@@ -147,6 +186,7 @@ test('normalizeResponsesRequestBody preserves Codex priority service tier', () =
     service_tier: 'priority',
   }, {
     codexCompatibility: true,
+    cpaStyleCompatibility: true,
   });
 
   assert.equal(normalized.service_tier, 'priority');
@@ -166,10 +206,48 @@ test('normalizeResponsesRequestBody normalizes Codex builtin tool aliases', () =
     },
   }, {
     codexCompatibility: true,
+    cpaStyleCompatibility: true,
   });
 
   assert.equal(normalized.tools[0].type, 'web_search');
   assert.equal(normalized.tool_choice.type, 'web_search');
+});
+
+test('normalizeResponsesRequestBody keeps non-CPA Codex compatibility scoped to legacy fields', () => {
+  const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    instructions: 'keep me on the normal path',
+    input: [
+      {
+        type: 'message',
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text: 'normal path system',
+          },
+        ],
+      },
+    ],
+    top_p: 0.8,
+    service_tier: 'default',
+    tools: [
+      {
+        type: 'web_search_preview',
+      },
+    ],
+    store: true,
+  }, {
+    codexCompatibility: true,
+    forceStoreFalse: true,
+  });
+
+  assert.equal(normalized.instructions, 'keep me on the normal path');
+  assert.equal(normalized.input[0].role, 'system');
+  assert.equal(normalized.top_p, 0.8);
+  assert.equal(normalized.service_tier, 'default');
+  assert.equal(normalized.tools[0].type, 'web_search_preview');
+  assert.equal(normalized.store, false);
 });
 
 test('normalizeResponsesRequestBody preserves OpenAI Responses fields unless Codex compatibility is requested', () => {

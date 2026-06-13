@@ -216,6 +216,7 @@ let responsesConfig = resolveResponsesOptions({
 });
 let accountManager = null;
 let handleClaudeMessagesRequest = null;
+let handleCpaClaudeMessagesRequest = null;
 let server = null;
 let shuttingDown = false;
 const activeSockets = new Set();
@@ -752,7 +753,8 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
     };
 }
 
-function createClaudeMessagesRequestHandler() {
+function createClaudeMessagesRequestHandler(options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     return createClaudeMessagesHandler({
         getConfig: (req, context = {}) => {
             const sessionKey = normalizeSessionKey(context.sessionKey);
@@ -808,6 +810,7 @@ function createClaudeMessagesRequestHandler() {
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
         clientVersion: process.env.CODEX_CLIENT_VERSION || '1.0.1',
         upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+        cpaStyleCompatibility,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
             if (config && config.type === 'apikey') {
@@ -891,6 +894,9 @@ function applyLoadedConfig(loadedConfig) {
         now: getCurrentTimestamp
     });
     handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
+    handleCpaClaudeMessagesRequest = createClaudeMessagesRequestHandler({
+        cpaStyleCompatibility: true
+    });
 }
 
 function hydrateLoadedConfig(loadedConfig, options = {}) {
@@ -1540,15 +1546,16 @@ function shouldUseCodexResponsesCompatibility(config, rewrittenUrl) {
     return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
 }
 
-function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions) {
+function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions, options = {}) {
     return normalizeResponsesRequestBody(rewrittenUrl, body, {
         ...responsesOptions,
         forceStoreFalse: shouldForceResponsesStoreFalse(config, rewrittenUrl),
         codexCompatibility: shouldUseCodexResponsesCompatibility(config, rewrittenUrl),
+        cpaStyleCompatibility: options.cpaStyleCompatibility === true,
     });
 }
 
-function prepareFailoverRequest(req, nextConfig, body, originalUrl) {
+function prepareFailoverRequest(req, nextConfig, body, originalUrl, options = {}) {
     req.url = rewriteProxyUrl(originalUrl, nextConfig);
     const contentType = String(req.headers['content-type'] || '').toLowerCase();
     if (!Buffer.isBuffer(body) || !contentType.includes('application/json')) {
@@ -1557,7 +1564,9 @@ function prepareFailoverRequest(req, nextConfig, body, originalUrl) {
 
     try {
         const jsonBody = JSON.parse(body.toString('utf8'));
-        return Buffer.from(JSON.stringify(normalizeProxyJsonBody(nextConfig, req.url, jsonBody, responsesConfig)));
+        return Buffer.from(JSON.stringify(normalizeProxyJsonBody(nextConfig, req.url, jsonBody, responsesConfig, {
+            cpaStyleCompatibility: options.cpaStyleCompatibility === true,
+        })));
     } catch (err) {
         return body;
     }
@@ -1811,6 +1820,7 @@ function createResponseModelObserver(options = {}) {
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const requestSessionKey = normalizeSessionKey(options.sessionKey);
     const requestPredicate = typeof options.predicate === 'function' ? options.predicate : () => true;
     const excludedConfigs = Array.isArray(options.excludedConfigs) ? options.excludedConfigs : [];
@@ -2028,7 +2038,9 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
                     responseFinished = true;
                     void drainAbandonedResponse(response);
-                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                        cpaStyleCompatibility,
+                    });
                     releaseCurrentLease();
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
@@ -2037,6 +2049,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         predicate: requestPredicate,
                         excludedConfigs: [...excludedConfigs, config],
                         retrySelector,
+                        cpaStyleCompatibility,
                     });
                     return;
                 }
@@ -2065,7 +2078,9 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 if (!requestClosed && nextConfig && nextConfig !== config) {
                     responseFinished = true;
                     void drainAbandonedResponse(response);
-                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                        cpaStyleCompatibility,
+                    });
                     releaseCurrentLease();
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
@@ -2074,6 +2089,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         predicate: requestPredicate,
                         excludedConfigs: [...excludedConfigs, config],
                         retrySelector,
+                        cpaStyleCompatibility,
                     });
                     return;
                 }
@@ -2141,7 +2157,9 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 const nextConfig = nextLease ? nextLease.config : null;
 
                 if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
-                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                        cpaStyleCompatibility,
+                    });
                     releaseCurrentLease();
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
@@ -2150,6 +2168,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         predicate: requestPredicate,
                         excludedConfigs: [...excludedConfigs, config],
                         retrySelector,
+                        cpaStyleCompatibility,
                     });
                     return;
                 }
@@ -2188,7 +2207,8 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     res.on('close', closeUpstream);
 }
 
-function createHandler(proxyPath = '') {
+function createHandler(proxyPath = '', options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     return function handler(req, res) {
         const incomingUrl = buildIncomingUrl(req, proxyPath);
 
@@ -2234,7 +2254,9 @@ function createHandler(proxyPath = '') {
             let nextBody = body;
             if (Buffer.isBuffer(nextBody) && jsonBody) {
                 try {
-                    nextBody = Buffer.from(JSON.stringify(normalizeProxyJsonBody(config, req.url, jsonBody, responsesConfig)));
+                    nextBody = Buffer.from(JSON.stringify(normalizeProxyJsonBody(config, req.url, jsonBody, responsesConfig, {
+                        cpaStyleCompatibility,
+                    })));
                 } catch (err) {
                     lease.release();
                     error('处理请求体时出错:', err.message);
@@ -2251,6 +2273,7 @@ function createHandler(proxyPath = '') {
                 sessionKey: lease.sessionKey,
                 predicate: config.type === 'token' ? isTokenProxyConfig : isGptApiKeyProxyConfig,
                 retrySelector: (reason, retrySessionKey, excludedConfigs) => acquireProxyLease(retrySessionKey, excludedConfigs),
+                cpaStyleCompatibility,
             });
         }
 
@@ -2289,13 +2312,15 @@ function createHandler(proxyPath = '') {
 }
 
 function createCpaHandler() {
-    return createHandler('/cpa');
+    return createHandler('/cpa', {
+        cpaStyleCompatibility: true,
+    });
 }
 
-function handleCpaClaudeMessagesRequest(req, res) {
+function forwardCpaClaudeMessagesRequest(req, res) {
     const originalUrl = req.url;
     req.url = buildIncomingUrl(req, '/cpa');
-    void handleClaudeMessagesRequest(req, res).finally(() => {
+    void handleCpaClaudeMessagesRequest(req, res).finally(() => {
         req.url = originalUrl;
     }).catch(err => {
         reportBusinessRequestError(res, err, 'Claude Messages 请求处理失败');
@@ -2982,7 +3007,7 @@ app.post('/cpa/v1/messages', requireConfiguredApiKeys, (req, res) => {
     if (!accountManager.getActiveConfig()) {
         return createMissingConfigResponse(res);
     }
-    return handleCpaClaudeMessagesRequest(req, res);
+    return forwardCpaClaudeMessagesRequest(req, res);
 });
 app.use('/cpa/v1', requireConfiguredApiKeys, createCpaHandler());
 

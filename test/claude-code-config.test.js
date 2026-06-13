@@ -122,18 +122,10 @@ test('transformClaudeMessagesRequest force overrides client model and reasoning 
   assert.deepEqual(transformed.reasoning, {
     effort: 'high',
   });
-  assert.equal(Object.hasOwn(transformed, 'instructions'), false);
+  assert.equal(transformed.instructions, 'system instruction');
+  assert.equal(transformed.parallel_tool_calls, false);
+  assert.deepEqual(transformed.include, []);
   assert.deepEqual(transformed.input[0], {
-    type: 'message',
-    role: 'developer',
-    content: [
-      {
-        type: 'input_text',
-        text: 'system instruction',
-      },
-    ],
-  });
-  assert.deepEqual(transformed.input[1], {
     type: 'message',
     role: 'user',
     content: [
@@ -179,9 +171,10 @@ test('transformClaudeMessagesRequest uses CPA style system and parallel tool con
     model: 'gpt-5.5',
     stream: true,
     includeMaxOutputTokens: false,
+    cpaStyleCompatibility: true,
   });
 
-  assert.equal(Object.hasOwn(transformed, 'instructions'), false);
+  assert.equal(transformed.instructions, '');
   assert.equal(transformed.parallel_tool_calls, false);
   assert.deepEqual(transformed.include, ['reasoning.encrypted_content']);
   assert.deepEqual(transformed.input.slice(0, 3), [

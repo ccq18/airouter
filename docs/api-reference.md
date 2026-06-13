@@ -44,7 +44,7 @@ Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配�
 
 `apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
 
-`/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度、模型别名和兼容转换逻辑。
+`/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度和模型别名逻辑；仅该前缀会启用 CLIProxyAPI 风格的额外请求体规范化。
 
 如果上游 `apikey` 在最近 30 分钟内最多 10 个已完成真实请求中累计出现 3 次 401/403、429、5xx、请求失败或响应体中断，Airouter 会把该配置项临时标记为不可用，并尝试切到下一个可用配置。未达到阈值前，单次错误响应会继续按上游原响应返回给客户端。
 
@@ -119,7 +119,9 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 }
 ```
 
-当请求走 token/Codex 兼容链路时，Airouter 会按 CLIProxyAPI 风格做额外规范化：`instructions` 会转成 `input` 开头的 `developer` message，不会继续发送给上游；`input` 中的 `system` role 也会转成 `developer`。同时会移除当前 Codex 不支持的 `max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`truncation`、`context_management`、`user` 等字段，并把旧的 `web_search_preview` 工具名规范为 `web_search`。
+当普通 `/v1/responses` 请求走 token/Codex 兼容链路时，Airouter 会保留 Responses 请求形状，包含 `instructions`、`input` 中的 `system` role、`top_p`、`service_tier` 和工具名等字段；仅会移除历史兼容所需的 `max_output_tokens`、`temperature`，并在 token 模式下强制 `store: false`。
+
+当使用 `/cpa/v1/responses` 时，会额外启用 CLIProxyAPI 风格规范化：原始 `instructions` 会转成 `input` 开头的 `developer` message，同时保留空字符串 `instructions` 字段；`input` 中的 `system` role 也会转成 `developer`。同时会移除当前 CPA/Codex 链路不支持的 `max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`truncation`、`context_management`、`user` 等字段，并把旧的 `web_search_preview` 工具名规范为 `web_search`。
 
 如果配置了 `responses.model_aliases`，`model` 会按大小写不敏感规则替换。例如配置：
 
@@ -141,7 +143,7 @@ Claude Messages 兼容入口。请求体使用 JSON。
 
 当存在 `support` 包含 `claude` 的 `apikey` 配置项时，Airouter 会优先把请求原样转发给该 Claude Messages 上游。没有可用 Claude 上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 token 配置项；token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
 
-`/cpa/v1/messages` 是同一入口的 CLIProxyAPI 风格前缀别名，转换和调度行为与 `/v1/messages` 一致。
+`/cpa/v1/messages` 是同一入口的 CLIProxyAPI 风格前缀别名，调度行为与 `/v1/messages` 一致，但转换到 Responses 时会启用 CPA 风格请求体规范化。
 
 示例：
 
@@ -185,7 +187,9 @@ curl -sS http://localhost:3009/v1/messages \
 
 `/v1/messages` 的 Responses 转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 不再影响该链路。`claude_code.reasoning_effort` 只影响转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
 
-转换链路会按 CLIProxyAPI 风格把 Claude `system` 字段和 `messages[].role = "system"` 转成 Responses `input` 里的 `developer` message，并过滤 Claude Code 的 `x-anthropic-billing-header:` attribution 文本；不会向上游发送 Responses `instructions` 字段。
+普通 `/v1/messages` 的 Responses 转换链路会把 Claude `system` 字段放入 Responses `instructions`，`messages` 按原角色转换为 `input`，并保持 `parallel_tool_calls: false` 和 `include: []`。
+
+`/cpa/v1/messages` 的 Responses 转换链路会按 CLIProxyAPI 风格把 Claude `system` 字段和 `messages[].role = "system"` 转成 Responses `input` 里的 `developer` message，并过滤 Claude Code 的 `x-anthropic-billing-header:` attribution 文本；原始系统提示不会作为 Responses `instructions` 发送，只保留空字符串 `instructions` 字段。
 
 ## POST /v1/images/generations
 
@@ -342,7 +346,7 @@ curl -sS http://localhost:3009/v1/models \
 
 - token 配置项会走 Airouter 的 Codex 兼容链路；具体路径是否可用由当前账号对应的上游能力决定。
 - apikey 配置项会直连配置里的 `base_url`；具体路径是否可用由第三方上游决定。
-- 路径命中 `/responses` 时会应用 Responses 默认值、模型别名和 Codex/CPA 兼容规范化；其它路径一般保持请求体原样。
+- 路径命中 `/responses` 时会应用 Responses 默认值、模型别名和必要的 Codex 兼容规范化；只有 `/cpa/v1/*` 前缀会启用 CPA 风格转换。其它路径一般保持请求体原样。
 
 ## 状态码和错误格式
 

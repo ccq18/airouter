@@ -21,6 +21,13 @@ function normalizeClaudeContent(content) {
     return [];
 }
 
+function extractSystemInstructions(system) {
+    return normalizeClaudeContent(system)
+        .filter(block => block && block.type === 'text' && typeof block.text === 'string')
+        .map(block => block.text)
+        .join('\n\n');
+}
+
 function isClaudeCodeAttributionSystemText(text) {
     return typeof text === 'string' && text.trimStart().startsWith('x-anthropic-billing-header:');
 }
@@ -235,12 +242,13 @@ function mapTextBlockByRole(role, text) {
     };
 }
 
-function mapClaudeMessagesToResponsesInput(messages) {
+function mapClaudeMessagesToResponsesInput(messages, options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const input = [];
 
     for (const message of Array.isArray(messages) ? messages : []) {
         const blocks = normalizeClaudeContent(message.content);
-        const role = message.role === 'system' ? 'developer' : message.role;
+        const role = cpaStyleCompatibility && message.role === 'system' ? 'developer' : message.role;
         let currentMessage = {
             type: 'message',
             role,
@@ -307,21 +315,25 @@ function mapClaudeMessagesToResponsesInput(messages) {
 }
 
 function transformClaudeMessagesRequest(body, options = {}) {
-    const parallelToolCalls = body?.tool_choice && typeof body.tool_choice === 'object'
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
+    const parallelToolCalls = cpaStyleCompatibility && body?.tool_choice && typeof body.tool_choice === 'object'
         ? body.tool_choice.disable_parallel_tool_use !== true
-        : true;
+        : false;
     const responsesBody = {
         model: options.model || body.model,
-        input: [
-            ...mapClaudeSystemToResponsesInput(body.system),
-            ...mapClaudeMessagesToResponsesInput(body.messages)
-        ],
+        instructions: cpaStyleCompatibility ? '' : extractSystemInstructions(body.system),
+        input: cpaStyleCompatibility
+            ? [
+                ...mapClaudeSystemToResponsesInput(body.system),
+                ...mapClaudeMessagesToResponsesInput(body.messages, { cpaStyleCompatibility })
+            ]
+            : mapClaudeMessagesToResponsesInput(body.messages),
         tools: mapClaudeTools(body.tools),
         tool_choice: mapClaudeToolChoice(body.tool_choice),
         parallel_tool_calls: parallelToolCalls,
         store: false,
         stream: typeof options.stream === 'boolean' ? options.stream : body.stream === true,
-        include: ['reasoning.encrypted_content']
+        include: cpaStyleCompatibility ? ['reasoning.encrypted_content'] : []
     };
 
     if (typeof options.reasoningEffort === 'string' && options.reasoningEffort.length > 0) {
@@ -335,9 +347,7 @@ function transformClaudeMessagesRequest(body, options = {}) {
         responsesBody.max_output_tokens = body.max_tokens;
     }
 
-    const normalizedBody = normalizeResponsesRequestBody('/responses', responsesBody, options.responsesOptions);
-    delete normalizedBody.instructions;
-    return normalizedBody;
+    return normalizeResponsesRequestBody('/responses', responsesBody, options.responsesOptions);
 }
 
 function safeParseJson(text) {
