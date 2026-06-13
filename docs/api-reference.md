@@ -119,7 +119,7 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 }
 ```
 
-当普通 `/v1/responses` 请求走 token/Codex 兼容链路时，Airouter 会保留 Responses 请求形状，包含 `instructions`、`input` 中的 `system` role、`top_p`、`service_tier` 和工具名等字段；仅会移除历史兼容所需的 `max_output_tokens`、`temperature`，并在 token 模式下强制 `store: false`。如果 function tool 的 JSON Schema 嵌套字段缺少 `type`，会补齐为 Codex 可接受的 schema 形状。
+当普通 `/v1/responses` 请求走 token/Codex 兼容链路时，Airouter 会保留 Responses 请求形状，包含 `instructions`、`input` 中的 `system` role、`top_p`、`service_tier` 和工具名等字段；仅会移除历史兼容所需的 `max_output_tokens`、`temperature`，并在 token 模式下强制 `store: false`。function tool 的 JSON Schema 会被规范化为 Codex 可接受的 schema 形状，包括给嵌套字段补齐缺失的 `type`，并把 object schema 的 `additionalProperties` 固定为 `false`。
 
 当使用 `/cpa/v1/responses` 时，会额外启用 CLIProxyAPI 风格规范化：原始 `instructions` 会转成 `input` 开头的 `developer` message，同时保留空字符串 `instructions` 字段；`input` 中的 `system` role 也会转成 `developer`。同时会移除当前 CPA/Codex 链路不支持的 `max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`truncation`、`context_management`、`user` 等字段，并把旧的 `web_search_preview` 工具名规范为 `web_search`。
 

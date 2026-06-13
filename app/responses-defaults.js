@@ -192,10 +192,6 @@ function normalizeJsonSchemaForCodex(schema) {
     const isObjectSchema = normalized.type === 'object' || hasObjectProperties;
 
     if (isObjectSchema) {
-        if (!Object.prototype.hasOwnProperty.call(normalized, 'additionalProperties')) {
-            normalized.additionalProperties = false;
-        }
-
         if (hasObjectProperties) {
             normalized.properties = Object.fromEntries(
                 Object.entries(normalized.properties).map(([name, value]) => [name, normalizeJsonSchemaForCodex(value)])
@@ -206,6 +202,7 @@ function normalizeJsonSchemaForCodex(schema) {
 
         const propertyNames = Object.keys(normalized.properties);
         normalized.required = propertyNames;
+        normalized.additionalProperties = false;
     }
 
     if (normalized.additionalProperties && typeof normalized.additionalProperties === 'object') {

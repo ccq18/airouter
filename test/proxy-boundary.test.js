@@ -432,6 +432,86 @@ test('createClaudeMessagesHandler converts apikey configs without claude support
   assert.deepEqual(apiKeyResults[0].result, { ok: true });
 });
 
+test('createClaudeMessagesHandler normalizes MCP tool schemas for token-backed responses compatibility', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'token',
+      index: 0,
+      description: 'token config',
+      access_token: 'token-1',
+      account_id: 'account-1',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}',
+        '',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+      ].join('\n');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+  });
+
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+    tools: [
+      {
+        name: 'mcp__chrome-devtools__click',
+        description: 'Clicks on the provided element',
+        input_schema: {
+          type: 'object',
+          properties: {
+            uid: {
+              type: 'string',
+            },
+            options: {
+              type: 'object',
+              properties: {
+                button: {
+                  type: 'string',
+                },
+              },
+              additionalProperties: true,
+            },
+          },
+          required: ['uid'],
+          additionalProperties: true,
+        },
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 1);
+  assert.equal(upstreamRequests[0].targetUrl, 'https://chatgpt.com/backend-api/codex/responses?client_version=1.0.1');
+  assert.equal(upstreamRequests[0].headers.authorization, 'Bearer token-1');
+  assert.equal(upstreamRequests[0].headers['chatgpt-account-id'], 'account-1');
+  const upstreamBody = JSON.parse(upstreamRequests[0].body.toString('utf8'));
+  const clickParameters = upstreamBody.tools[0].parameters;
+  assert.equal(upstreamBody.tools[0].name, 'mcp__chrome-devtools__click');
+  assert.equal(clickParameters.additionalProperties, false);
+  assert.equal(clickParameters.properties.options.additionalProperties, false);
+});
+
 test('createClaudeMessagesHandler forwards apikey configs with claude support without responses conversion', async () => {
   const upstreamRequests = [];
   const apiKeyResults = [];
