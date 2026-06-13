@@ -250,6 +250,33 @@ test('normalizeResponsesRequestBody keeps non-CPA Codex compatibility scoped to 
   assert.equal(normalized.store, false);
 });
 
+test('normalizeResponsesRequestBody fills missing nested function tool schema types for Codex', () => {
+  const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    tools: [
+      {
+        type: 'function',
+        name: 'Workflow',
+        parameters: {
+          type: 'object',
+          properties: {
+            args: {
+              description: 'Workflow arguments',
+            },
+          },
+        },
+        strict: true,
+      },
+    ],
+  }, {
+    codexCompatibility: true,
+    forceStoreFalse: true,
+  });
+
+  assert.equal(normalized.tools[0].parameters.properties.args.type, 'object');
+});
+
 test('normalizeResponsesRequestBody preserves OpenAI Responses fields unless Codex compatibility is requested', () => {
   const normalized = normalizeResponsesRequestBody('/v1/responses', {
     model: 'gpt-5.5',

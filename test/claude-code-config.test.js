@@ -211,6 +211,38 @@ test('transformClaudeMessagesRequest uses CPA style system and parallel tool con
   ]);
 });
 
+test('transformClaudeMessagesRequest fills missing nested tool schema types', () => {
+  const transformed = transformClaudeMessagesRequest({
+    model: 'claude-sonnet-4',
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+    tools: [
+      {
+        name: 'Workflow',
+        description: 'Run a workflow',
+        input_schema: {
+          type: 'object',
+          properties: {
+            args: {
+              description: 'Workflow arguments',
+            },
+          },
+        },
+      },
+    ],
+  }, {
+    model: 'gpt-5.5',
+    stream: true,
+    includeMaxOutputTokens: false,
+  });
+
+  assert.equal(transformed.tools[0].parameters.properties.args.type, 'object');
+});
+
 test('createRuntimeConfigs defaults config items to token type', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify({
     configs: [

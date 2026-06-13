@@ -1,4 +1,5 @@
 const {
+    normalizeJsonSchemaForCodex,
     normalizeResponsesRequestBody
 } = require('./responses-defaults');
 
@@ -81,68 +82,6 @@ function mapClaudeToolChoice(toolChoice) {
     }
 
     return toolChoice;
-}
-
-function normalizeJsonSchemaForCodex(schema) {
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-        return schema;
-    }
-
-    if (Object.keys(schema).length === 0) {
-        return {
-            type: 'object',
-            properties: {},
-            required: [],
-            additionalProperties: false
-        };
-    }
-
-    const normalized = { ...schema };
-    delete normalized.propertyNames;
-    if (normalized.format === 'uri') {
-        delete normalized.format;
-    }
-    const hasObjectProperties = normalized.properties && typeof normalized.properties === 'object' && !Array.isArray(normalized.properties);
-    const isObjectSchema = normalized.type === 'object' || hasObjectProperties;
-
-    if (isObjectSchema) {
-        if (!Object.prototype.hasOwnProperty.call(normalized, 'additionalProperties')) {
-            normalized.additionalProperties = false;
-        }
-
-        if (hasObjectProperties) {
-            normalized.properties = Object.fromEntries(
-                Object.entries(normalized.properties).map(([name, value]) => [name, normalizeJsonSchemaForCodex(value)])
-            );
-        } else {
-            normalized.properties = {};
-        }
-
-        const propertyNames = Object.keys(normalized.properties);
-        normalized.required = propertyNames;
-    }
-
-    if (normalized.additionalProperties && typeof normalized.additionalProperties === 'object') {
-        normalized.additionalProperties = normalizeJsonSchemaForCodex(normalized.additionalProperties);
-    }
-
-    if (Array.isArray(normalized.anyOf)) {
-        normalized.anyOf = normalized.anyOf.map(normalizeJsonSchemaForCodex);
-    }
-
-    if (Array.isArray(normalized.oneOf)) {
-        normalized.oneOf = normalized.oneOf.map(normalizeJsonSchemaForCodex);
-    }
-
-    if (Array.isArray(normalized.allOf)) {
-        normalized.allOf = normalized.allOf.map(normalizeJsonSchemaForCodex);
-    }
-
-    if (normalized.items) {
-        normalized.items = normalizeJsonSchemaForCodex(normalized.items);
-    }
-
-    return normalized;
 }
 
 function mapClaudeTools(tools) {

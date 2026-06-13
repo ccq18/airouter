@@ -119,12 +119,165 @@ function normalizeCodexBuiltinTool(tool) {
     };
 }
 
-function normalizeCodexBuiltinTools(body) {
-    if (Array.isArray(body.tools)) {
-        body.tools = body.tools.map(normalizeCodexBuiltinTool);
+function inferJsonSchemaType(schema) {
+    if (schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)) {
+        return 'object';
     }
 
-    if (body.tool_choice && typeof body.tool_choice === 'object' && !Array.isArray(body.tool_choice)) {
+    if (schema.additionalProperties && typeof schema.additionalProperties === 'object' && !Array.isArray(schema.additionalProperties)) {
+        return 'object';
+    }
+
+    if (schema.items) {
+        return 'array';
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+        const primitiveTypes = new Set(schema.enum.map(value => {
+            if (value === null) {
+                return 'null';
+            }
+            if (Array.isArray(value)) {
+                return 'array';
+            }
+            return typeof value;
+        }));
+
+        if (primitiveTypes.size === 1) {
+            return [...primitiveTypes][0];
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(schema, 'const')) {
+        const value = schema.const;
+        if (value === null) {
+            return 'null';
+        }
+        if (Array.isArray(value)) {
+            return 'array';
+        }
+        return typeof value;
+    }
+
+    if (
+        Array.isArray(schema.anyOf) ||
+        Array.isArray(schema.oneOf) ||
+        Array.isArray(schema.allOf)
+    ) {
+        return '';
+    }
+
+    return 'object';
+}
+
+function normalizeJsonSchemaForCodex(schema) {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+        return schema;
+    }
+
+    const normalized = { ...schema };
+    delete normalized.propertyNames;
+    if (normalized.format === 'uri') {
+        delete normalized.format;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(normalized, 'type')) {
+        const inferredType = inferJsonSchemaType(normalized);
+        if (inferredType) {
+            normalized.type = inferredType;
+        }
+    }
+
+    const hasObjectProperties = normalized.properties && typeof normalized.properties === 'object' && !Array.isArray(normalized.properties);
+    const isObjectSchema = normalized.type === 'object' || hasObjectProperties;
+
+    if (isObjectSchema) {
+        if (!Object.prototype.hasOwnProperty.call(normalized, 'additionalProperties')) {
+            normalized.additionalProperties = false;
+        }
+
+        if (hasObjectProperties) {
+            normalized.properties = Object.fromEntries(
+                Object.entries(normalized.properties).map(([name, value]) => [name, normalizeJsonSchemaForCodex(value)])
+            );
+        } else {
+            normalized.properties = {};
+        }
+
+        const propertyNames = Object.keys(normalized.properties);
+        normalized.required = propertyNames;
+    }
+
+    if (normalized.additionalProperties && typeof normalized.additionalProperties === 'object') {
+        normalized.additionalProperties = normalizeJsonSchemaForCodex(normalized.additionalProperties);
+    }
+
+    if (Array.isArray(normalized.anyOf)) {
+        normalized.anyOf = normalized.anyOf.map(normalizeJsonSchemaForCodex);
+    }
+
+    if (Array.isArray(normalized.oneOf)) {
+        normalized.oneOf = normalized.oneOf.map(normalizeJsonSchemaForCodex);
+    }
+
+    if (Array.isArray(normalized.allOf)) {
+        normalized.allOf = normalized.allOf.map(normalizeJsonSchemaForCodex);
+    }
+
+    if (normalized.items) {
+        normalized.items = normalizeJsonSchemaForCodex(normalized.items);
+    }
+
+    return normalized;
+}
+
+function normalizeCodexFunctionToolSchema(tool) {
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) {
+        return tool;
+    }
+
+    if (tool.type === 'function' && tool.parameters && typeof tool.parameters === 'object' && !Array.isArray(tool.parameters)) {
+        return {
+            ...tool,
+            parameters: normalizeJsonSchemaForCodex(tool.parameters)
+        };
+    }
+
+    if (
+        tool.type === 'function' &&
+        tool.function &&
+        typeof tool.function === 'object' &&
+        !Array.isArray(tool.function) &&
+        tool.function.parameters &&
+        typeof tool.function.parameters === 'object' &&
+        !Array.isArray(tool.function.parameters)
+    ) {
+        return {
+            ...tool,
+            function: {
+                ...tool.function,
+                parameters: normalizeJsonSchemaForCodex(tool.function.parameters)
+            }
+        };
+    }
+
+    return tool;
+}
+
+function normalizeCodexTool(tool, options = {}) {
+    const normalizedTool = options.normalizeBuiltinAliases
+        ? normalizeCodexBuiltinTool(tool)
+        : tool;
+
+    return normalizeCodexFunctionToolSchema(normalizedTool);
+}
+
+function normalizeCodexTools(body, options = {}) {
+    if (Array.isArray(body.tools)) {
+        body.tools = body.tools.map(tool => normalizeCodexTool(tool, options));
+    }
+
+    if (options.normalizeBuiltinAliases && body.tool_choice && typeof body.tool_choice === 'object' && !Array.isArray(body.tool_choice)) {
         body.tool_choice = normalizeCodexBuiltinTool(body.tool_choice);
 
         if (Array.isArray(body.tool_choice.tools)) {
@@ -178,9 +331,9 @@ function normalizeCodexResponsesRequestBody(body, options = {}) {
         delete normalizedBody.service_tier;
     }
 
-    return cpaStyleCompatibility
-        ? normalizeCodexBuiltinTools(normalizedBody)
-        : normalizedBody;
+    return normalizeCodexTools(normalizedBody, {
+        normalizeBuiltinAliases: cpaStyleCompatibility
+    });
 }
 
 function normalizeResponsesRequestBody(requestPath, body, options = {}) {
@@ -210,6 +363,7 @@ module.exports = {
     CPA_UNSUPPORTED_RESPONSES_PARAMETERS,
     RESPONSES_DEFAULTS,
     normalizeCodexResponsesInput,
+    normalizeJsonSchemaForCodex,
     normalizeModelAlias,
     isResponsesPath,
     normalizeResponsesRequestBody
