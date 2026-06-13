@@ -60,8 +60,8 @@ npm run logs
 - `Base URL`：上游地址，通常写到 `/v1`，例如 `https://api.example.com/v1`。
 - `API Key`：上游服务提供的 key。
 - `支持类型`：
-  - `GPT`：支持 OpenAI 兼容接口。
-  - `Claude`：支持 Claude Messages 接口。
+  - `GPT`：支持 OpenAI 兼容接口，也可作为 `/v1/messages` 的 Responses 转换上游。
+  - `Claude`：支持 Claude Messages 原样转发接口。
 
 填完后点击 `新增配置项`。
 
@@ -139,9 +139,9 @@ token 账号不可用时，同一会话会自动漂移到其他可用 token 账�
 
 管理页会在“调度模式”和 token 账号摘要里显示安全的调度观测：正在请求时显示 `当前会话 #短hash -> 配置 #N`，请求结束后保留 `最近会话 #短hash`，用于观察某个会话实际命中了哪个账号。原始会话 ID 不会写入配置，也不会返回到页面。
 
-管理页也会在账号摘要中显示最近一次 `/v1/responses` 或 `/v1/messages` token 转换链路的模型观测，例如 `响应模型 gpt-5.4-mini · 请求 gpt-5.5`，方便判断上游实际返回的模型是否符合预期。
+管理页也会在账号摘要中显示最近一次 `/v1/responses` 或 `/v1/messages` 转换链路的模型观测，例如 `响应模型 gpt-5.4-mini · 请求 gpt-5.5`，方便判断上游实际返回的模型是否符合预期。
 
-`/v1/messages` 会优先使用支持 `Claude` 的 API Key；没有可用 Claude 上游时，再走兼容转换。
+`/v1/messages` 会优先使用支持 `Claude` 的 API Key 原样转发；没有可用 Claude 上游时，先使用 token 做兼容转换，token 不可用时可使用支持 `GPT` 的 API Key 做同样的 Responses 转换。
 
 ## 端口说明
 

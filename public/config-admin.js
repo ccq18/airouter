@@ -297,7 +297,7 @@
         },
         {
           title: 'API Key 模式',
-          description: '直接用输入框填写 Base URL、API Key 和备注，再勾选这个上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务通常选 GPT；原样转发 Claude Messages API 时选 Claude。',
+          description: '直接用输入框填写 Base URL、API Key 和备注，再勾选这个上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务通常选 GPT；需要原样转发 Claude Messages API 时再选 Claude。',
         },
       ],
       rawJsonPlaceholder: JSON.stringify({

@@ -39,7 +39,7 @@ Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配�
 
 `token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和部分账号切换逻辑。
 
-`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
+`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
 
 如果上游 `apikey` 在最近 30 分钟内最多 10 个已完成真实请求中累计出现 3 次 401/403、429、5xx、请求失败或响应体中断，Airouter 会把该配置项临时标记为不可用，并尝试切到下一个可用配置。未达到阈值前，单次错误响应会继续按上游原响应返回给客户端。
 
@@ -132,7 +132,7 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 
 Claude Messages 兼容入口。请求体使用 JSON。
 
-当存在 `support` 包含 `claude` 的 `apikey` 配置项时，Airouter 会优先把请求原样转发给该 Claude Messages 上游。没有可用 Claude 上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求。
+当存在 `support` 包含 `claude` 的 `apikey` 配置项时，Airouter 会优先把请求原样转发给该 Claude Messages 上游。没有可用 Claude 上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 token 配置项；token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
 
 示例：
 
@@ -164,7 +164,7 @@ curl -sS http://localhost:3009/v1/messages \
 | `tool_choice` | string 或 object | 可选，工具选择策略 |
 | `stream` | boolean | 可选，是否流式返回 |
 
-token 转换链路受配置项影响：
+转换链路受配置项影响：
 
 ```json
 {
@@ -175,7 +175,7 @@ token 转换链路受配置项影响：
 }
 ```
 
-`claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 token 转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
+`claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 Responses 转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
 
 ## POST /v1/images/generations
 

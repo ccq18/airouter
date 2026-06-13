@@ -757,6 +757,7 @@ function createClaudeMessagesRequestHandler() {
         getConfig: (req, context = {}) => {
             const sessionKey = normalizeSessionKey(context.sessionKey);
             const isClaudeApiKeyConfig = item => configSupportsCapability(item, 'claude');
+            const isGptApiKeyConfig = item => configSupportsCapability(item, 'gpt');
             const currentClaudeApiKeyConfig = accountManager.getActiveConfig(isClaudeApiKeyConfig);
             if (currentClaudeApiKeyConfig && isRuntimeConfigAvailable(currentClaudeApiKeyConfig)) {
                 return createStaticConfigLease(currentClaudeApiKeyConfig, sessionKey);
@@ -771,11 +772,21 @@ function createClaudeMessagesRequestHandler() {
                 sessionKey,
             });
 
-            if (!config) {
-                throw new Error(`当前没有可用 support 包含 claude 的 apikey 或 token 配置，请先访问 ${buildAdminPath()} 添加账号`);
+            if (config) {
+                return config;
             }
 
-            return config;
+            const currentGptApiKeyConfig = accountManager.getActiveConfig(isGptApiKeyConfig);
+            if (currentGptApiKeyConfig && isRuntimeConfigAvailable(currentGptApiKeyConfig)) {
+                return createStaticConfigLease(currentGptApiKeyConfig, sessionKey);
+            }
+
+            const nextGptApiKeyConfig = accountManager.ensureActiveConfig('claude_request', isGptApiKeyConfig);
+            if (nextGptApiKeyConfig && isRuntimeConfigAvailable(nextGptApiKeyConfig)) {
+                return createStaticConfigLease(nextGptApiKeyConfig, sessionKey);
+            }
+
+            throw new Error(`当前没有可用 support 包含 claude 的 apikey、token 或 support 包含 gpt 的 apikey 配置，请先访问 ${buildAdminPath()} 添加账号`);
         },
         accessLogEnabled: ACCESS_LOG_ENABLED,
         log,
@@ -3016,7 +3027,7 @@ async function startServer() {
             log('');
             log('路由规则:');
             log('  - token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
-            log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
+            log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token 或 support 包含 gpt 的 apikey 走 Responses 转换');
             log('  - /v1/images/generations 与 /v1/images/edits -> token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON');
             log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');

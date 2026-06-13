@@ -24,15 +24,42 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 function resolveResponsesApiPath(config) {
-    if (config.apiPath) {
+    if (config && config.type === 'apikey') {
+        return 'responses';
+    }
+
+    if (config && config.apiPath) {
         return config.apiPath;
     }
 
-    if (config.apiBasePath) {
+    if (config && config.apiBasePath) {
         return `${config.apiBasePath.replace(/\/+$/, '')}/responses`;
     }
 
     return DEFAULT_RESPONSES_API_PATH;
+}
+
+function resolveResponsesTarget(config, clientVersion) {
+    const responsesApiPath = resolveResponsesApiPath(config);
+    const pathWithClientVersion = `${responsesApiPath}?client_version=${encodeURIComponent(clientVersion)}`;
+    const baseUrl = config && typeof config.baseUrl === 'string'
+        ? config.baseUrl
+        : '';
+
+    if (config && config.type === 'apikey') {
+        const normalizedBaseUrl = `${baseUrl.replace(/\/+$/, '')}/`;
+        const targetUrlObject = new URL(pathWithClientVersion, normalizedBaseUrl);
+        return {
+            targetUrl: targetUrlObject.toString(),
+            rewrittenUrl: `${targetUrlObject.pathname}${targetUrlObject.search}`
+        };
+    }
+
+    const targetUrlObject = new URL(pathWithClientVersion, baseUrl);
+    return {
+        targetUrl: targetUrlObject.toString(),
+        rewrittenUrl: `${targetUrlObject.pathname}${targetUrlObject.search}`
+    };
 }
 
 function configSupportsClaudeMessages(config) {
@@ -83,12 +110,17 @@ function buildIncomingUrl(req, proxyPath = '') {
 
 function buildUpstreamHeaders(reqHeaders, config, contentLength, isStream, clientVersion) {
     const headers = {
-        authorization: `Bearer ${config.access_token}`,
-        'chatgpt-account-id': config.account_id,
         'content-type': 'application/json',
-        accept: isStream ? 'text/event-stream' : 'application/json',
-        version: clientVersion
+        accept: isStream ? 'text/event-stream' : 'application/json'
     };
+
+    if (config.type === 'apikey') {
+        headers.authorization = `Bearer ${config.apiKey}`;
+    } else {
+        headers.authorization = `Bearer ${config.access_token}`;
+        headers['chatgpt-account-id'] = config.account_id;
+        headers.version = clientVersion;
+    }
 
     if (reqHeaders['accept-language']) {
         headers['accept-language'] = reqHeaders['accept-language'];
@@ -671,16 +703,6 @@ function createClaudeMessagesHandler({
             });
         }
 
-        if (config.type === 'apikey' && !configSupportsClaudeMessages(config)) {
-            if (typeof configSelection.release === 'function') {
-                configSelection.release();
-            }
-            return sendJsonError(res, 400, {
-                error: 'Unsupported Mode',
-                message: '/v1/messages 仅支持 token 或 support 包含 claude 的 apikey 配置项，当前 apikey 配置项请改用 /v1/responses 或添加 support:["claude"]'
-            });
-        }
-
         try {
             if (configSupportsClaudeMessages(config)) {
                 forwardClaudeApiKeyMessagesRequest({
@@ -787,7 +809,7 @@ function createClaudeMessagesHandler({
         function startUpstreamAttempt(activeSelection, failoverAttempt = 0) {
             const normalizedSelection = setCurrentConfigSelection(activeSelection);
             const activeConfig = normalizedSelection.config;
-            const attemptResponsesApiPath = resolveResponsesApiPath(activeConfig);
+            const attemptTarget = resolveResponsesTarget(activeConfig, clientVersion);
             const upstreamHeaders = buildUpstreamHeaders(req.headers, activeConfig, upstreamBody.length, true, clientVersion);
             observeActiveResponseModel(activeConfig, {
                 active: true
@@ -797,7 +819,7 @@ function createClaudeMessagesHandler({
                 logRequestSnapshot({
                     method: req.method,
                     originalUrl: incomingUrl,
-                    rewrittenUrl: attemptResponsesApiPath,
+                    rewrittenUrl: attemptTarget.rewrittenUrl,
                     config: {
                         index: activeConfig.index,
                         description: `#${activeConfig.index + 1} ${activeConfig.description}`,
@@ -811,10 +833,9 @@ function createClaudeMessagesHandler({
             const sessionId = createSessionId();
             upstreamHeaders.session_id = sessionId;
             upstreamHeaders['x-client-request-id'] = sessionId;
-            const targetUrl = new URL(`${attemptResponsesApiPath}?client_version=${encodeURIComponent(clientVersion)}`, activeConfig.baseUrl).toString();
             const upstream = createUpstreamRequestImpl({
                 method: 'POST',
-                targetUrl,
+                targetUrl: attemptTarget.targetUrl,
                 headers: upstreamHeaders,
                 body: upstreamBody,
                 timeoutMs: upstreamRequestTimeoutMs
@@ -827,6 +848,20 @@ function createClaudeMessagesHandler({
             const responseBodyChunks = [];
             let upstreamMeta = null;
             let retryClassification = null;
+            let convertedApiKeyResultRecorded = false;
+
+            function observeConvertedApiKeyResult(result) {
+                if (
+                    convertedApiKeyResultRecorded ||
+                    activeConfig.type !== 'apikey' ||
+                    typeof observeApiKeyRequestResult !== 'function'
+                ) {
+                    return null;
+                }
+
+                convertedApiKeyResultRecorded = true;
+                return observeApiKeyRequestResult(activeConfig, result);
+            }
 
             function ensureClientStreamHeaders() {
                 if (!isClientStream || streamInitialized) {
@@ -911,6 +946,7 @@ function createClaudeMessagesHandler({
                         }
 
                         if (isClientStream) {
+                            observeConvertedApiKeyResult({ ok: true });
                             releaseCurrentConfigSelection();
                             if (!res.writableEnded) {
                                 res.end();
@@ -928,6 +964,7 @@ function createClaudeMessagesHandler({
                             return;
                         }
 
+                        observeConvertedApiKeyResult({ ok: true });
                         releaseCurrentConfigSelection();
                         res.status(upstreamMeta.statusCode).json(mappedResponse);
                         return;
@@ -958,6 +995,12 @@ function createClaudeMessagesHandler({
 
                     error(`代理请求失败: ${err.message}`);
                     const statusCode = getGatewayStatusCode(err);
+                    observeConvertedApiKeyResult({
+                        ok: false,
+                        reason: 'apikey_upstream_error',
+                        lastError: err.message,
+                        switchReason: 'apikey_upstream_failover'
+                    });
                     releaseCurrentConfigSelection();
                     sendJsonError(res, statusCode, {
                         error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
@@ -972,6 +1015,12 @@ function createClaudeMessagesHandler({
                 const message = err.message || 'upstream request failed';
                 error(`代理请求失败: ${message}`);
                 const statusCode = getGatewayStatusCode(err);
+                observeConvertedApiKeyResult({
+                    ok: false,
+                    reason: 'apikey_upstream_error',
+                    lastError: message,
+                    switchReason: 'apikey_upstream_failover'
+                });
                 releaseCurrentConfigSelection();
                 sendJsonError(res, statusCode, {
                     error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',

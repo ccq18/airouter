@@ -68,14 +68,14 @@
 - `disabled_configs` 是停用配置列表。管理页点“停用”会把配置从 `configs` 移到这里；停用配置对服务不可见，后续请求不会读取它。管理页点“启用”会把它移回 `configs`
 - `disabled_configs[]` 中的配置项会额外记录 `disabled_status` 文本字段，用来保存停用瞬间的运行态摘要，例如 `可用=否 | 额度=99% | ...`；启用回 `configs[]` 时会移除该字段
 - 管理页“删除”仍是永久删除；停用不是删除，只是从服务可见列表中移出
-- `claude_code.model` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时上游实际使用的模型
-- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
-- 以上 `claude_code` 配置只作用于 `/v1/messages` 的 token 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
+- `claude_code.model` 用来强制覆盖 Claude Code 走 `/v1/messages` Responses 兼容转换链路时上游实际使用的模型
+- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` Responses 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
+- 以上 `claude_code` 配置只作用于 `/v1/messages` 的 Responses 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
 - `responses.model_aliases` 用来给 `/v1/responses` 请求里的 `model` 做别名替换，键和值都必须是非空字符串
 - `responses.model_aliases` 的键比较时忽略大小写，例如配置 `GPT-5.2` 也会匹配请求里的 `gpt-5.2`
 - 默认示例配置里包含 `gpt-5.2 -> gpt-5.5`
 - 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
-- `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时使用 `token` 配置项走 responses 兼容转换
+- `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
 - 每分钟额度轮询会检查所有 `token` 配置项
 - `apikey` 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，401/403、429、5xx、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换
 - 每 10 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.5`，可通过该配置项的 `health.model` 覆盖
@@ -144,7 +144,7 @@
 - `support`
   - 可选，字符串数组，只支持 `gpt` 和 `claude`
   - 不填写时默认是 `["gpt"]`
-  - 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，包括 `/v1/responses`
+  - 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，包括 `/v1/responses`，也可作为 `/v1/messages` 的 Responses 转换上游
   - 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路
 - `health`
   - 可选对象，目前只支持 `model`

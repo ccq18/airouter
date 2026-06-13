@@ -301,19 +301,44 @@ test('generic apikey proxy records success only after the upstream response body
   assert.equal(source.includes('accountManager.recordApiKeyRequestResult(config, { ok: true })'), false);
 });
 
-test('createClaudeMessagesHandler rejects apikey configs with a clear error before contacting upstream', async () => {
-  let upstreamCalled = false;
+test('createClaudeMessagesHandler converts apikey configs without claude support through responses compatibility', async () => {
+  const upstreamRequests = [];
+  const apiKeyResults = [];
   const handler = createClaudeMessagesHandler({
     getConfig: () => ({
       type: 'apikey',
       index: 0,
-      description: 'APIKey config',
+      description: 'OpenAI compatible config',
       apiKey: 'upstream-api-key',
-      baseUrl: 'https://example.com',
+      baseUrl: 'https://api.example.com/v1',
+      support: ['gpt'],
     }),
-    createUpstreamRequest: () => {
-      upstreamCalled = true;
-      throw new Error('should not be called');
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}',
+        '',
+        'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+        '',
+        'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+        '',
+        'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"hello"}',
+        '',
+        'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+        '',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+      ].join('\n');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+    observeApiKeyRequestResult: (config, result) => {
+      apiKeyResults.push({ config, result });
     },
   });
 
@@ -329,14 +354,37 @@ test('createClaudeMessagesHandler rejects apikey configs with a clear error befo
       },
     ],
   }), res);
+  await new Promise(resolve => setImmediate(resolve));
 
-  assert.equal(upstreamCalled, false);
-  assert.equal(res.statusCode, 400);
-  assert.match(res.payload.error, /Unsupported Mode/);
-  assert.match(res.payload.message, /\/v1\/messages/);
-  assert.doesNotMatch(res.payload.message, /\/claude\/v1\/messages/);
-  assert.match(res.payload.message, /apikey/);
-  assert.match(res.payload.message, /token/);
+  assert.equal(upstreamRequests.length, 1);
+  assert.equal(upstreamRequests[0].targetUrl, 'https://api.example.com/v1/responses?client_version=0.0.1');
+  assert.equal(upstreamRequests[0].headers.authorization, 'Bearer upstream-api-key');
+  assert.equal(upstreamRequests[0].headers['chatgpt-account-id'], undefined);
+  assert.equal(upstreamRequests[0].headers.accept, 'text/event-stream');
+  const upstreamBody = JSON.parse(upstreamRequests[0].body.toString('utf8'));
+  assert.equal(upstreamBody.model, 'gpt-5.4');
+  assert.deepEqual(upstreamBody.input, [
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'hello',
+        },
+      ],
+    },
+  ]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'hello',
+    },
+  ]);
+  assert.equal(apiKeyResults.length, 1);
+  assert.equal(apiKeyResults[0].config.description, 'OpenAI compatible config');
+  assert.deepEqual(apiKeyResults[0].result, { ok: true });
 });
 
 test('createClaudeMessagesHandler forwards apikey configs with claude support without responses conversion', async () => {
