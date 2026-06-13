@@ -260,11 +260,24 @@ test('createResponseModelObserver extracts response models from SSE and JSON bod
   assert.deepEqual(observed, ['gpt-5.4-mini', 'gpt-5.5']);
 });
 
-test('server registers Claude messages compatibility on /v1/messages only', () => {
+test('server registers Claude messages compatibility on /v1/messages and CPA prefix only', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
 
   assert.match(source, /app\.post\('\/v1\/messages'/);
+  assert.match(source, /app\.post\('\/cpa\/v1\/messages'/);
   assert.doesNotMatch(source, /app\.post\('\/claude\/v1\/messages'/);
+});
+
+test('server registers CPA prefix before the generic v1 proxy', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const cpaMessagesRouteIndex = source.indexOf("app.post('/cpa/v1/messages'");
+  const cpaProxyIndex = source.indexOf("app.use('/cpa/v1', requireConfiguredApiKeys, createCpaHandler())");
+  const genericProxyIndex = source.indexOf("app.use('/v1', requireConfiguredApiKeys, createHandler())");
+
+  assert.ok(cpaMessagesRouteIndex >= 0, 'CPA messages route should be registered');
+  assert.ok(cpaProxyIndex >= 0, 'CPA generic proxy should be registered');
+  assert.ok(cpaMessagesRouteIndex < cpaProxyIndex, 'CPA messages route should run before CPA generic proxy');
+  assert.ok(cpaProxyIndex < genericProxyIndex, 'CPA generic proxy should run before generic v1 proxy');
 });
 
 test('server registers token image compatibility before the generic v1 proxy', () => {

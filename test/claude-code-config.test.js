@@ -122,7 +122,100 @@ test('transformClaudeMessagesRequest force overrides client model and reasoning 
   assert.deepEqual(transformed.reasoning, {
     effort: 'high',
   });
-  assert.equal(transformed.instructions, 'system instruction');
+  assert.equal(Object.hasOwn(transformed, 'instructions'), false);
+  assert.deepEqual(transformed.input[0], {
+    type: 'message',
+    role: 'developer',
+    content: [
+      {
+        type: 'input_text',
+        text: 'system instruction',
+      },
+    ],
+  });
+  assert.deepEqual(transformed.input[1], {
+    type: 'message',
+    role: 'user',
+    content: [
+      {
+        type: 'input_text',
+        text: 'hello',
+      },
+    ],
+  });
+});
+
+test('transformClaudeMessagesRequest uses CPA style system and parallel tool conversion', () => {
+  const requestBody = {
+    model: 'claude-sonnet-4',
+    system: [
+      {
+        type: 'text',
+        text: 'x-anthropic-billing-header: tenant-123',
+      },
+      {
+        type: 'text',
+        text: 'project instruction',
+      },
+    ],
+    tool_choice: {
+      type: 'auto',
+      disable_parallel_tool_use: true,
+    },
+    messages: [
+      {
+        role: 'system',
+        content: 'message system instruction',
+      },
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+    stream: true,
+  };
+
+  const transformed = transformClaudeMessagesRequest(requestBody, {
+    model: 'gpt-5.5',
+    stream: true,
+    includeMaxOutputTokens: false,
+  });
+
+  assert.equal(Object.hasOwn(transformed, 'instructions'), false);
+  assert.equal(transformed.parallel_tool_calls, false);
+  assert.deepEqual(transformed.include, ['reasoning.encrypted_content']);
+  assert.deepEqual(transformed.input.slice(0, 3), [
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: 'project instruction',
+        },
+      ],
+    },
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: 'message system instruction',
+        },
+      ],
+    },
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'hello',
+        },
+      ],
+    },
+  ]);
 });
 
 test('createRuntimeConfigs defaults config items to token type', () => {

@@ -2288,6 +2288,20 @@ function createHandler(proxyPath = '') {
     };
 }
 
+function createCpaHandler() {
+    return createHandler('/cpa');
+}
+
+function handleCpaClaudeMessagesRequest(req, res) {
+    const originalUrl = req.url;
+    req.url = buildIncomingUrl(req, '/cpa');
+    void handleClaudeMessagesRequest(req, res).finally(() => {
+        req.url = originalUrl;
+    }).catch(err => {
+        reportBusinessRequestError(res, err, 'Claude Messages 请求处理失败');
+    });
+}
+
 function readBufferedRequestBody(req, limitBytes = 1024 * 1024) {
     return new Promise((resolve, reject) => {
         const chunks = [];
@@ -2962,6 +2976,15 @@ app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
 
 app.post('/v1/images/generations', requireConfiguredApiKeys, createImageGenerationsHandler());
 app.post('/v1/images/edits', requireConfiguredApiKeys, createImageEditsHandler());
+
+// CLIProxyAPI 风格前缀入口
+app.post('/cpa/v1/messages', requireConfiguredApiKeys, (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
+    return handleCpaClaudeMessagesRequest(req, res);
+});
+app.use('/cpa/v1', requireConfiguredApiKeys, createCpaHandler());
 
 // 兼容 OpenAI 风格接口
 app.use('/v1', requireConfiguredApiKeys, createHandler());

@@ -29,9 +29,12 @@ x-api-key: sk-airouter-xxxx
 | `GET` | `/health` | 查看本地服务和当前账号状态 |
 | `POST` | `/v1/responses` | OpenAI Responses 兼容接口 |
 | `POST` | `/v1/messages` | Claude Messages 兼容接口 |
+| `POST` | `/cpa/v1/responses` | CLIProxyAPI 风格前缀下的 Responses 兼容入口 |
+| `POST` | `/cpa/v1/messages` | CLIProxyAPI 风格前缀下的 Claude Messages 兼容入口 |
 | `POST` | `/v1/images/generations` | OpenAI Images 图片生成兼容接口 |
 | `POST` | `/v1/images/edits` | OpenAI Images 图片编辑兼容接口 |
 | 任意 | `/v1/*` | 其它 OpenAI `/v1` 兼容接口透传 |
+| 任意 | `/cpa/v1/*` | 剥离 `/cpa` 前缀后复用 `/v1/*` 兼容链路 |
 
 ## 通用转发规则
 
@@ -40,6 +43,8 @@ Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配�
 `token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和部分账号切换逻辑。
 
 `apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
+
+`/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度、模型别名和兼容转换逻辑。
 
 如果上游 `apikey` 在最近 30 分钟内最多 10 个已完成真实请求中累计出现 3 次 401/403、429、5xx、请求失败或响应体中断，Airouter 会把该配置项临时标记为不可用，并尝试切到下一个可用配置。未达到阈值前，单次错误响应会继续按上游原响应返回给客户端。
 
@@ -114,6 +119,8 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 }
 ```
 
+当请求走 token/Codex 兼容链路时，Airouter 会按 CLIProxyAPI 风格做额外规范化：`instructions` 会转成 `input` 开头的 `developer` message，不会继续发送给上游；`input` 中的 `system` role 也会转成 `developer`。同时会移除当前 Codex 不支持的 `max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`truncation`、`context_management`、`user` 等字段，并把旧的 `web_search_preview` 工具名规范为 `web_search`。
+
 如果配置了 `responses.model_aliases`，`model` 会按大小写不敏感规则替换。例如配置：
 
 ```json
@@ -133,6 +140,8 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 Claude Messages 兼容入口。请求体使用 JSON。
 
 当存在 `support` 包含 `claude` 的 `apikey` 配置项时，Airouter 会优先把请求原样转发给该 Claude Messages 上游。没有可用 Claude 上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 token 配置项；token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
+
+`/cpa/v1/messages` 是同一入口的 CLIProxyAPI 风格前缀别名，转换和调度行为与 `/v1/messages` 一致。
 
 示例：
 
@@ -175,6 +184,8 @@ curl -sS http://localhost:3009/v1/messages \
 ```
 
 `/v1/messages` 的 Responses 转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 不再影响该链路。`claude_code.reasoning_effort` 只影响转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
+
+转换链路会按 CLIProxyAPI 风格把 Claude `system` 字段和 `messages[].role = "system"` 转成 Responses `input` 里的 `developer` message，并过滤 Claude Code 的 `x-anthropic-billing-header:` attribution 文本；不会向上游发送 Responses `instructions` 字段。
 
 ## POST /v1/images/generations
 
@@ -331,7 +342,7 @@ curl -sS http://localhost:3009/v1/models \
 
 - token 配置项会走 Airouter 的 Codex 兼容链路；具体路径是否可用由当前账号对应的上游能力决定。
 - apikey 配置项会直连配置里的 `base_url`；具体路径是否可用由第三方上游决定。
-- 路径命中 `/responses` 时会应用 Responses 默认值和模型别名；其它路径一般保持请求体原样。
+- 路径命中 `/responses` 时会应用 Responses 默认值、模型别名和 Codex/CPA 兼容规范化；其它路径一般保持请求体原样。
 
 ## 状态码和错误格式
 

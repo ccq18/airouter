@@ -21,11 +21,28 @@ function normalizeClaudeContent(content) {
     return [];
 }
 
-function extractSystemInstructions(system) {
-    return normalizeClaudeContent(system)
+function isClaudeCodeAttributionSystemText(text) {
+    return typeof text === 'string' && text.trimStart().startsWith('x-anthropic-billing-header:');
+}
+
+function mapClaudeSystemToResponsesInput(system) {
+    const content = normalizeClaudeContent(system)
         .filter(block => block && block.type === 'text' && typeof block.text === 'string')
-        .map(block => block.text)
-        .join('\n\n');
+        .filter(block => block.text.length > 0 && !isClaudeCodeAttributionSystemText(block.text))
+        .map(block => ({
+            type: 'input_text',
+            text: block.text
+        }));
+
+    if (content.length === 0) {
+        return [];
+    }
+
+    return [{
+        type: 'message',
+        role: 'developer',
+        content
+    }];
 }
 
 function mapClaudeToolChoice(toolChoice) {
@@ -223,9 +240,10 @@ function mapClaudeMessagesToResponsesInput(messages) {
 
     for (const message of Array.isArray(messages) ? messages : []) {
         const blocks = normalizeClaudeContent(message.content);
+        const role = message.role === 'system' ? 'developer' : message.role;
         let currentMessage = {
             type: 'message',
-            role: message.role,
+            role,
             content: []
         };
 
@@ -235,7 +253,7 @@ function mapClaudeMessagesToResponsesInput(messages) {
             }
 
             if (block.type === 'text' && typeof block.text === 'string') {
-                currentMessage.content.push(mapTextBlockByRole(message.role, block.text));
+                currentMessage.content.push(mapTextBlockByRole(role, block.text));
                 continue;
             }
 
@@ -255,7 +273,7 @@ function mapClaudeMessagesToResponsesInput(messages) {
                 pushCurrentMessageInput(input, currentMessage);
                 currentMessage = {
                     type: 'message',
-                    role: message.role,
+                    role,
                     content: []
                 };
                 input.push({
@@ -271,7 +289,7 @@ function mapClaudeMessagesToResponsesInput(messages) {
                 pushCurrentMessageInput(input, currentMessage);
                 currentMessage = {
                     type: 'message',
-                    role: message.role,
+                    role,
                     content: []
                 };
                 input.push({
@@ -289,16 +307,21 @@ function mapClaudeMessagesToResponsesInput(messages) {
 }
 
 function transformClaudeMessagesRequest(body, options = {}) {
+    const parallelToolCalls = body?.tool_choice && typeof body.tool_choice === 'object'
+        ? body.tool_choice.disable_parallel_tool_use !== true
+        : true;
     const responsesBody = {
         model: options.model || body.model,
-        instructions: extractSystemInstructions(body.system),
-        input: mapClaudeMessagesToResponsesInput(body.messages),
+        input: [
+            ...mapClaudeSystemToResponsesInput(body.system),
+            ...mapClaudeMessagesToResponsesInput(body.messages)
+        ],
         tools: mapClaudeTools(body.tools),
         tool_choice: mapClaudeToolChoice(body.tool_choice),
-        parallel_tool_calls: false,
+        parallel_tool_calls: parallelToolCalls,
         store: false,
         stream: typeof options.stream === 'boolean' ? options.stream : body.stream === true,
-        include: []
+        include: ['reasoning.encrypted_content']
     };
 
     if (typeof options.reasoningEffort === 'string' && options.reasoningEffort.length > 0) {
@@ -312,7 +335,9 @@ function transformClaudeMessagesRequest(body, options = {}) {
         responsesBody.max_output_tokens = body.max_tokens;
     }
 
-    return normalizeResponsesRequestBody('/responses', responsesBody, options.responsesOptions);
+    const normalizedBody = normalizeResponsesRequestBody('/responses', responsesBody, options.responsesOptions);
+    delete normalizedBody.instructions;
+    return normalizedBody;
 }
 
 function safeParseJson(text) {

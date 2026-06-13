@@ -54,9 +54,39 @@ test('normalizeResponsesRequestBody forces store false when the upstream require
 test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex upstream compatibility', () => {
   const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
     model: 'gpt-5.5',
-    input: 'hello',
+    instructions: 'follow project rules',
+    input: [
+      {
+        type: 'message',
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text: 'answer in project style',
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'hello',
+          },
+        ],
+      },
+    ],
     max_output_tokens: 128,
+    max_completion_tokens: 256,
     temperature: 0,
+    top_p: 0.8,
+    truncation: 'auto',
+    context_management: {
+      compaction: true,
+    },
+    user: 'local-user',
+    service_tier: 'default',
     store: true,
   }, {
     codexCompatibility: true,
@@ -64,6 +94,26 @@ test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex ups
   });
 
   assert.deepEqual(normalized.input, [
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: 'follow project rules',
+        },
+      ],
+    },
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: 'answer in project style',
+        },
+      ],
+    },
     {
       type: 'message',
       role: 'user',
@@ -76,8 +126,50 @@ test('normalizeResponsesRequestBody adapts OpenAI Responses fields for Codex ups
     },
   ]);
   assert.equal(normalized.store, false);
+  assert.equal(Object.hasOwn(normalized, 'instructions'), false);
   assert.equal(Object.hasOwn(normalized, 'max_output_tokens'), false);
+  assert.equal(Object.hasOwn(normalized, 'max_completion_tokens'), false);
   assert.equal(Object.hasOwn(normalized, 'temperature'), false);
+  assert.equal(Object.hasOwn(normalized, 'top_p'), false);
+  assert.equal(Object.hasOwn(normalized, 'truncation'), false);
+  assert.equal(Object.hasOwn(normalized, 'context_management'), false);
+  assert.equal(Object.hasOwn(normalized, 'user'), false);
+  assert.equal(Object.hasOwn(normalized, 'service_tier'), false);
+  assert.equal(normalized.stream, true);
+  assert.equal(normalized.parallel_tool_calls, true);
+  assert.deepEqual(normalized.include, ['reasoning.encrypted_content']);
+});
+
+test('normalizeResponsesRequestBody preserves Codex priority service tier', () => {
+  const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    service_tier: 'priority',
+  }, {
+    codexCompatibility: true,
+  });
+
+  assert.equal(normalized.service_tier, 'priority');
+});
+
+test('normalizeResponsesRequestBody normalizes Codex builtin tool aliases', () => {
+  const normalized = normalizeResponsesRequestBody('/backend-api/codex/responses', {
+    model: 'gpt-5.5',
+    input: 'hello',
+    tools: [
+      {
+        type: 'web_search_preview',
+      },
+    ],
+    tool_choice: {
+      type: 'web_search_preview_2025_03_11',
+    },
+  }, {
+    codexCompatibility: true,
+  });
+
+  assert.equal(normalized.tools[0].type, 'web_search');
+  assert.equal(normalized.tool_choice.type, 'web_search');
 });
 
 test('normalizeResponsesRequestBody preserves OpenAI Responses fields unless Codex compatibility is requested', () => {
