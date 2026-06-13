@@ -156,7 +156,7 @@ curl -sS http://localhost:3009/v1/messages \
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `model` | string | Claude Messages 模型名。原样转发时由上游决定；转换链路中可被 `claude_code.model` 覆盖 |
+| `model` | string | Claude Messages 模型名。原样转发时由上游决定；转换链路固定请求 `gpt-5.5` |
 | `max_tokens` | number | 最大输出 token。转换链路当前不向 Responses 传递该字段 |
 | `system` | string 或 array | 可选，系统提示词 |
 | `messages` | array | Claude Messages 消息列表 |
@@ -164,18 +164,17 @@ curl -sS http://localhost:3009/v1/messages \
 | `tool_choice` | string 或 object | 可选，工具选择策略 |
 | `stream` | boolean | 可选，是否流式返回 |
 
-转换链路受配置项影响：
+转换链路固定请求模型为 `gpt-5.5`，推理强度可通过配置调整：
 
 ```json
 {
   "claude_code": {
-    "model": "gpt-5.4",
     "reasoning_effort": "high"
   }
 }
 ```
 
-`claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 Responses 转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
+`/v1/messages` 的 Responses 转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 不再影响该链路。`claude_code.reasoning_effort` 只影响转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
 
 ## POST /v1/images/generations
 

@@ -10,7 +10,7 @@
   "auth_token": "",
   "port":3009,
   "claude_code": {
-    "model": "gpt-5.4",
+    "model": "gpt-5.5",
     "reasoning_effort": "high"
   },
   "responses": {
@@ -68,9 +68,9 @@
 - `disabled_configs` 是停用配置列表。管理页点“停用”会把配置从 `configs` 移到这里；停用配置对服务不可见，后续请求不会读取它。管理页点“启用”会把它移回 `configs`
 - `disabled_configs[]` 中的配置项会额外记录 `disabled_status` 文本字段，用来保存停用瞬间的运行态摘要，例如 `可用=否 | 额度=99% | ...`；启用回 `configs[]` 时会移除该字段
 - 管理页“删除”仍是永久删除；停用不是删除，只是从服务可见列表中移出
-- `claude_code.model` 用来强制覆盖 Claude Code 走 `/v1/messages` Responses 兼容转换链路时上游实际使用的模型
+- `/v1/messages` Responses 兼容转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 会保留在配置中但不再影响该链路
 - `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` Responses 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
-- 以上 `claude_code` 配置只作用于 `/v1/messages` 的 Responses 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
+- `claude_code.reasoning_effort` 只作用于 `/v1/messages` 的 Responses 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
 - `responses.model_aliases` 用来给 `/v1/responses` 请求里的 `model` 做别名替换，键和值都必须是非空字符串
 - `responses.model_aliases` 的键比较时忽略大小写，例如配置 `GPT-5.2` 也会匹配请求里的 `gpt-5.2`
 - 默认示例配置里包含 `gpt-5.2 -> gpt-5.5`

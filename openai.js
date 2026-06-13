@@ -805,9 +805,8 @@ function createClaudeMessagesRequestHandler() {
             );
         },
         responsesOptions: responsesConfig,
-        upstreamModel: process.env.CLAUDE_PROXY_MODEL || claudeCodeConfig.model,
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
-        clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1',
+        clientVersion: process.env.CODEX_CLIENT_VERSION || '1.0.1',
         upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {

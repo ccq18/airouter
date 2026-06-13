@@ -24,11 +24,11 @@ function createBaseConfig(extra = {}) {
   };
 }
 
-test('resolveClaudeCodeOptions falls back to gpt-5.4 and high', () => {
+test('resolveClaudeCodeOptions falls back to gpt-5.5 and high', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify(createBaseConfig()));
 
   assert.deepEqual(resolveClaudeCodeOptions(parsed), {
-    model: 'gpt-5.4',
+    model: 'gpt-5.5',
     reasoningEffort: 'high',
   });
 });

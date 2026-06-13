@@ -305,6 +305,7 @@ test('createClaudeMessagesHandler converts apikey configs without claude support
   const upstreamRequests = [];
   const apiKeyResults = [];
   const handler = createClaudeMessagesHandler({
+    upstreamModel: 'configured-model-should-not-be-used',
     getConfig: () => ({
       type: 'apikey',
       index: 0,
@@ -357,12 +358,13 @@ test('createClaudeMessagesHandler converts apikey configs without claude support
   await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(upstreamRequests.length, 1);
-  assert.equal(upstreamRequests[0].targetUrl, 'https://api.example.com/v1/responses?client_version=0.0.1');
+  assert.equal(upstreamRequests[0].targetUrl, 'https://api.example.com/v1/responses?client_version=1.0.1');
   assert.equal(upstreamRequests[0].headers.authorization, 'Bearer upstream-api-key');
   assert.equal(upstreamRequests[0].headers['chatgpt-account-id'], undefined);
+  assert.equal(upstreamRequests[0].headers.version, undefined);
   assert.equal(upstreamRequests[0].headers.accept, 'text/event-stream');
   const upstreamBody = JSON.parse(upstreamRequests[0].body.toString('utf8'));
-  assert.equal(upstreamBody.model, 'gpt-5.4');
+  assert.equal(upstreamBody.model, 'gpt-5.5');
   assert.deepEqual(upstreamBody.input, [
     {
       type: 'message',
@@ -528,6 +530,7 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
     },
   ];
   const upstreamAccountIds = [];
+  const upstreamRequests = [];
   const classifications = [];
   const modelObservations = [];
   const handler = createClaudeMessagesHandler({
@@ -537,6 +540,7 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
       return configs[1];
     },
     createUpstreamRequest: request => {
+      upstreamRequests.push(request);
       upstreamAccountIds.push(request.headers['chatgpt-account-id']);
       if (upstreamAccountIds.length === 1) {
         return {
@@ -597,10 +601,15 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
+  assert.deepEqual(upstreamRequests.map(request => request.headers.version), ['1.0.1', '1.0.1']);
+  assert.deepEqual(upstreamRequests.map(request => request.targetUrl), [
+    'https://chatgpt.com/backend-api/codex/responses?client_version=1.0.1',
+    'https://chatgpt.com/backend-api/codex/responses?client_version=1.0.1',
+  ]);
   assert.equal(classifications[0].classification.reason, 'responses_usage_limit_reached');
   assert.ok(modelObservations.some(item => (
     item.config === configs[1] &&
-    item.observation.requestModel === 'gpt-5.4' &&
+    item.observation.requestModel === 'gpt-5.5' &&
     item.observation.responseModel === 'gpt-5.4'
   )));
   assert.equal(res.statusCode, 200);

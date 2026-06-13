@@ -10,6 +10,7 @@ const {
 } = require('./responses-failover');
 
 const DEFAULT_RESPONSES_API_PATH = '/backend-api/codex/responses';
+const CLAUDE_RESPONSES_COMPAT_MODEL = 'gpt-5.5';
 const HOP_BY_HOP_HEADERS = new Set([
     'host',
     'connection',
@@ -625,9 +626,8 @@ function createClaudeMessagesHandler({
     error = () => {},
     logRequestSnapshot = null,
     responsesOptions = { modelAliases: {} },
-    upstreamModel = 'gpt-5.4',
     reasoningEffort = 'high',
-    clientVersion = '0.0.1',
+    clientVersion = '1.0.1',
     upstreamRequestTimeoutMs = 0,
     createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest,
     handleRetryableUpstreamError = null,
@@ -725,7 +725,7 @@ function createClaudeMessagesHandler({
             }
 
             responsesRequest = transformClaudeMessagesRequest(claudeRequest, {
-                model: upstreamModel,
+                model: CLAUDE_RESPONSES_COMPAT_MODEL,
                 reasoningEffort,
                 responsesOptions,
                 stream: true,

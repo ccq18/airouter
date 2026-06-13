@@ -1,6 +1,6 @@
 const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
-const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.4';
+const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.5';
 const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
 const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const SUPPORTED_APIKEY_CAPABILITIES = new Set(['gpt', 'claude']);
