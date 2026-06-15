@@ -19,6 +19,10 @@ const IGNORABLE_PRELUDE_EVENT_TYPES = new Set([
   'response.in_progress',
 ]);
 
+const UNKNOWN_RESPONSES_ERROR = {
+  reason: 'responses_unknown_error',
+};
+
 function normalizeErrorText(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -117,7 +121,11 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
       };
     }
 
-    return null;
+    return {
+      reason: UNKNOWN_RESPONSES_ERROR.reason,
+      retryKey: String(normalizedStatusCode),
+      retrySource: 'http',
+    };
   }
 
   const errorType = payload && payload.error && typeof payload.error.type === 'string'
@@ -132,7 +140,11 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
 
   if (!metadata) {
-    return null;
+    return {
+      reason: UNKNOWN_RESPONSES_ERROR.reason,
+      retryKey: errorType || 'unknown_error',
+      retrySource: 'http',
+    };
   }
 
   return {
@@ -156,14 +168,14 @@ function classifyRetryableResponsesStreamPayload(payload) {
     ? RETRYABLE_STREAM_ERROR_CODES.get(retryKey)
     : null;
 
-  if (!metadata) {
+  if (!metadata && eventType !== 'response.failed') {
     return null;
   }
 
   return {
     action: 'retry',
-    reason: metadata.reason,
-    retryKey,
+    reason: metadata ? metadata.reason : UNKNOWN_RESPONSES_ERROR.reason,
+    retryKey: retryKey || errorCode || 'unknown_error',
     retrySource: 'stream',
   };
 }

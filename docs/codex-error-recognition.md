@@ -62,7 +62,13 @@
   - 含义：服务端要求降速，可视作繁忙 / 容量紧张
   - 识别方式：`type == "response.failed"` 且 `response.error.code == "slow_down"`
 
-#### 1.1.2 需要从 `message` 里补充识别的信息
+#### 1.1.2 未识别的失败类型
+
+如果事件已经明确是 `response.failed`，但 `response.error.code` 不是上面这些已知值，也应该按失败处理，不要当作成功透传。
+
+这类情况在当前实现里会归到统一的未知失败分类。
+
+#### 1.1.3 需要从 `message` 里补充识别的信息
 
 有些 `response.failed` 不一定带你关心的固定错误码，但会在 `message` 里给出重试提示，例如：
 
@@ -119,6 +125,8 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 1. 先判断 `status == 429`
 2. 再读取 `error.type`
 3. 再按 `error.type` 分类
+
+如果 `429` 已经确认是失败，但 `error.type` 不在已知集合里，也应当继续按失败处理。
 
 #### 1.2.2 明确可识别的 `error.type`
 

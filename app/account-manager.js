@@ -99,6 +99,7 @@ function createAccountManager(options) {
       responses_insufficient_quota: 'responses 配额不足',
       responses_usage_limit_reached: 'responses 窗口额度已用尽',
       responses_usage_not_included: 'responses 套餐不支持',
+      responses_unknown_error: 'responses 未知错误',
       apikey_auth_failed: 'API Key 鉴权失败',
       apikey_rate_limited: 'API Key 被限流',
       apikey_upstream_5xx: 'API Key 上游服务错误',

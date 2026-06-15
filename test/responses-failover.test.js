@@ -59,6 +59,24 @@ test('classifyRetryableResponsesHttpError falls back to usage limit messages whe
   });
 });
 
+test('classifyRetryableResponsesHttpError treats unknown 429 error types as failed', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 429,
+    bodyText: JSON.stringify({
+      error: {
+        type: 'rate_limit_error',
+        message: 'request is rate limited',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: 'rate_limit_error',
+    retrySource: 'http',
+  });
+});
+
 test('classifyRetryableResponsesHttpError detects usage_not_included', () => {
   const result = classifyRetryableResponsesHttpError({
     statusCode: 429,
@@ -118,6 +136,24 @@ test('classifyRetryableResponsesHttpError detects token_revoked in raw error tex
   assert.deepEqual(result, {
     reason: 'missing_credentials',
     retryKey: 'token_revoked',
+    retrySource: 'http',
+  });
+});
+
+test('classifyRetryableResponsesHttpError treats unknown auth failures as failed', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 401,
+    bodyText: JSON.stringify({
+      error: {
+        type: 'invalid_request_error',
+        message: 'authentication failed',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: '401',
     retrySource: 'http',
   });
 });
@@ -221,6 +257,22 @@ test('createResponsesEventStreamInspector falls back to usage limit messages whe
     action: 'retry',
     reason: 'responses_usage_limit_reached',
     retryKey: 'usage_limit_reached',
+    retrySource: 'stream',
+  });
+});
+
+test('createResponsesEventStreamInspector treats response.failed with unknown error code as failed', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'data: {"type":"response.failed","response":{"error":{"code":"model_overloaded","message":"model overloaded"}}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'model_overloaded',
     retrySource: 'stream',
   });
 });

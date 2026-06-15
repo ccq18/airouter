@@ -23,12 +23,15 @@
 
 ## 2. 当前真正会触发自动切号的错误
 
-当前实现只把下面这四类情况当作 `/responses` 自动切号触发条件：
+当前实现把“已经进入失败识别窗口”的上游响应都当作 `/responses` 自动切号触发条件。已知错误码会映射到更具体的内部原因码；不认识的错误类型也会统一记为 `responses_unknown_error`，然后继续走切号。
 
 - HTTP `429` 且 `error.type == "usage_limit_reached"`
 - HTTP `429` 且 `error.type == "usage_not_included"`
+- HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
 - SSE `response.failed` 且 `response.error.code == "insufficient_quota"`
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
+- 其他进入失败识别窗口但无法识别为已知类型的 `429` / `401` / `403`
+- 其他 `response.failed`
 
 对应内部原因码如下：
 
@@ -36,21 +39,22 @@
 | --- | --- |
 | `429 + usage_limit_reached` | `responses_usage_limit_reached` |
 | `429 + usage_not_included` | `responses_usage_not_included` |
+| `401/403 + unauthorized/token_revoked` | `missing_credentials` |
+| `其他 429 / 401 / 403` | `responses_unknown_error` |
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
+| `其他 response.failed` | `responses_unknown_error` |
 
 ## 3. 当前不参与自动切号、只做识别或透传的情况
 
-下面这些值虽然仍然属于可识别的 `responses` 错误，但当前没有接入自动切号：
+下面这些值虽然仍然属于可识别的 `responses` 错误，但当前没有接入专属的细分原因码：
 
 - `context_length_exceeded`
 - `invalid_prompt`
 - `server_is_overloaded`
 - `slow_down`
-- 其他非上述两类 `429`
-- 其他 `response.failed`
 
-这些情况当前仍然按原始上游响应向下游透传，或者继续按通用错误处理流程走，不会触发账号切换。
+这些情况现在不会被当成成功透传，而是会统一归到 `responses_unknown_error`，然后继续触发账号切换。
 
 ## 4. 流式检查方式
 
