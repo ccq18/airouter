@@ -9,7 +9,9 @@ const {
   addConfigItem,
   buildImportedConfigItem,
   disableConfigItem,
+  deleteConfigItems,
   deleteDisabledConfigItem,
+  deleteDisabledConfigItems,
   enableConfigItem,
   moveConfigItem,
   updateConfigItem,
@@ -135,6 +137,55 @@ test('buildImportedConfigItem supports direct credential JSON with email and JWT
   assert.equal(imported.client_id, 'app-from-access-token');
 });
 
+test('buildImportedConfigItem supports oauth export credential JSON', () => {
+  const imported = buildImportedConfigItem('token', {
+    name: 'exported-account',
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      access_token: 'access-token-from-export',
+      refresh_token: 'refresh-token-from-export',
+      email: 'export@example.com',
+      chatgpt_account_id: 'account-from-credentials',
+      client_id: 'client-from-credentials',
+    },
+    extra: {
+      email: 'extra@example.com',
+      chatgpt_account_id: 'account-from-extra',
+    },
+  });
+
+  assert.deepEqual(imported, {
+    description: 'export@example.com',
+    account_id: 'account-from-credentials',
+    access_token: 'access-token-from-export',
+    refresh_token: 'refresh-token-from-export',
+    client_id: 'client-from-credentials',
+  });
+});
+
+test('buildImportedConfigItem falls back to oauth export extra fields and account name', () => {
+  const imported = buildImportedConfigItem('token', {
+    name: 'exported-account',
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      access_token: 'access-token-from-export',
+      refresh_token: 'refresh-token-from-export',
+    },
+    extra: {
+      chatgpt_account_id: 'account-from-extra',
+    },
+  });
+
+  assert.deepEqual(imported, {
+    description: 'exported-account',
+    account_id: 'account-from-extra',
+    access_token: 'access-token-from-export',
+    refresh_token: 'refresh-token-from-export',
+  });
+});
+
 test('buildImportedConfigItem accepts camelCase and nested token refresh fields', () => {
   const camelCaseImported = buildImportedConfigItem('token', {
     account: {
@@ -239,6 +290,58 @@ test('deleteConfigItem allows removing the last remaining config', () => {
   assert.equal(next.disabled_configs, undefined);
 });
 
+test('deleteConfigItems removes multiple enabled configs by original index order', () => {
+  const next = deleteConfigItems(createTokenConfig({
+    configs: [
+      {
+        access_token: 'token-1',
+        account_id: 'account-1',
+        description: 'first',
+      },
+      {
+        access_token: 'token-2',
+        account_id: 'account-2',
+        description: 'second',
+      },
+      {
+        access_token: 'token-3',
+        account_id: 'account-3',
+        description: 'third',
+      },
+      {
+        type: 'apikey',
+        apikey: 'sk-fourth',
+        base_url: 'https://api.example.com/v1',
+        description: 'fourth',
+      },
+    ],
+  }), [2, 0]);
+
+  assert.deepEqual(next.configs.map(item => item.description), ['second', 'fourth']);
+});
+
+test('deleteConfigItems rejects duplicate indexes without mutating input', () => {
+  const parsed = createTokenConfig({
+    configs: [
+      {
+        access_token: 'token-1',
+        account_id: 'account-1',
+        description: 'first',
+      },
+      {
+        access_token: 'token-2',
+        account_id: 'account-2',
+        description: 'second',
+      },
+    ],
+  });
+
+  assert.throws(() => {
+    deleteConfigItems(parsed, [1, 1]);
+  }, /配置项索引重复/);
+  assert.deepEqual(parsed.configs.map(item => item.description), ['first', 'second']);
+});
+
 test('disableConfigItem moves an enabled config into disabled_configs', () => {
   const disabledStatus = '可用=否 | 额度=99% | 刷新时间=2026/7/9 00:52:23 | 周额度=unknown | 刷新时间=unknown | 状态=额度检查失败 | 错误=OpenAI token refresh failed: [object Object]';
   const next = disableConfigItem(createTokenConfig(), 0, {
@@ -309,6 +412,31 @@ test('deleteDisabledConfigItem permanently removes a disabled config only', () =
 
   assert.deepEqual(next.configs.map(item => item.description), ['primary']);
   assert.deepEqual(next.disabled_configs, []);
+});
+
+test('deleteDisabledConfigItems removes multiple disabled configs by original index order', () => {
+  const next = deleteDisabledConfigItems(createTokenConfig({
+    disabled_configs: [
+      {
+        access_token: 'disabled-token-1',
+        account_id: 'disabled-account-1',
+        description: 'disabled first',
+      },
+      {
+        access_token: 'disabled-token-2',
+        account_id: 'disabled-account-2',
+        description: 'disabled second',
+      },
+      {
+        access_token: 'disabled-token-3',
+        account_id: 'disabled-account-3',
+        description: 'disabled third',
+      },
+    ],
+  }), [0, 2]);
+
+  assert.deepEqual(next.configs.map(item => item.description), ['primary']);
+  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled second']);
 });
 
 test('moveConfigItem moves a config earlier while preserving top-level settings', () => {

@@ -223,12 +223,106 @@
     }
   }
 
+  function parseLooseJsonValue(rawText, label) {
+    const text = String(rawText || '').trim();
+    const candidates = [
+      text,
+      text.replace(/,\s*([}\]])/g, '$1'),
+    ];
+
+    if (text.startsWith('[') && /},\s*$/.test(text)) {
+      candidates.push(`${text.replace(/,\s*$/, '')}]`);
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+
+      try {
+        return JSON.parse(candidate);
+      } catch (error) {
+        // Try the next tolerated paste shape before reporting a parse error.
+      }
+    }
+
+    return parseJsonValue(rawText, label);
+  }
+
+  function isOAuthExportItem(value) {
+    return Boolean(
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      value.credentials &&
+      typeof value.credentials === 'object' &&
+      !Array.isArray(value.credentials) &&
+      normalizeText(value.credentials.access_token)
+    );
+  }
+
+  function normalizeOAuthExportItem(item) {
+    const credentials = item.credentials || {};
+    const extra = item.extra && typeof item.extra === 'object' && !Array.isArray(item.extra)
+      ? item.extra
+      : {};
+    const accessToken = normalizeText(credentials.access_token);
+    const accountId = normalizeText(credentials.chatgpt_account_id) ||
+      normalizeText(credentials.account_id) ||
+      normalizeText(extra.chatgpt_account_id) ||
+      normalizeText(extra.account_id);
+
+    if (!accessToken || !accountId) {
+      throw new Error('OAuth 导出项必须包含 credentials.access_token 和 chatgpt_account_id');
+    }
+
+    const imported = {
+      description: normalizeText(credentials.email) || normalizeText(extra.email) || normalizeText(item.name) || accountId,
+      account_id: accountId,
+      access_token: accessToken,
+    };
+    const refreshToken = normalizeText(credentials.refresh_token);
+    const clientId = normalizeText(credentials.client_id);
+
+    if (refreshToken) {
+      imported.refresh_token = refreshToken;
+    }
+
+    if (clientId) {
+      imported.client_id = clientId;
+    }
+
+    return imported;
+  }
+
+  function normalizeOAuthExportInput(rawText) {
+    const parsed = parseLooseJsonValue(rawText, 'OAuth 导出 JSON');
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+
+    if (!items.every(isOAuthExportItem)) {
+      throw new Error('OAuth 导出 JSON 必须是包含 credentials.access_token 的对象或对象数组');
+    }
+
+    return items.map(normalizeOAuthExportItem);
+  }
+
   function buildConfigItemFromForm(values) {
     const formValues = values && typeof values === 'object' ? values : {};
     const mode = normalizeText(formValues.mode || 'token').toLowerCase();
 
     if (mode === 'token') {
-      const parsed = parseJsonValue(formValues.tokenRawJson, 'AuthSession JSON');
+      const rawTokenJson = formValues.tokenRawJson;
+      let parsed;
+      try {
+        parsed = parseJsonValue(rawTokenJson, 'AuthSession JSON');
+      } catch (error) {
+        return normalizeOAuthExportInput(rawTokenJson);
+      }
+      const parsedItems = Array.isArray(parsed) ? parsed : [parsed];
+      if (parsedItems.length > 0 && parsedItems.every(isOAuthExportItem)) {
+        return normalizeOAuthExportInput(rawTokenJson);
+      }
+
       if (Array.isArray(parsed)) {
         if (parsed.length === 0) {
           throw new Error('AuthSession JSON 数组不能为空');
@@ -935,6 +1029,7 @@
     getConfigIdentityValue,
     formatConfigItemCopyText,
     buildConfigItemFromForm,
+    normalizeOAuthExportInput,
     buildAdminStatusSummary,
     getDispatchModeSummary,
     formatDispatchSessionStatus,

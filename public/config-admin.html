@@ -150,6 +150,33 @@
       gap: 10px;
     }
 
+    .batch-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 0 0 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-muted);
+    }
+
+    .batch-toolbar-left,
+    .batch-toolbar-right {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .batch-toolbar .count {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
     .runtime-sync {
       color: var(--muted);
       font-size: 12px;
@@ -507,6 +534,12 @@
       white-space: nowrap;
     }
 
+    .selection-col {
+      width: 56px;
+      min-width: 56px;
+      text-align: center;
+    }
+
     tbody td {
       padding: 16px;
       border-bottom: 1px solid var(--line);
@@ -659,6 +692,35 @@
       margin-left: 6px;
     }
 
+    .selection-cell {
+      text-align: center;
+      vertical-align: middle;
+      width: 56px;
+    }
+
+    .selection-cell input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+    }
+
+    .selection-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--surface-strong);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .selection-chip.active {
+      background: var(--active-soft);
+      color: var(--active);
+    }
+
     .disabled-configs {
       margin-top: 18px;
     }
@@ -741,13 +803,26 @@
     <div id="message" class="message" role="status" aria-live="polite"></div>
 
     <section class="panel list-panel">
-      <div class="panel-head">
-        <div>
-          <h2 class="panel-title">上游配置</h2>
-          <p class="panel-note">查看运行态、手动切换当前配置，或删除不再使用的上游。</p>
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">上游配置</h2>
+            <p class="panel-note">查看运行态、手动切换当前配置，或删除不再使用的上游。</p>
+          </div>
+          <div class="panel-tools">
+            <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
+          </div>
         </div>
-        <div class="panel-tools">
-          <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
+      <div id="batchToolbar" class="batch-toolbar" hidden>
+        <div class="batch-toolbar-left">
+          <span id="batchSelectionSummary" class="count">已选择 0 项</span>
+          <button class="secondary" type="button" data-action="toggle-select-all-configs">全选启用配置</button>
+          <button class="secondary" type="button" data-action="toggle-select-all-disabled-configs">全选停用配置</button>
+          <button class="secondary" type="button" data-action="toggle-select-all-apikeys">全选 apikey</button>
+        </div>
+        <div class="batch-toolbar-right">
+          <button class="danger" type="button" id="batchDeleteConfigsButton" data-action="batch-delete-configs" disabled>批量删除启用配置</button>
+          <button class="danger" type="button" id="batchDeleteDisabledConfigsButton" data-action="batch-delete-disabled-configs" disabled>批量删除停用配置</button>
+          <button class="danger" type="button" id="batchDeleteApiKeysButton" data-action="batch-delete-apikeys" disabled>批量删除 apikey</button>
         </div>
       </div>
       <section id="cards"></section>
@@ -901,6 +976,8 @@
   <script>
     const cardsEl = document.getElementById('cards');
     const messageEl = document.getElementById('message');
+    const batchToolbarEl = document.getElementById('batchToolbar');
+    const batchSelectionSummaryEl = document.getElementById('batchSelectionSummary');
     const rawJsonInput = document.getElementById('rawJsonInput');
     const tokenConfigPanel = document.getElementById('tokenConfigPanel');
     const apiKeyConfigPanel = document.getElementById('apiKeyConfigPanel');
@@ -913,6 +990,9 @@
     const addApiKeyButton = document.getElementById('addApiKeyButton');
     const saveResponsesSettingsButton = document.getElementById('saveResponsesSettingsButton');
     const saveProxySettingsButton = document.getElementById('saveProxySettingsButton');
+    const batchDeleteConfigsButton = document.getElementById('batchDeleteConfigsButton');
+    const batchDeleteDisabledConfigsButton = document.getElementById('batchDeleteDisabledConfigsButton');
+    const batchDeleteApiKeysButton = document.getElementById('batchDeleteApiKeysButton');
     const apiKeysListEl = document.getElementById('apiKeysList');
     const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
     const servicePortInput = document.getElementById('servicePortInput');
@@ -953,6 +1033,11 @@
     let snapshot = null;
     let runtimeSyncTimer = null;
     let runtimeSyncInFlight = false;
+    const selectedState = {
+      configs: new Set(),
+      disabled_configs: new Set(),
+      apikeys: new Set(),
+    };
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -980,6 +1065,103 @@
         state,
         ...options,
       });
+    }
+
+    function normalizeSelectionIndex(value) {
+      const index = Number(value);
+      return Number.isInteger(index) && index >= 0 ? index : null;
+    }
+
+    function getSelectedIndexes(type) {
+      return [...selectedState[type]].sort((a, b) => a - b);
+    }
+
+    function getTotalSelectedCount() {
+      return selectedState.configs.size + selectedState.disabled_configs.size + selectedState.apikeys.size;
+    }
+
+    function getSnapshotIndexes(type) {
+      if (type === 'apikeys') {
+        const apikeys = Array.isArray(snapshot && snapshot.apikeys) ? snapshot.apikeys : [];
+        return apikeys.map((_, index) => index);
+      }
+
+      const items = Array.isArray(snapshot && snapshot[type]) ? snapshot[type] : [];
+      return items
+        .map(item => normalizeSelectionIndex(item && item.index))
+        .filter(index => index !== null);
+    }
+
+    function pruneSelections() {
+      ['configs', 'disabled_configs', 'apikeys'].forEach(type => {
+        const available = new Set(getSnapshotIndexes(type));
+        selectedState[type].forEach(index => {
+          if (!available.has(index)) {
+            selectedState[type].delete(index);
+          }
+        });
+      });
+    }
+
+    function updateBatchToolbar() {
+      pruneSelections();
+      const counts = {
+        configs: selectedState.configs.size,
+        disabled_configs: selectedState.disabled_configs.size,
+        apikeys: selectedState.apikeys.size,
+      };
+      const total = getTotalSelectedCount();
+      const parts = [];
+
+      if (counts.configs) {
+        parts.push(`启用配置 ${counts.configs}`);
+      }
+      if (counts.disabled_configs) {
+        parts.push(`停用配置 ${counts.disabled_configs}`);
+      }
+      if (counts.apikeys) {
+        parts.push(`apikey ${counts.apikeys}`);
+      }
+
+      batchToolbarEl.hidden = total === 0;
+      batchSelectionSummaryEl.textContent = total > 0 ? `已选择 ${parts.join('、')}` : '已选择 0 项';
+      batchDeleteConfigsButton.disabled = counts.configs === 0;
+      batchDeleteDisabledConfigsButton.disabled = counts.disabled_configs === 0;
+      batchDeleteApiKeysButton.disabled = counts.apikeys === 0;
+    }
+
+    function setSelectedIndex(type, value, checked) {
+      const index = normalizeSelectionIndex(value);
+      if (index === null) {
+        return;
+      }
+
+      if (checked) {
+        selectedState[type].add(index);
+      } else {
+        selectedState[type].delete(index);
+      }
+
+      updateBatchToolbar();
+    }
+
+    function toggleSelectAll(type) {
+      const indexes = getSnapshotIndexes(type);
+      const selected = selectedState[type];
+      const shouldSelectAll = indexes.some(index => !selected.has(index));
+
+      if (shouldSelectAll) {
+        indexes.forEach(index => selected.add(index));
+      } else {
+        indexes.forEach(index => selected.delete(index));
+      }
+
+      renderCards(snapshot || {});
+    }
+
+    function clearSelectedIndexes(type, indexes) {
+      indexes.forEach(index => selectedState[type].delete(index));
+      updateBatchToolbar();
     }
 
     function renderProxySettings(data) {
@@ -1064,6 +1246,7 @@
     function renderApiKeys(apikeys) {
       if (!apikeys.length) {
         apiKeysListEl.innerHTML = '<div class="empty">当前没有代理 apikey，请求不会校验 apikey。</div>';
+        updateBatchToolbar();
         return;
       }
 
@@ -1073,9 +1256,16 @@
             <div class="key-meta">apikey #${index + 1}</div>
             <div class="mono key-value">${escapeHtml(apikey)}</div>
           </div>
-          <button class="danger" type="button" data-action="delete-apikey" data-index="${index}">删除</button>
+          <div class="batch-toolbar-right">
+            <label class="selection-chip ${selectedState.apikeys.has(index) ? 'active' : ''}">
+              <input type="checkbox" data-action="toggle-select-apikey" data-index="${index}" ${selectedState.apikeys.has(index) ? 'checked' : ''}>
+              <span>选择</span>
+            </label>
+            <button class="danger" type="button" data-action="delete-apikey" data-index="${index}">删除</button>
+          </div>
         </div>
       `).join('');
+      updateBatchToolbar();
     }
 
     function runtimeBadges(item) {
@@ -1184,6 +1374,7 @@
     function renderEnabledConfigs(data) {
       const configs = Array.isArray(data && data.configs) ? data.configs : [];
       if (!configs.length) {
+        updateBatchToolbar();
         return '<div class="empty">当前没有启用配置项。</div>';
       }
 
@@ -1192,6 +1383,9 @@
           <table>
             <thead>
               <tr>
+                <th class="selection-col">
+                  <button class="secondary" type="button" data-action="toggle-select-all-configs">全选</button>
+                </th>
                 <th class="config-col">配置</th>
                 <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
                 <th>description</th>
@@ -1202,6 +1396,9 @@
             <tbody>
               ${configs.map(item => `
                 <tr>
+                  <td class="selection-cell">
+                    <input type="checkbox" data-action="toggle-select-config" data-index="${item.index}" ${selectedState.configs.has(item.index) ? 'checked' : ''}>
+                  </td>
                   <td>
                     <div class="config-name">
                       <div>配置 #${item.index + 1}</div>
@@ -1229,6 +1426,7 @@
     function renderDisabledConfigs(data) {
       const disabledConfigs = Array.isArray(data && data.disabled_configs) ? data.disabled_configs : [];
       if (!disabledConfigs.length) {
+        updateBatchToolbar();
         return '';
       }
 
@@ -1244,6 +1442,9 @@
             <table>
               <thead>
                 <tr>
+                  <th class="selection-col">
+                    <button class="secondary" type="button" data-action="toggle-select-all-disabled-configs">全选</button>
+                  </th>
                   <th class="config-col">配置</th>
                   <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
                   <th>description</th>
@@ -1254,6 +1455,9 @@
               <tbody>
                 ${disabledConfigs.map(item => `
                   <tr>
+                    <td class="selection-cell">
+                      <input type="checkbox" data-action="toggle-select-disabled-config" data-index="${item.index}" ${selectedState.disabled_configs.has(item.index) ? 'checked' : ''}>
+                    </td>
                     <td>
                       <div class="config-name">
                         <div>停用 #${item.index + 1}</div>
@@ -1281,6 +1485,7 @@
       const disabledConfigs = Array.isArray(data && data.disabled_configs) ? data.disabled_configs : [];
       if (!configs.length && !disabledConfigs.length) {
         cardsEl.innerHTML = '<div class="empty">当前没有配置项。</div>';
+        updateBatchToolbar();
         return;
       }
 
@@ -1288,6 +1493,7 @@
         ${renderEnabledConfigs(data)}
         ${renderDisabledConfigs(data)}
       `;
+      updateBatchToolbar();
     }
 
     function withAuthToken(url) {
@@ -1539,11 +1745,28 @@
       });
 
       snapshot = result;
+      clearSelectedIndexes('apikeys', [Number(index)]);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
       setMessage('info', 'apikey 已删除。');
+    }
+
+    async function batchDeleteApiKeys() {
+      const indexes = getSelectedIndexes('apikeys');
+      const result = await requestJson('/admin/api/apikeys/batch-delete', {
+        method: 'DELETE',
+        body: JSON.stringify({ indexes }),
+      });
+
+      snapshot = result;
+      clearSelectedIndexes('apikeys', indexes);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', `已批量删除 ${indexes.length} 个 apikey。`);
     }
 
     async function activateConfig(index) {
@@ -1619,11 +1842,28 @@
       });
 
       snapshot = result;
+      clearSelectedIndexes('configs', [Number(index)]);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已删除并热重载。');
+    }
+
+    async function batchDeleteConfigs() {
+      const indexes = getSelectedIndexes('configs');
+      const result = await requestJson('/admin/api/configs/batch-delete', {
+        method: 'DELETE',
+        body: JSON.stringify({ indexes }),
+      });
+
+      snapshot = result;
+      clearSelectedIndexes('configs', indexes);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', `已批量删除 ${indexes.length} 个启用配置项并热重载。`);
     }
 
     async function deleteDisabledConfig(index) {
@@ -1632,11 +1872,28 @@
       });
 
       snapshot = result;
+      clearSelectedIndexes('disabled_configs', [Number(index)]);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
       setMessage('info', '停用配置项已删除。');
+    }
+
+    async function batchDeleteDisabledConfigs() {
+      const indexes = getSelectedIndexes('disabled_configs');
+      const result = await requestJson('/admin/api/disabled-configs/batch-delete', {
+        method: 'DELETE',
+        body: JSON.stringify({ indexes }),
+      });
+
+      snapshot = result;
+      clearSelectedIndexes('disabled_configs', indexes);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', `已批量删除 ${indexes.length} 个停用配置项。`);
     }
 
     async function sendHelloTestRequest() {
@@ -1745,6 +2002,48 @@
         return;
       }
 
+      const toggleSelectAllConfigsButton = event.target.closest('[data-action="toggle-select-all-configs"]');
+      if (toggleSelectAllConfigsButton) {
+        event.preventDefault();
+        toggleSelectAll('configs');
+        return;
+      }
+
+      const toggleSelectAllDisabledConfigsButton = event.target.closest('[data-action="toggle-select-all-disabled-configs"]');
+      if (toggleSelectAllDisabledConfigsButton) {
+        event.preventDefault();
+        toggleSelectAll('disabled_configs');
+        return;
+      }
+
+      const toggleSelectAllApiKeysButton = event.target.closest('[data-action="toggle-select-all-apikeys"]');
+      if (toggleSelectAllApiKeysButton) {
+        event.preventDefault();
+        toggleSelectAll('apikeys');
+        return;
+      }
+
+      const toggleSelectConfig = event.target.closest('[data-action="toggle-select-config"]');
+      if (toggleSelectConfig) {
+        setSelectedIndex('configs', toggleSelectConfig.dataset.index, toggleSelectConfig.checked);
+        renderCards(snapshot || {});
+        return;
+      }
+
+      const toggleSelectDisabledConfig = event.target.closest('[data-action="toggle-select-disabled-config"]');
+      if (toggleSelectDisabledConfig) {
+        setSelectedIndex('disabled_configs', toggleSelectDisabledConfig.dataset.index, toggleSelectDisabledConfig.checked);
+        renderCards(snapshot || {});
+        return;
+      }
+
+      const toggleSelectApiKey = event.target.closest('[data-action="toggle-select-apikey"]');
+      if (toggleSelectApiKey) {
+        setSelectedIndex('apikeys', toggleSelectApiKey.dataset.index, toggleSelectApiKey.checked);
+        renderCards(snapshot || {});
+        return;
+      }
+
       const copyUrlButton = event.target.closest('[data-copy-url]');
       if (copyUrlButton) {
         event.preventDefault();
@@ -1767,6 +2066,54 @@
             copyUrlButton.textContent = copyUrlButton.dataset.originalText || originalText;
             delete copyUrlButton.dataset.originalText;
           }, 1600);
+        }
+        return;
+      }
+
+      const batchDeleteConfigsButtonEl = event.target.closest('[data-action="batch-delete-configs"]');
+      if (batchDeleteConfigsButtonEl) {
+        if (!armDeleteButton(batchDeleteConfigsButtonEl, `再次点击确认删除这 ${getSelectedIndexes('configs').length} 个启用配置项。`)) {
+          return;
+        }
+        batchDeleteConfigsButtonEl.disabled = true;
+        try {
+          await batchDeleteConfigs();
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          batchDeleteConfigsButtonEl.disabled = false;
+        }
+        return;
+      }
+
+      const batchDeleteDisabledConfigsButtonEl = event.target.closest('[data-action="batch-delete-disabled-configs"]');
+      if (batchDeleteDisabledConfigsButtonEl) {
+        if (!armDeleteButton(batchDeleteDisabledConfigsButtonEl, `再次点击确认删除这 ${getSelectedIndexes('disabled_configs').length} 个停用配置项。`)) {
+          return;
+        }
+        batchDeleteDisabledConfigsButtonEl.disabled = true;
+        try {
+          await batchDeleteDisabledConfigs();
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          batchDeleteDisabledConfigsButtonEl.disabled = false;
+        }
+        return;
+      }
+
+      const batchDeleteApiKeysButtonEl = event.target.closest('[data-action="batch-delete-apikeys"]');
+      if (batchDeleteApiKeysButtonEl) {
+        if (!armDeleteButton(batchDeleteApiKeysButtonEl, `再次点击确认删除这 ${getSelectedIndexes('apikeys').length} 个 apikey。`)) {
+          return;
+        }
+        batchDeleteApiKeysButtonEl.disabled = true;
+        try {
+          await batchDeleteApiKeys();
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          batchDeleteApiKeysButtonEl.disabled = false;
         }
         return;
       }

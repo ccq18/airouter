@@ -45,7 +45,9 @@ const {
     addConfigItem,
     buildImportedConfigItem,
     deleteConfigItem,
+    deleteConfigItems,
     deleteDisabledConfigItem,
+    deleteDisabledConfigItems,
     disableConfigItem,
     enableConfigItem,
     moveConfigItem,
@@ -1374,6 +1376,47 @@ function parseConfigIndex(value) {
     return index;
 }
 
+function parseBatchIndexes(body, label) {
+    const indexes = body && Array.isArray(body.indexes) ? body.indexes : null;
+    if (!indexes || indexes.length === 0) {
+        throw new ConfigEditorError(`${label}索引不能为空`);
+    }
+
+    return indexes.map(value => {
+        if (typeof value === 'number') {
+            return value;
+        }
+
+        if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+            return Number.parseInt(value.trim(), 10);
+        }
+
+        throw new ConfigEditorError(`${label}索引不合法`);
+    });
+}
+
+function deleteApiKeys(parsed, indexes) {
+    const apikeys = getConfiguredApiKeys(parsed);
+    const targetIndexes = parseBatchIndexes({ indexes }, 'apikey');
+    const seen = new Set();
+
+    for (const index of targetIndexes) {
+        if (!Number.isInteger(index) || index < 0 || index >= apikeys.length) {
+            throw new ConfigEditorError('apikey 索引不合法');
+        }
+
+        if (seen.has(index)) {
+            throw new ConfigEditorError('apikey 索引重复');
+        }
+
+        seen.add(index);
+    }
+
+    return updateConfigSettings(parsed, {
+        apikeys: apikeys.filter((_, index) => !seen.has(index))
+    });
+}
+
 function createMissingConfigResponse(res) {
     return res.status(503).json({
         error: 'Service Unavailable',
@@ -2524,7 +2567,10 @@ async function handleConfigMutation(res, mutate, reason, successStatus = 200, pe
         const parsed = readParsedConfigFile(CONFIG_FILE);
         const nextParsed = mutate(parsed);
         await persistAndReloadConfig(nextParsed, reason, persistOptions);
-        res.status(successStatus).json(buildConfigAdminResponse());
+        res.status(successStatus).json({
+            ...buildConfigAdminResponse(),
+            ...(persistOptions.responseExtras || {})
+        });
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
@@ -2842,6 +2888,26 @@ app.post('/admin/api/apikeys', async (req, res) => {
     }
 });
 
+app.delete('/admin/api/apikeys/batch-delete', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const indexes = parseBatchIndexes(req.body, 'apikey');
+        const nextParsed = deleteApiKeys(parsed, indexes);
+
+        persistConfigWithoutRuntimeReload(nextParsed);
+        res.status(200).json({
+            ...buildConfigAdminResponse(),
+            deleted_count: indexes.length
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? 'apikey 删除失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
 app.delete('/admin/api/apikeys/:index', async (req, res) => {
     try {
         const parsed = readParsedConfigFile(CONFIG_FILE);
@@ -2959,6 +3025,21 @@ app.post('/admin/api/restart-service', (req, res) => {
     }
 });
 
+app.delete('/admin/api/configs/batch-delete', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteConfigItems(parsed, parseBatchIndexes(req.body, '配置项')),
+        'admin_batch_delete',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                deleted_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
+        }
+    );
+});
+
 app.delete('/admin/api/configs/:index', async (req, res) => {
     await handleConfigMutation(
         res,
@@ -2967,6 +3048,21 @@ app.delete('/admin/api/configs/:index', async (req, res) => {
         200,
         {
             skipQuotaRefresh: true
+        }
+    );
+});
+
+app.delete('/admin/api/disabled-configs/batch-delete', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteDisabledConfigItems(parsed, parseBatchIndexes(req.body, '停用配置项')),
+        'admin_batch_delete_disabled_config',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                deleted_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
         }
     );
 });

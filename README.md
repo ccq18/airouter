@@ -46,6 +46,8 @@ npm run logs
 
 打开 `https://chatgpt.com/api/auth/session` 获取 AuthSession JSON，复制完整 JSON，粘贴到 `AuthSession JSON` 文本框，然后点击 `新增配置项`。
 
+如果你手里的是 OAuth 导出数组，也可以直接粘贴进同一个文本框；系统会自动从每个条目里提取 `access_token`、`chatgpt_account_id`、`refresh_token` 和邮箱备注。
+
 注意：
 
 - 请复制完整 JSON，不要只复制 `accessToken`。
@@ -133,7 +135,7 @@ Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `sessio
 - 在 token 行用 `设为锚点` 指定 token 并发池的调度焦点。
 - 在 apikey 行用 `全量切换` 进入 API Key 覆盖模式。
 - 用 `停用` 将账号移入停用列表。停用账号对服务不可见，后续请求、额度刷新和 fallback 都不会读取它，但可以在管理页重新启用。
-- 用 `删除` 永久移除不再需要的账号。
+- 用 `删除` 永久移除不再需要的账号；管理页也支持勾选多项后批量删除启用配置、停用配置和入口 apikey。
 
 token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态；额度低、登录态失效或账号不可用时，会跳过它。额度检查本身连续 3 次失败才会把 token 标记为 `quota_check_failed`，成功检查会清零失败计数。apikey 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，任意非 200 HTTP 状态、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换。已被标记为不可用的 GPT apikey 会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测，成功后自动恢复可用；探测默认超时 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；探测模型默认 `gpt-5.5`，可在 apikey 配置里用 `"health": {"model": "gpt-4.1-mini"}` 覆盖。
 

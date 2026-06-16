@@ -203,6 +203,24 @@ test('admin reorder route moves the selected config to the top', () => {
   assert.doesNotMatch(routeSource, /accountManager\.activateConfig\(0,\s*'admin_move_config'\)/);
 });
 
+test('admin exposes batch delete routes for configs, disabled configs, and apikeys', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+
+  assert.match(source, /app\.delete\('\/admin\/api\/configs\/batch-delete'/);
+  assert.match(source, /app\.delete\('\/admin\/api\/disabled-configs\/batch-delete'/);
+  assert.match(source, /app\.delete\('\/admin\/api\/apikeys\/batch-delete'/);
+  assert.match(source, /deleteConfigItems\(/);
+  assert.match(source, /deleteDisabledConfigItems\(/);
+  assert.match(source, /function deleteApiKeys\(parsed, indexes\)/);
+});
+
+test('admin batch delete routes respond with deleted counts on success', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+
+  assert.match(source, /deleted_count:\s*Array\.isArray\(req\.body && req\.body\.indexes\)\s*\?\s*req\.body\.indexes\.length\s*:\s*0/);
+  assert.match(source, /responseExtras:\s*\{\s*deleted_count:/);
+});
+
 test('refreshConfigTokenAdminResponse refreshes and persists a token config', async () => {
   const persisted = [];
   const response = await refreshConfigTokenAdminResponse(0, {

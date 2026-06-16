@@ -18,6 +18,7 @@ const {
   getConfigIdentityColumnLabel,
   getConfigIdentityValue,
   buildConfigItemFromForm,
+  normalizeOAuthExportInput,
   buildAdminStatusSummary,
   extractRuntimeStatusTags,
   formatDispatchSessionStatus,
@@ -77,6 +78,25 @@ test('config admin exposes enable and disable controls for soft-deleted configs'
   assert.match(html, /item\.item\.disabled_status \|\| '服务不可见'/);
   assert.match(html, /配置项已停用并热重载/);
   assert.match(html, /配置项已启用并热重载/);
+});
+
+test('config admin exposes batch delete controls for configs, disabled configs, and apikeys', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+
+  assert.match(html, /data-action="toggle-select-all-configs"/);
+  assert.match(html, /data-action="toggle-select-all-disabled-configs"/);
+  assert.match(html, /data-action="toggle-select-all-apikeys"/);
+  assert.match(html, /data-action="toggle-select-config"/);
+  assert.match(html, /data-action="toggle-select-disabled-config"/);
+  assert.match(html, /data-action="toggle-select-apikey"/);
+  assert.match(html, /id="batchDeleteConfigsButton"/);
+  assert.match(html, /id="batchDeleteDisabledConfigsButton"/);
+  assert.match(html, /id="batchDeleteApiKeysButton"/);
+  assert.match(html, /\/admin\/api\/configs\/batch-delete/);
+  assert.match(html, /\/admin\/api\/disabled-configs\/batch-delete/);
+  assert.match(html, /\/admin\/api\/apikeys\/batch-delete/);
+  assert.match(html, /批量删除/);
+  assert.match(html, /已批量删除/);
 });
 
 test('config admin exposes copy controls for config item JSON', () => {
@@ -451,6 +471,132 @@ test('buildConfigItemFromForm rejects invalid token mode AuthSession JSON array 
     }),
     /第 2 项必须是 JSON 对象/,
   );
+});
+
+test('normalizeOAuthExportInput extracts oauth export arrays into token items', () => {
+  const parsed = normalizeOAuthExportInput(JSON.stringify([
+    {
+      name: 'account-a',
+      type: 'oauth',
+      credentials: {
+        access_token: 'token-a',
+        refresh_token: 'refresh-a',
+        email: 'a@example.com',
+        chatgpt_account_id: 'account-a-id',
+      },
+    },
+    {
+      name: 'account-b',
+      platform: 'openai',
+      type: 'oauth',
+      extra: {
+        chatgpt_account_id: 'account-b-id',
+      },
+      credentials: {
+        access_token: 'token-b',
+      },
+    },
+  ]));
+
+  assert.deepEqual(parsed, [
+    {
+      description: 'a@example.com',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+      refresh_token: 'refresh-a',
+    },
+    {
+      description: 'account-b',
+      account_id: 'account-b-id',
+      access_token: 'token-b',
+    },
+  ]);
+});
+
+test('normalizeOAuthExportInput tolerates trailing commas in pasted oauth exports', () => {
+  const parsed = normalizeOAuthExportInput(`[
+    {
+      "name": "account-a",
+      "type": "oauth",
+      "credentials": {
+        "access_token": "token-a",
+        "chatgpt_account_id": "account-a-id"
+      },
+    },
+  ]`);
+
+  assert.deepEqual(parsed, [
+    {
+      description: 'account-a',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+    },
+  ]);
+});
+
+test('normalizeOAuthExportInput tolerates a truncated oauth export array tail', () => {
+  const parsed = normalizeOAuthExportInput(`[
+    {
+      "name": "account-a",
+      "type": "oauth",
+      "credentials": {
+        "access_token": "token-a",
+        "chatgpt_account_id": "account-a-id"
+      },
+      "extra": {
+        "email": "extra-a@example.com"
+      }
+    },`);
+
+  assert.deepEqual(parsed, [
+    {
+      description: 'extra-a@example.com',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+    },
+  ]);
+});
+
+test('buildConfigItemFromForm converts oauth export arrays from the token textbox', () => {
+  const imported = buildConfigItemFromForm({
+    mode: 'token',
+    tokenRawJson: JSON.stringify([
+      {
+        name: 'account-a',
+        type: 'oauth',
+        credentials: {
+          access_token: 'token-a',
+          chatgpt_account_id: 'account-a-id',
+          refresh_token: 'refresh-a',
+        },
+      },
+      {
+        name: 'account-b',
+        type: 'oauth',
+        extra: {
+          account_id: 'account-b-id',
+        },
+        credentials: {
+          access_token: 'token-b',
+          email: 'b@example.com',
+        },
+      },
+    ]),
+  });
+
+  assert.deepEqual(imported, [
+    {
+      description: 'account-a',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+      refresh_token: 'refresh-a',
+    },
+    {
+      description: 'b@example.com',
+      account_id: 'account-b-id',
+      access_token: 'token-b',
+    },
+  ]);
 });
 
 test('buildConfigItemFromForm builds an apikey config from normal form fields', () => {

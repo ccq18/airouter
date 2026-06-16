@@ -203,6 +203,22 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
     const explicitDescription = normalizeString(item.description);
     const explicitRefreshToken = normalizeString(item.refresh_token);
     const explicitClientId = normalizeString(item.client_id);
+    const credentials = item.credentials && typeof item.credentials === 'object' && !Array.isArray(item.credentials)
+        ? item.credentials
+        : {};
+    const extra = item.extra && typeof item.extra === 'object' && !Array.isArray(item.extra)
+        ? item.extra
+        : {};
+    const credentialAccessToken = normalizeString(credentials.access_token);
+    const credentialAccountId = normalizeString(credentials.chatgpt_account_id) ||
+        normalizeString(credentials.account_id) ||
+        normalizeString(extra.chatgpt_account_id) ||
+        normalizeString(extra.account_id);
+    const credentialDescription = normalizeString(credentials.email) ||
+        normalizeString(extra.email) ||
+        normalizeString(item.name);
+    const credentialRefreshToken = normalizeString(credentials.refresh_token);
+    const credentialClientId = normalizeString(credentials.client_id);
     const sessionAccessToken = normalizeString(item.accessToken);
     const sessionAccountId = normalizeString(item.account && item.account.id);
     const sessionDescription = normalizeString(item.user && item.user.email) || normalizeString(item.email);
@@ -213,13 +229,13 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
         normalizeString(item.tokens && item.tokens.client_id) ||
         normalizeString(item.tokens && item.tokens.clientId);
 
-    const accessToken = explicitAccessToken || sessionAccessToken;
-    const accountId = explicitAccountId || sessionAccountId;
-    const description = explicitDescription || sessionDescription || accountId;
-    const refreshToken = explicitRefreshToken || sessionRefreshToken;
+    const accessToken = explicitAccessToken || credentialAccessToken || sessionAccessToken;
+    const accountId = explicitAccountId || credentialAccountId || sessionAccountId;
+    const description = explicitDescription || credentialDescription || sessionDescription || accountId;
+    const refreshToken = explicitRefreshToken || credentialRefreshToken || sessionRefreshToken;
     const decodedAccessToken = decodeJwtPayload(accessToken);
-    const decodedIdToken = decodeJwtPayload(item.id_token);
-    const clientId = explicitClientId || sessionClientId || normalizeString(decodedAccessToken && decodedAccessToken.client_id) || normalizeString(decodedIdToken && decodedIdToken.client_id);
+    const decodedIdToken = decodeJwtPayload(item.id_token || credentials.id_token);
+    const clientId = explicitClientId || credentialClientId || sessionClientId || normalizeString(decodedAccessToken && decodedAccessToken.client_id) || normalizeString(decodedIdToken && decodedIdToken.client_id);
 
     if (!accessToken || !accountId) {
         throw new ConfigEditorError('token 模式下请提供 access_token/account_id，或直接粘贴包含 user.email、account.id、accessToken 的 AuthSession JSON');
@@ -259,6 +275,39 @@ function getDisabledConfigIndex(index, parsed) {
     return index;
 }
 
+function normalizeDeleteIndexes(indexes, length, label) {
+    if (!Array.isArray(indexes) || indexes.length === 0) {
+        throw new ConfigEditorError(`${label}索引不能为空`);
+    }
+
+    const normalized = indexes.map(index => {
+        if (typeof index === 'number') {
+            return index;
+        }
+
+        if (typeof index === 'string' && /^\d+$/.test(index.trim())) {
+            return Number.parseInt(index.trim(), 10);
+        }
+
+        return Number.NaN;
+    });
+    const seen = new Set();
+
+    for (const index of normalized) {
+        if (!Number.isInteger(index) || index < 0 || index >= length) {
+            throw new ConfigEditorError(`${label}索引不合法`);
+        }
+
+        if (seen.has(index)) {
+            throw new ConfigEditorError(`${label}索引重复`);
+        }
+
+        seen.add(index);
+    }
+
+    return normalized.sort((a, b) => b - a);
+}
+
 function addConfigItem(parsed, item) {
     const nextParsed = cloneParsedConfig(parsed);
     nextParsed.configs.push(normalizeConfigItem(item));
@@ -277,6 +326,17 @@ function deleteConfigItem(parsed, index) {
     const targetIndex = getConfigIndex(index, nextParsed);
 
     nextParsed.configs.splice(targetIndex, 1);
+    return validateParsedConfig(nextParsed);
+}
+
+function deleteConfigItems(parsed, indexes) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const targetIndexes = normalizeDeleteIndexes(indexes, nextParsed.configs.length, '配置项');
+
+    for (const index of targetIndexes) {
+        nextParsed.configs.splice(index, 1);
+    }
+
     return validateParsedConfig(nextParsed);
 }
 
@@ -322,6 +382,21 @@ function deleteDisabledConfigItem(parsed, index) {
     const targetIndex = getDisabledConfigIndex(index, nextParsed);
 
     disabledConfigs.splice(targetIndex, 1);
+    nextParsed.disabled_configs = disabledConfigs;
+    return validateParsedConfig(nextParsed);
+}
+
+function deleteDisabledConfigItems(parsed, indexes) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
+        ? nextParsed.disabled_configs
+        : [];
+    const targetIndexes = normalizeDeleteIndexes(indexes, disabledConfigs.length, '停用配置项');
+
+    for (const index of targetIndexes) {
+        disabledConfigs.splice(index, 1);
+    }
+
     nextParsed.disabled_configs = disabledConfigs;
     return validateParsedConfig(nextParsed);
 }
@@ -400,7 +475,9 @@ module.exports = {
     updateConfigItem,
     updateConfigSettings,
     deleteConfigItem,
+    deleteConfigItems,
     deleteDisabledConfigItem,
+    deleteDisabledConfigItems,
     disableConfigItem,
     enableConfigItem,
     moveConfigItem,
