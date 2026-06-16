@@ -31,7 +31,6 @@ function createAccountManager(options) {
     allQuotaCheckIntervalMs = 10 * 60 * 1000,
     allQuotaCheckDelayMs = 1000,
     minRemainingPercent,
-    minWeeklyRemainingPercent = 1,
     buildAuthHeadersForConfig,
     requestBufferedFn = requestBuffered,
     shouldUseQuotaMonitoring,
@@ -100,7 +99,6 @@ function createAccountManager(options) {
       missing_credentials: '缺少凭证',
       rate_limit_not_allowed: '额度不可用',
       rate_limit_reached: '额度已用尽',
-      membership_expired: '会员已过期',
       responses_insufficient_quota: 'responses 配额不足',
       responses_usage_limit_reached: 'responses 窗口额度已用尽',
       responses_usage_not_included: 'responses 套餐不支持',
@@ -110,7 +108,6 @@ function createAccountManager(options) {
       apikey_upstream_5xx: 'API Key 上游服务错误',
       apikey_upstream_error: 'API Key 上游请求失败',
       [`remaining_below_${minRemainingPercent}%`]: `剩余额度低于 ${minRemainingPercent}%`,
-      [`secondary_remaining_not_above_${minWeeklyRemainingPercent}%`]: `周额度不高于 ${minWeeklyRemainingPercent}%`,
       quota_check_failed: '额度检查失败',
     };
 
@@ -223,92 +220,6 @@ function createAccountManager(options) {
     return Math.max(0, 100 - windowData.used_percent);
   }
 
-  function normalizePlanText(value) {
-    return typeof value === 'string' ? value.trim().toLowerCase() : '';
-  }
-
-  function pickFirstPlanText(values) {
-    for (const value of values) {
-      const normalized = normalizePlanText(value);
-      if (normalized) {
-        return normalized;
-      }
-    }
-
-    return '';
-  }
-
-  function getSubscriptionActiveSignal(payload) {
-    if (!payload || typeof payload !== 'object') {
-      return null;
-    }
-
-    const subscription = payload.subscription && typeof payload.subscription === 'object'
-      ? payload.subscription
-      : payload.account?.subscription && typeof payload.account.subscription === 'object'
-        ? payload.account.subscription
-        : payload.billing?.subscription && typeof payload.billing.subscription === 'object'
-          ? payload.billing.subscription
-          : null;
-
-    const activeValues = [
-      payload.has_active_subscription,
-      payload.active_subscription,
-      payload.is_subscribed,
-      payload.is_plus_user,
-      subscription?.active,
-      subscription?.is_active,
-    ];
-
-    if (activeValues.some(value => value === false)) {
-      return false;
-    }
-
-    if (activeValues.some(value => value === true)) {
-      return true;
-    }
-
-    const status = normalizePlanText(subscription?.status ?? payload.subscription_status);
-    if (['expired', 'inactive', 'canceled', 'cancelled', 'past_due', 'unpaid', 'not_subscribed'].includes(status)) {
-      return false;
-    }
-
-    if (['active', 'trialing'].includes(status)) {
-      return true;
-    }
-
-    return null;
-  }
-
-  function getPlanType(payload, rateLimit) {
-    return pickFirstPlanText([
-      payload?.plan_type,
-      payload?.plan?.type,
-      payload?.account?.plan_type,
-      payload?.account?.plan?.type,
-      payload?.subscription?.plan_type,
-      payload?.subscription?.plan?.type,
-      payload?.billing?.plan_type,
-      rateLimit?.plan_type,
-    ]);
-  }
-
-  function getPaidPlanSignal(planType) {
-    if (!planType) {
-      return null;
-    }
-
-    if (['free', 'none', 'unknown', 'expired', 'not_subscribed', 'no_subscription', 'unsubscribed'].includes(planType)) {
-      return false;
-    }
-
-    if (['plus', 'pro', 'team', 'business', 'enterprise', 'edu'].includes(planType)) {
-      return true;
-    }
-
-    return null;
-  }
-
   /**
    * 将额度接口返回转换为统一的运行时状态。
    */
@@ -332,9 +243,7 @@ function createAccountManager(options) {
     const rateLimit = payload && typeof payload === 'object' ? payload.rate_limit || {} : {};
     const primaryRemainingPercent = computeRemainingPercent(rateLimit.primary_window);
     const secondaryRemainingPercent = computeRemainingPercent(rateLimit.secondary_window);
-    const subscriptionActiveSignal = getSubscriptionActiveSignal(payload);
-    const paidPlanSignal = getPaidPlanSignal(getPlanType(payload, rateLimit));
-    // 对外汇总口径跟随主额度窗口；周额度单独作为可用性保护条件。
+    // 对外汇总和可用性保护口径都跟随主额度窗口；周额度仅用于展示。
     const remainingPercent = primaryRemainingPercent !== null
       ? primaryRemainingPercent
       : secondaryRemainingPercent;
@@ -342,10 +251,7 @@ function createAccountManager(options) {
     let available = true;
     let reason = 'ok';
 
-    if (subscriptionActiveSignal === false || paidPlanSignal === false) {
-      available = false;
-      reason = 'membership_expired';
-    } else if (rateLimit.allowed === false) {
+    if (rateLimit.allowed === false) {
       available = false;
       reason = 'rate_limit_not_allowed';
     } else if (rateLimit.limit_reached === true) {
@@ -354,9 +260,6 @@ function createAccountManager(options) {
     } else if (primaryRemainingPercent !== null && primaryRemainingPercent < minRemainingPercent) {
       available = false;
       reason = `remaining_below_${minRemainingPercent}%`;
-    } else if (secondaryRemainingPercent !== null && secondaryRemainingPercent <= minWeeklyRemainingPercent) {
-      available = false;
-      reason = `secondary_remaining_not_above_${minWeeklyRemainingPercent}%`;
     }
 
     return {

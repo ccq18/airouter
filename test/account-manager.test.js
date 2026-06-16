@@ -818,7 +818,7 @@ test('applyQuotaPayload keeps the account available when weekly quota remains ab
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
-test('applyQuotaPayload marks the account unavailable when weekly quota is not above 1%', () => {
+test('applyQuotaPayload keeps the account available when weekly quota is not above 1%', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -834,16 +834,16 @@ test('applyQuotaPayload marks the account unavailable when weekly quota is not a
     },
   });
 
-  assert.equal(selected, configs[1]);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'secondary_remaining_not_above_1%');
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.remainingPercent, 50);
   assert.equal(configs[0].runtime.primaryRemainingPercent, 50);
   assert.equal(configs[0].runtime.secondaryRemainingPercent, 1);
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
-test('applyQuotaPayload marks an explicit free plan as membership expired', () => {
+test('applyQuotaPayload keeps the account available when membership fields look expired', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -852,6 +852,7 @@ test('applyQuotaPayload marks an explicit free plan as membership expired', () =
 
   const selected = manager.applyQuotaPayload(configs[0], {
     plan_type: 'free',
+    subscription: { active: false, status: 'expired' },
     rate_limit: {
       allowed: true,
       limit_reached: false,
@@ -860,12 +861,12 @@ test('applyQuotaPayload marks an explicit free plan as membership expired', () =
     },
   });
 
-  assert.equal(selected, configs[1]);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'membership_expired');
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.primaryRemainingPercent, 97);
   assert.equal(configs[0].runtime.secondaryRemainingPercent, 90);
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
 test('applyQuotaPayload keeps a token account available when weekly quota is missing but primary quota remains', () => {

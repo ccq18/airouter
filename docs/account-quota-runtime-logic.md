@@ -57,7 +57,7 @@
 
 - `primary*` 表示主额度窗口
 - `secondary*` 表示辅助/周额度窗口
-- 对外汇总口径跟随主额度窗口；可用性同时检查主额度和周额度
+- 对外汇总口径跟随主额度窗口；周额度只展示，不参与可用性摘除
 - `unavailableUntil` 是毫秒时间戳；为空表示没有请求失败冷却
 
 ## 3. 账号可用性判定
@@ -66,35 +66,27 @@
 
 当 `/backend-api/wham/usage` 返回成功后，当前实现按以下顺序判定账号可用性：
 
-1. 订阅/会员显式失效
-   - 包括 `subscription.active === false`、`has_active_subscription === false`、`plan_type === "free"` 等形态
-   - 标记为不可用
-   - `reason = membership_expired`
-
 额度接口成功返回可用状态时，会清空 token 的请求失败冷却字段 `unavailableUntil`。
-2. `rate_limit.allowed === false`
+1. `rate_limit.allowed === false`
    - 标记为不可用
    - `reason = rate_limit_not_allowed`
-3. `rate_limit.limit_reached === true`
+2. `rate_limit.limit_reached === true`
    - 标记为不可用
    - `reason = rate_limit_reached`
-4. 主额度窗口剩余百分比 `< minRemainingPercent`
+3. 主额度窗口剩余百分比 `< minRemainingPercent`
    - 标记为不可用
    - `reason = remaining_below_3%`
-5. 周额度窗口剩余百分比 `<= minWeeklyRemainingPercent`
-   - 标记为不可用
-   - `reason = secondary_remaining_not_above_1%`
-6. 以上都不满足
+4. 以上都不满足
    - 标记为可用
    - `reason = ok`
 
 说明：
 
 - 当前主额度默认阈值为 `3%`
-- 当前周额度默认阈值为 `> 1%`
-- 周额度窗口缺失时不直接判定会员过期；只有明确订阅/计划失效信号才会判定 `membership_expired`
+- 当前不校验会员状态
+- 当前不校验周额度；周额度窗口缺失或周额度很低都不会直接标记 token 不可用
 - `remainingPercent` 的对外汇总口径跟随主额度窗口
-- `secondaryRemainingPercent` 用于展示，也参与周额度可用性判断
+- `secondaryRemainingPercent` 仅用于展示
 
 ### 3.2 额度接口失败时
 
