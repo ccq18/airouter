@@ -1,4 +1,5 @@
 const { requestBuffered } = require('./upstream-request');
+const { isSuccessfulResponsesStatus } = require('./responses-failover');
 const crypto = require('node:crypto');
 
 const SESSION_HASH_LENGTH = 12;
@@ -7,6 +8,7 @@ const APIKEY_REQUEST_WINDOW_SIZE = 10;
 const APIKEY_REQUEST_FAILURE_THRESHOLD = 3;
 const APIKEY_REQUEST_SAMPLE_TTL_MS = 30 * 60 * 1000;
 const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
+const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 const APIKEY_RECOVERY_REQUEST_BODY = {
   model: 'gpt-5.5',
   input: 'hello',
@@ -22,6 +24,7 @@ function createAccountManager(options) {
     initialActiveConfigIndex = 0,
     quotaCheckPath,
     quotaCheckTimeoutMs = 0,
+    apiKeyRecoveryTimeoutMs = DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS,
     quotaCheckIntervalMs,
     allQuotaCheckIntervalMs = 10 * 60 * 1000,
     allQuotaCheckDelayMs = 1000,
@@ -632,16 +635,16 @@ function createAccountManager(options) {
     return nextConfig;
   }
 
-  function withQuotaCheckTimeout(promise) {
-    if (!Number.isFinite(quotaCheckTimeoutMs) || quotaCheckTimeoutMs <= 0) {
+  function withTimeout(promise, timeoutMs, label) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       return promise;
     }
 
     let timeoutHandle = null;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutHandle = setTimeout(() => {
-        reject(new Error(`quota check timeout after ${quotaCheckTimeoutMs}ms`));
-      }, quotaCheckTimeoutMs);
+        reject(new Error(`${label} timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
     });
 
     return Promise.race([promise, timeoutPromise])
@@ -650,6 +653,14 @@ function createAccountManager(options) {
           clearTimeout(timeoutHandle);
         }
       });
+  }
+
+  function withQuotaCheckTimeout(promise) {
+    return withTimeout(promise, quotaCheckTimeoutMs, 'quota check');
+  }
+
+  function withApiKeyRecoveryTimeout(promise) {
+    return withTimeout(promise, apiKeyRecoveryTimeoutMs, 'apikey recovery');
   }
 
   function normalizeString(value) {
@@ -1218,7 +1229,7 @@ function createAccountManager(options) {
       return 'apikey_upstream_5xx';
     }
 
-    return previousReason || 'apikey_upstream_error';
+    return 'apikey_upstream_error';
   }
 
   function getApiKeyRecoveryModel(config) {
@@ -1243,19 +1254,19 @@ function createAccountManager(options) {
       'content-length': String(body.length),
     };
 
-    const result = await withQuotaCheckTimeout(requestBufferedFn({
+    const result = await withApiKeyRecoveryTimeout(requestBufferedFn({
       method: 'POST',
       targetUrl,
       headers,
       body,
-      timeoutMs: quotaCheckTimeoutMs,
+      timeoutMs: apiKeyRecoveryTimeoutMs,
     }));
 
     const statusCode = Number(result && result.statusCode);
     const checkedAt = now();
     config.runtime.lastCheckedAt = checkedAt;
 
-    if (statusCode >= 200 && statusCode < 300) {
+    if (isSuccessfulResponsesStatus(statusCode)) {
       config.runtime.available = true;
       config.runtime.reason = 'apikey';
       config.runtime.lastError = null;

@@ -119,6 +119,9 @@ test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () 
   assert.equal(isResponsesFailoverInspectionCandidate(503, {
     'content-type': 'application/json',
   }), true);
+  assert.equal(isResponsesFailoverInspectionCandidate(201, {
+    'content-type': 'application/json',
+  }), true);
   assert.equal(isResponsesFailoverInspectionCandidate(200, {
     'content-type': 'application/json',
   }), false);
@@ -156,7 +159,16 @@ test('classifyApiKeyUpstreamFailure marks auth, rate limit, and server failures 
     retryKey: '503',
     retrySource: 'http',
   });
-  assert.equal(classifyApiKeyUpstreamFailure(apiKeyConfig, 400), null);
+  assert.deepEqual(classifyApiKeyUpstreamFailure(apiKeyConfig, 400), {
+    reason: 'apikey_upstream_error',
+    retryKey: '400',
+    retrySource: 'http',
+  });
+  assert.deepEqual(classifyApiKeyUpstreamFailure(apiKeyConfig, 201), {
+    reason: 'apikey_upstream_error',
+    retryKey: '201',
+    retrySource: 'http',
+  });
   assert.equal(classifyApiKeyUpstreamFailure({ type: 'token' }, 503), null);
 });
 
@@ -336,6 +348,7 @@ test('server defaults upstream requests to the official SDK timeout window', () 
   const upstreamSource = fs.readFileSync(path.join(__dirname, '..', 'app/upstream-request.js'), 'utf8');
 
   assert.match(openaiSource, /UPSTREAM_REQUEST_TIMEOUT_MS', 10 \* 60 \* 1000/);
+  assert.match(openaiSource, /APIKEY_RECOVERY_TIMEOUT_MS', 10 \* 60 \* 1000/);
   assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);
 });
 
@@ -640,6 +653,57 @@ test('createClaudeMessagesHandler reports direct claude apikey retryable upstrea
   });
 });
 
+test('createClaudeMessagesHandler reports direct claude apikey non-200 statuses as failures', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'claude upstream',
+    apiKey: 'upstream-claude-key',
+    baseUrl: 'https://claude.example.com',
+    support: ['claude'],
+  };
+  const apiKeyResults = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    createUpstreamRequest: () => ({
+      responsePromise: Promise.resolve(createUpstreamResponse(400, {
+        'content-type': 'application/json',
+      }, JSON.stringify({
+        error: {
+          message: 'bad request',
+        },
+      }))),
+      abort() {},
+    }),
+    observeApiKeyRequestResult: (failedConfig, result) => {
+      apiKeyResults.push({ failedConfig, result });
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(apiKeyResults.length, 1);
+  assert.equal(apiKeyResults[0].failedConfig, config);
+  assert.deepEqual(apiKeyResults[0].result, {
+    ok: false,
+    reason: 'apikey_upstream_error',
+    lastError: 'http:400',
+    switchReason: 'apikey_upstream_failover',
+  });
+});
+
 test('createClaudeMessagesHandler retries retryable upstream usage-limit errors with the next config', async () => {
   const configs = [
     {
@@ -744,6 +808,101 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
     item.observation.requestModel === 'gpt-5.5' &&
     item.observation.responseModel === 'gpt-5.4'
   )));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'hello',
+    },
+  ]);
+});
+
+test('createClaudeMessagesHandler retries non-200 responses statuses with the next config', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary',
+      access_token: 'token-1',
+      account_id: 'account-1',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup',
+      access_token: 'token-2',
+      account_id: 'account-2',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+  ];
+  const upstreamAccountIds = [];
+  const classifications = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (config, classification) => {
+      classifications.push({ config, classification });
+      return configs[1];
+    },
+    createUpstreamRequest: request => {
+      upstreamAccountIds.push(request.headers['chatgpt-account-id']);
+      if (upstreamAccountIds.length === 1) {
+        return {
+          responsePromise: Promise.resolve(createUpstreamResponse(204, {
+            'content-type': 'application/json',
+          }, '')),
+          abort() {},
+        };
+      }
+
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}',
+        '',
+        'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+        '',
+        'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+        '',
+        'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"hello"}',
+        '',
+        'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+        '',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+      ].join('\n');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+  });
+
+  const res = createJsonResponseRecorder();
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
+  assert.equal(classifications.length, 1);
+  assert.deepEqual(classifications[0].classification, {
+    reason: 'responses_unknown_error',
+    retryKey: 'http_204',
+    retrySource: 'http',
+  });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.payload.content, [
     {

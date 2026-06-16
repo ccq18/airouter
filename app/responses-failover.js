@@ -23,6 +23,10 @@ const UNKNOWN_RESPONSES_ERROR = {
   reason: 'responses_unknown_error',
 };
 
+function isSuccessfulResponsesStatus(statusCode) {
+  return Number(statusCode) === 200;
+}
+
 function normalizeErrorText(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -104,7 +108,7 @@ function getAuthFailureKey(payload, bodyText) {
 
 function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const normalizedStatusCode = Number(statusCode);
-  if (!Number.isFinite(normalizedStatusCode) || (normalizedStatusCode >= 200 && normalizedStatusCode < 300)) {
+  if (!Number.isFinite(normalizedStatusCode) || isSuccessfulResponsesStatus(normalizedStatusCode)) {
     return null;
   }
 
@@ -367,5 +371,6 @@ module.exports = {
   drainAbandonedResponse,
   getHeaderValue,
   isInspectableResponsesEventStream,
+  isSuccessfulResponsesStatus,
   normalizeContentEncoding,
 };

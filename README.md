@@ -135,7 +135,7 @@ Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `sessio
 - 用 `停用` 将账号移入停用列表。停用账号对服务不可见，后续请求、额度刷新和 fallback 都不会读取它，但可以在管理页重新启用。
 - 用 `删除` 永久移除不再需要的账号。
 
-token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态；额度低、登录态失效或账号不可用时，会跳过它。额度检查本身连续 3 次失败才会把 token 标记为 `quota_check_failed`，成功检查会清零失败计数。apikey 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，401/403、429、5xx、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换。已被标记为不可用的 GPT apikey 会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测，成功后自动恢复可用；探测模型默认 `gpt-5.5`，可在 apikey 配置里用 `"health": {"model": "gpt-4.1-mini"}` 覆盖。
+token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态；额度低、登录态失效或账号不可用时，会跳过它。额度检查本身连续 3 次失败才会把 token 标记为 `quota_check_failed`，成功检查会清零失败计数。apikey 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，任意非 200 HTTP 状态、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换。已被标记为不可用的 GPT apikey 会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测，成功后自动恢复可用；探测默认超时 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；探测模型默认 `gpt-5.5`，可在 apikey 配置里用 `"health": {"model": "gpt-4.1-mini"}` 覆盖。
 
 管理页会在“调度模式”和 token 账号摘要里显示安全的调度观测：正在请求时显示 `当前会话 #短hash -> 配置 #N`，请求结束后保留 `最近会话 #短hash`，用于观察某个会话实际命中了哪个账号。原始会话 ID 不会写入配置，也不会返回到页面。
 

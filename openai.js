@@ -28,6 +28,7 @@ const {
     createResponsesEventStreamInspector,
     drainAbandonedResponse,
     isInspectableResponsesEventStream,
+    isSuccessfulResponsesStatus,
     normalizeContentEncoding,
 } = require('./app/responses-failover');
 const {
@@ -131,6 +132,7 @@ function parseTimeoutMs(name, fallbackValue) {
 
 const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 10 * 60 * 1000);
 const QUOTA_CHECK_TIMEOUT_MS = parseTimeoutMs('QUOTA_CHECK_TIMEOUT_MS', 10 * 1000);
+const APIKEY_RECOVERY_TIMEOUT_MS = parseTimeoutMs('APIKEY_RECOVERY_TIMEOUT_MS', 10 * 60 * 1000);
 
 function hasCliFlag(flag) {
     return process.argv.includes(flag);
@@ -167,6 +169,10 @@ function getConfigPoolType(configs) {
 
 function hasQuotaMonitoredConfigs(configs) {
     return (configs || []).some(config => shouldUseQuotaMonitoring(config.type));
+}
+
+function hasRecoverableApiKeyConfigs(configs) {
+    return (configs || []).some(config => configSupportsCapability(config, 'gpt'));
 }
 
 function ensureSecuritySettings(parsed) {
@@ -546,12 +552,20 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
         };
     }
 
+    if (!isSuccessfulResponsesStatus(normalizedStatusCode)) {
+        return {
+            reason: 'apikey_upstream_error',
+            retryKey: Number.isFinite(normalizedStatusCode) ? String(normalizedStatusCode) : 'invalid_status',
+            retrySource: 'http',
+        };
+    }
+
     return null;
 }
 
 function isResponsesFailoverInspectionCandidate(statusCode, headers) {
     const normalizedStatusCode = Number(statusCode);
-    return (Number.isFinite(normalizedStatusCode) && (normalizedStatusCode < 200 || normalizedStatusCode >= 300)) ||
+    return (Number.isFinite(normalizedStatusCode) && !isSuccessfulResponsesStatus(normalizedStatusCode)) ||
         isInspectableResponsesEventStream(headers);
 }
 
@@ -697,7 +711,7 @@ async function inspectResponsesEventStream(response) {
 }
 
 async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders) {
-    if (Number.isFinite(Number(statusCode)) && (Number(statusCode) < 200 || Number(statusCode) >= 300)) {
+    if (Number.isFinite(Number(statusCode)) && !isSuccessfulResponsesStatus(statusCode)) {
         const bodyBuffer = await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
         const classification = classifyRetryableResponsesHttpError({
@@ -874,6 +888,7 @@ function applyLoadedConfig(loadedConfig) {
         initialActiveConfigIndex: loadedConfig.initialActiveConfigIndex ?? 0,
         quotaCheckPath: QUOTA_CHECK_PATH,
         quotaCheckTimeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+        apiKeyRecoveryTimeoutMs: APIKEY_RECOVERY_TIMEOUT_MS,
         quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
         allQuotaCheckIntervalMs: ALL_QUOTA_CHECK_INTERVAL_MS,
         allQuotaCheckDelayMs: ALL_QUOTA_CHECK_DELAY_MS,
@@ -2402,7 +2417,7 @@ async function handleTokenImageGenerationRequest(req, res, config) {
         timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
     });
 
-    if (result.statusCode < 200 || result.statusCode >= 300) {
+    if (!isSuccessfulResponsesStatus(result.statusCode)) {
         writeBufferedUpstreamResponse(res, result.statusCode, result.headers, result.body);
         return;
     }
@@ -2452,7 +2467,7 @@ async function handleTokenImageEditRequest(req, res, config) {
         timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
     });
 
-    if (result.statusCode < 200 || result.statusCode >= 300) {
+    if (!isSuccessfulResponsesStatus(result.statusCode)) {
         writeBufferedUpstreamResponse(res, result.statusCode, result.headers, result.body);
         return;
     }
@@ -3056,6 +3071,7 @@ async function startServer() {
             log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟额外全量校正（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
             log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
+            log(`  - apikey 恢复探测超时: ${hasRecoverableApiKeyConfigs(apiConfigs) ? `${APIKEY_RECOVERY_TIMEOUT_MS}ms` : '关闭（无 GPT apikey 配置项）'}`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
             log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
             if (hasQuotaMonitoredConfigs(apiConfigs) && apiConfigs.length > 0) {

@@ -6,7 +6,8 @@ const {
 } = require('./claude-responses-compat');
 const {
     classifyRetryableResponsesHttpError,
-    classifyRetryableResponsesStreamPayload
+    classifyRetryableResponsesStreamPayload,
+    isSuccessfulResponsesStatus
 } = require('./responses-failover');
 
 const DEFAULT_RESPONSES_API_PATH = '/backend-api/codex/responses';
@@ -92,6 +93,14 @@ function classifyApiKeyUpstreamStatus(statusCode) {
         return {
             reason: 'apikey_upstream_5xx',
             retryKey: String(normalizedStatusCode),
+            retrySource: 'http'
+        };
+    }
+
+    if (!isSuccessfulResponsesStatus(normalizedStatusCode)) {
+        return {
+            reason: 'apikey_upstream_error',
+            retryKey: Number.isFinite(normalizedStatusCode) ? String(normalizedStatusCode) : 'invalid_status',
             retrySource: 'http'
         };
     }
@@ -568,7 +577,7 @@ function forwardClaudeApiKeyMessagesRequest({
             const bodyBuffer = Buffer.concat(responseBodyChunks);
             releaseCurrentConfig();
 
-            if (statusCode >= 200 && statusCode < 300) {
+            if (isSuccessfulResponsesStatus(statusCode)) {
                 sendBufferedUpstreamResponse(res, statusCode, contentType, bodyBuffer);
                 return;
             }
@@ -913,7 +922,7 @@ function createClaudeMessagesHandler({
                 };
 
                 response.on('data', chunk => {
-                    if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
+                    if (isSuccessfulResponsesStatus(upstreamMeta.statusCode)) {
                         processResponsesSseText(
                             sseState,
                             chunk.toString('utf8'),
@@ -928,7 +937,7 @@ function createClaudeMessagesHandler({
                 response.on('end', () => {
                     responseFinished = true;
 
-                    if (upstreamMeta.statusCode >= 200 && upstreamMeta.statusCode < 300) {
+                    if (isSuccessfulResponsesStatus(upstreamMeta.statusCode)) {
                         processResponsesSseText(
                             sseState,
                             '',

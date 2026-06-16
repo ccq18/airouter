@@ -78,7 +78,7 @@
 - `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
 - `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
 - 每分钟额度轮询会检查所有 `token` 配置项
-- `apikey` 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，401/403、429、5xx、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换
+- `apikey` 直连上游会记录最近 30 分钟内最多 10 个已完成真实请求，任意非 200 HTTP 状态、请求失败或响应体中断累计达到 3 次时，会被临时标记为不可用并尝试切换
 - 每 10 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.5`，可通过该配置项的 `health.model` 覆盖
 - token 请求调度：有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择
 - 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
@@ -155,8 +155,8 @@
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
-- `apikey` 配置项在直连上游最近 30 分钟内最多 10 个已完成真实请求中累计 3 次 401/403、429、5xx、请求失败或响应体中断时，会被临时标记为不可用；普通 `/v1/*` 链路会尝试切到下一个可用配置，未达到阈值前会透传上游原响应
-- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 2xx 时恢复为可用
+- `apikey` 配置项在直连上游最近 30 分钟内最多 10 个已完成真实请求中累计 3 次任意非 200 HTTP 状态、请求失败或响应体中断时，会被临时标记为不可用；普通 `/v1/*` 链路会尝试切到下一个可用配置，未达到阈值前会透传上游原响应
+- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 10 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
 

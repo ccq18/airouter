@@ -176,6 +176,19 @@ test('classifyRetryableResponsesHttpError treats model capacity HTTP errors as f
   });
 });
 
+test('classifyRetryableResponsesHttpError treats non-200 success statuses as failed', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 201,
+    bodyText: '',
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: 'http_201',
+    retrySource: 'http',
+  });
+});
+
 test('createResponsesEventStreamInspector catches insufficient_quota failures', () => {
   const inspector = createResponsesEventStreamInspector();
 

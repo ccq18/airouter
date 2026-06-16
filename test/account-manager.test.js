@@ -74,6 +74,7 @@ function createManager(configs, overrides = {}) {
     initialActiveConfigIndex: overrides.initialActiveConfigIndex,
     quotaCheckPath: '/backend-api/wham/usage',
     quotaCheckTimeoutMs: overrides.quotaCheckTimeoutMs ?? 10 * 1000,
+    apiKeyRecoveryTimeoutMs: overrides.apiKeyRecoveryTimeoutMs,
     quotaCheckIntervalMs: overrides.quotaCheckIntervalMs ?? 60 * 1000,
     allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 10 * 60 * 1000,
     allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
@@ -1342,6 +1343,74 @@ test('refreshQuotas uses configured apikey health model during GPT recovery prob
     stream: false,
   });
   assert.equal(configs[0].runtime.available, true);
+});
+
+test('refreshQuotas gives apikey recovery probes an AI request timeout', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+  ];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    quotaCheckTimeoutMs: 10 * 1000,
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ id: 'resp_1' }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].timeoutMs, 10 * 60 * 1000);
+});
+
+test('refreshQuotas treats non-200 apikey recovery statuses as failed', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => ({
+      statusCode: 201,
+      bodyText: JSON.stringify({ id: 'resp_created' }),
+    }),
+  });
+
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'apikey_upstream_error');
+  assert.equal(configs[0].runtime.lastError, 'http:201');
+  assert.deepEqual(configs[0].runtime.apiKeyRecovery, {
+    lastCheckedAt: 1713337200000,
+    result: 'failed',
+    statusCode: 201,
+    reason: 'apikey_upstream_error',
+    lastError: 'http:201',
+    model: 'gpt-5.5',
+  });
 });
 
 test('refreshQuotas switches to the next available account when the polled account becomes unavailable', async () => {
