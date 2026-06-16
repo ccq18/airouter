@@ -104,7 +104,7 @@ function getAuthFailureKey(payload, bodyText) {
 
 function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const normalizedStatusCode = Number(statusCode);
-  if (normalizedStatusCode !== 429 && normalizedStatusCode !== 401 && normalizedStatusCode !== 403) {
+  if (!Number.isFinite(normalizedStatusCode) || (normalizedStatusCode >= 200 && normalizedStatusCode < 300)) {
     return null;
   }
 
@@ -131,6 +131,15 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const errorType = payload && payload.error && typeof payload.error.type === 'string'
     ? payload.error.type
     : '';
+  const errorCode = payload && payload.error && typeof payload.error.code === 'string'
+    ? payload.error.code
+    : '';
+  const topLevelType = payload && typeof payload.type === 'string'
+    ? payload.type
+    : '';
+  const topLevelCode = payload && typeof payload.code === 'string'
+    ? payload.code
+    : '';
   const messageKey = getUsageLimitMessageKey(
     getPayloadString(payload, ['error', 'message']),
     getPayloadString(payload, ['message']),
@@ -142,7 +151,7 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   if (!metadata) {
     return {
       reason: UNKNOWN_RESPONSES_ERROR.reason,
-      retryKey: errorType || 'unknown_error',
+      retryKey: errorType || errorCode || topLevelType || topLevelCode || `http_${normalizedStatusCode}`,
       retrySource: 'http',
     };
   }

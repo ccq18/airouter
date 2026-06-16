@@ -90,7 +90,7 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 
 有些错误不是通过 `response.failed` 事件返回，而是直接通过 HTTP 状态码和响应体返回。
 
-最关键的是 `429 Too Many Requests`。
+对 `responses` 主链路，只要 HTTP 状态码不是 `2xx`，就应该先按错误处理，再用响应体里的字段做更细分类。错误码、错误类型和文案只决定“是什么错误”，不决定“要不要进入错误处理”。
 
 #### 1.2.1 `429` 的识别方式
 
@@ -179,6 +179,8 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 
 - `500`
   - 一般可归类为服务端内部错误
+- `503`
+  - 即使不是已知 `server_is_overloaded` / `slow_down`，也仍然是失败；例如 `Selected model is at capacity. Please try a different model.`
 - `400`
   - 一般可归类为请求参数错误
   - 若 body 明确包含图像非法等字段，再做更细分类
@@ -205,7 +207,7 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 
 #### 1.3.2 对普通 HTTP 响应
 
-1. 先看 `status`
+1. 先看 `status`，只要不是 `2xx` 就进入错误处理
 2. 如果 `status == 429`，优先看 `error.type`
 3. 用以下映射表判断：
 
@@ -222,6 +224,8 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 | `status + error.code` | `503 + server_is_overloaded` | 服务繁忙 |
 | `status + error.code` | `503 + slow_down` | 服务繁忙 / 降速 |
 
+6. 如果没有命中任何已知字段，也保留 `status`、`error.type`、`error.code` 或原始 message 作为排障线索，并按未知 HTTP 错误处理。
+
 ### 1.4 最小落地版判断条件
 
 #### 1.4.1 流式 `responses`
@@ -235,6 +239,7 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 
 #### 1.4.2 普通 HTTP
 
+- 任意非 `2xx` HTTP 响应
 - `status == 429` 且 `error.type == "usage_limit_reached"`
 - `status == 429` 且 `error.type == "usage_not_included"`
 - `status == 503` 且 `error.code == "server_is_overloaded"`
@@ -301,7 +306,11 @@ function classifyResponsesError(args: {
     return { kind: "invalid_request" };
   }
 
-  return { kind: "unknown_http_error" };
+  if (args.status && (args.status < 200 || args.status >= 300)) {
+    return { kind: "unknown_http_error" };
+  }
+
+  return null;
 }
 ```
 

@@ -109,10 +109,19 @@ test('buildProxyHeaders strips local-only auth headers before forwarding upstrea
   assert.equal(headers['content-length'], '27');
 });
 
-test('isResponsesFailoverInspectionCandidate inspects upstream auth failures', () => {
+test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () => {
   assert.equal(isResponsesFailoverInspectionCandidate(401, {
     'content-type': 'application/json',
   }), true);
+  assert.equal(isResponsesFailoverInspectionCandidate(400, {
+    'content-type': 'application/json',
+  }), true);
+  assert.equal(isResponsesFailoverInspectionCandidate(503, {
+    'content-type': 'application/json',
+  }), true);
+  assert.equal(isResponsesFailoverInspectionCandidate(200, {
+    'content-type': 'application/json',
+  }), false);
 });
 
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {

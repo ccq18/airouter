@@ -551,9 +551,7 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
 
 function isResponsesFailoverInspectionCandidate(statusCode, headers) {
     const normalizedStatusCode = Number(statusCode);
-    return normalizedStatusCode === 429 ||
-        normalizedStatusCode === 401 ||
-        normalizedStatusCode === 403 ||
+    return (Number.isFinite(normalizedStatusCode) && (normalizedStatusCode < 200 || normalizedStatusCode >= 300)) ||
         isInspectableResponsesEventStream(headers);
 }
 
@@ -699,7 +697,7 @@ async function inspectResponsesEventStream(response) {
 }
 
 async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders) {
-    if ([429, 401, 403].includes(Number(statusCode))) {
+    if (Number.isFinite(Number(statusCode)) && (Number(statusCode) < 200 || Number(statusCode) >= 300)) {
         const bodyBuffer = await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
         const classification = classifyRetryableResponsesHttpError({

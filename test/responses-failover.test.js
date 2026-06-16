@@ -158,17 +158,22 @@ test('classifyRetryableResponsesHttpError treats unknown auth failures as failed
   });
 });
 
-test('classifyRetryableResponsesHttpError ignores non-retryable payloads', () => {
+test('classifyRetryableResponsesHttpError treats model capacity HTTP errors as failed', () => {
   const result = classifyRetryableResponsesHttpError({
     statusCode: 503,
     bodyText: JSON.stringify({
       error: {
-        code: 'server_is_overloaded',
+        code: 'model_at_capacity',
+        message: 'Selected model is at capacity. Please try a different model.',
       },
     }),
   });
 
-  assert.equal(result, null);
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: 'model_at_capacity',
+    retrySource: 'http',
+  });
 });
 
 test('createResponsesEventStreamInspector catches insufficient_quota failures', () => {

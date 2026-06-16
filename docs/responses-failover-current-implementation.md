@@ -28,9 +28,9 @@
 - HTTP `429` 且 `error.type == "usage_limit_reached"`
 - HTTP `429` 且 `error.type == "usage_not_included"`
 - HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
+- 其他 HTTP 非 `2xx` 响应，包括 `400`、`500`、`503` 等
 - SSE `response.failed` 且 `response.error.code == "insufficient_quota"`
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
-- 其他进入失败识别窗口但无法识别为已知类型的 `429` / `401` / `403`
 - 其他 `response.failed`
 
 对应内部原因码如下：
@@ -40,7 +40,7 @@
 | `429 + usage_limit_reached` | `responses_usage_limit_reached` |
 | `429 + usage_not_included` | `responses_usage_not_included` |
 | `401/403 + unauthorized/token_revoked` | `missing_credentials` |
-| `其他 429 / 401 / 403` | `responses_unknown_error` |
+| `其他 HTTP 非 2xx` | `responses_unknown_error` |
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
 | `其他 response.failed` | `responses_unknown_error` |
@@ -60,7 +60,7 @@
 
 `/responses` 的流式自动切号不是等整个响应结束后再判断，而是先做一段前置检查：
 
-1. 如果上游是 HTTP `429`，先读取完整 body，再看 `error.type`
+1. 如果上游是 HTTP 非 `2xx`，先读取完整 body，再提取 `error.type` / `error.code` / 顶层 `type` / 顶层 `code`
 2. 如果上游是 `text/event-stream`，先检查前几个 SSE 事件
 3. 如果在前置事件里看到：
    - `response.created`
