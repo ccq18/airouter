@@ -515,12 +515,11 @@ function createStaticConfigLease(config, sessionKey = '') {
     };
 }
 
-function canAttemptResponsesFailover(config, requestUrl, attempt) {
+function canAttemptResponsesFailover(config, requestUrl) {
     return Boolean(
         accountManager &&
         config &&
         config.type === 'token' &&
-        Number(attempt || 0) < 1 &&
         isResponsesPath(requestUrl)
     );
 }
@@ -853,9 +852,13 @@ function createClaudeMessagesRequestHandler(options = {}) {
                 return null;
             }
 
+            const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                ? context.excludedConfigs
+                : [config];
+
             return accountManager.acquireConfig('claude_responses_failover', item => item.type === config.type, {
                 sessionKey: context.sessionKey,
-                exclude: [config],
+                exclude: excludedConfigs,
                 allowFallback: false,
             });
         },
@@ -2117,7 +2120,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
-        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url, failoverAttempt)
+        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url)
             && isResponsesFailoverInspectionCandidate(statusCode, response.headers);
 
         if (shouldInspectResponses) {

@@ -817,6 +817,132 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
   ]);
 });
 
+test('createClaudeMessagesHandler keeps retrying usage-limit errors until a config succeeds', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary',
+      access_token: 'token-1',
+      account_id: 'account-1',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup',
+      access_token: 'token-2',
+      account_id: 'account-2',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+    {
+      type: 'token',
+      index: 2,
+      description: 'third',
+      access_token: 'token-3',
+      account_id: 'account-3',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+  ];
+  const upstreamAccountIds = [];
+  const classifications = [];
+  const retryContexts = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (config, classification, context) => {
+      classifications.push({ config, classification });
+      retryContexts.push(context);
+      return configs[classifications.length] || null;
+    },
+    createUpstreamRequest: request => {
+      upstreamAccountIds.push(request.headers['chatgpt-account-id']);
+      if (upstreamAccountIds.length <= 2) {
+        return {
+          responsePromise: Promise.resolve(createUpstreamResponse(429, {
+            'content-type': 'application/json',
+          }, JSON.stringify({
+            error: {
+              type: 'usage_limit_reached',
+              message: "You've hit your usage limit.",
+            },
+          }))),
+          abort() {},
+        };
+      }
+
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}',
+        '',
+        'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+        '',
+        'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+        '',
+        'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"hello"}',
+        '',
+        'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+        '',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+      ].join('\n');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+  });
+
+  const res = createJsonResponseRecorder();
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2', 'account-3']);
+  assert.deepEqual(classifications.map(item => ({
+    config: item.config.description,
+    reason: item.classification.reason,
+    lastError: `${item.classification.retrySource}:${item.classification.retryKey}`,
+  })), [
+    {
+      config: 'primary',
+      reason: 'responses_usage_limit_reached',
+      lastError: 'http:usage_limit_reached',
+    },
+    {
+      config: 'backup',
+      reason: 'responses_usage_limit_reached',
+      lastError: 'http:usage_limit_reached',
+    },
+  ]);
+  assert.deepEqual(retryContexts.map(context => context.excludedConfigs.map(config => config.description)), [
+    ['primary'],
+    ['primary', 'backup'],
+  ]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'hello',
+    },
+  ]);
+});
+
 test('createClaudeMessagesHandler retries non-200 responses statuses with the next config', async () => {
   const configs = [
     {

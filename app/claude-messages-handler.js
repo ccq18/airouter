@@ -759,10 +759,10 @@ function createClaudeMessagesHandler({
         let streamInitialized = false;
         let currentConfigSelection = null;
         let currentConfigReleased = false;
+        const failedConfigs = [];
 
         function getRetryConfig(activeConfig, classification, failoverAttempt) {
             if (
-                failoverAttempt >= 1 ||
                 typeof handleRetryableUpstreamError !== 'function' ||
                 res.headersSent ||
                 requestClosed
@@ -770,11 +770,17 @@ function createClaudeMessagesHandler({
                 return null;
             }
 
+            if (!failedConfigs.includes(activeConfig)) {
+                failedConfigs.push(activeConfig);
+            }
+
             const nextSelection = normalizeConfigSelection(handleRetryableUpstreamError(activeConfig, classification, {
                 sessionKey,
-                failoverAttempt
+                failoverAttempt,
+                failedConfigs: [...failedConfigs],
+                excludedConfigs: [...failedConfigs]
             }));
-            if (nextSelection.config && nextSelection.config !== activeConfig) {
+            if (nextSelection.config && nextSelection.config !== activeConfig && !failedConfigs.includes(nextSelection.config)) {
                 return nextSelection;
             }
 
