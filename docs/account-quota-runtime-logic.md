@@ -72,23 +72,19 @@
    - `reason = membership_expired`
 
 额度接口成功返回可用状态时，会清空 token 的请求失败冷却字段 `unavailableUntil`。
-2. 主额度窗口存在但周额度窗口缺失，且没有明确的付费计划信号
-   - 作为会员过期/未订阅的兼容兜底
-   - 标记为不可用
-   - `reason = membership_expired`
-3. `rate_limit.allowed === false`
+2. `rate_limit.allowed === false`
    - 标记为不可用
    - `reason = rate_limit_not_allowed`
-4. `rate_limit.limit_reached === true`
+3. `rate_limit.limit_reached === true`
    - 标记为不可用
    - `reason = rate_limit_reached`
-5. 主额度窗口剩余百分比 `< minRemainingPercent`
+4. 主额度窗口剩余百分比 `< minRemainingPercent`
    - 标记为不可用
    - `reason = remaining_below_3%`
-6. 周额度窗口剩余百分比 `<= minWeeklyRemainingPercent`
+5. 周额度窗口剩余百分比 `<= minWeeklyRemainingPercent`
    - 标记为不可用
    - `reason = secondary_remaining_not_above_1%`
-7. 以上都不满足
+6. 以上都不满足
    - 标记为可用
    - `reason = ok`
 
@@ -96,6 +92,7 @@
 
 - 当前主额度默认阈值为 `3%`
 - 当前周额度默认阈值为 `> 1%`
+- 周额度窗口缺失时不直接判定会员过期；只有明确订阅/计划失效信号才会判定 `membership_expired`
 - `remainingPercent` 的对外汇总口径跟随主额度窗口
 - `secondaryRemainingPercent` 用于展示，也参与周额度可用性判断
 

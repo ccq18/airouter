@@ -334,8 +334,6 @@ function createAccountManager(options) {
     const secondaryRemainingPercent = computeRemainingPercent(rateLimit.secondary_window);
     const subscriptionActiveSignal = getSubscriptionActiveSignal(payload);
     const paidPlanSignal = getPaidPlanSignal(getPlanType(payload, rateLimit));
-    const hasPrimaryWindow = Boolean(rateLimit.primary_window);
-    const hasSecondaryWindow = Boolean(rateLimit.secondary_window);
     // 对外汇总口径跟随主额度窗口；周额度单独作为可用性保护条件。
     const remainingPercent = primaryRemainingPercent !== null
       ? primaryRemainingPercent
@@ -344,7 +342,7 @@ function createAccountManager(options) {
     let available = true;
     let reason = 'ok';
 
-    if (subscriptionActiveSignal === false || paidPlanSignal === false || (hasPrimaryWindow && !hasSecondaryWindow && paidPlanSignal !== true)) {
+    if (subscriptionActiveSignal === false || paidPlanSignal === false) {
       available = false;
       reason = 'membership_expired';
     } else if (rateLimit.allowed === false) {

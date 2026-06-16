@@ -868,7 +868,7 @@ test('applyQuotaPayload marks an explicit free plan as membership expired', () =
   assert.equal(manager.getActiveConfig(), configs[1]);
 });
 
-test('applyQuotaPayload marks missing weekly quota on a token account as membership expired', () => {
+test('applyQuotaPayload keeps a token account available when weekly quota is missing but primary quota remains', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -883,14 +883,14 @@ test('applyQuotaPayload marks missing weekly quota on a token account as members
     },
   });
 
-  assert.equal(selected, configs[1]);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'membership_expired');
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.remainingPercent, 97);
   assert.equal(configs[0].runtime.primaryRemainingPercent, 97);
   assert.equal(configs[0].runtime.secondaryRemainingPercent, null);
   assert.equal(configs[0].runtime.secondaryResetAt, null);
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
 test('applyQuotaPayload switches away from the active account when it becomes unavailable', () => {
