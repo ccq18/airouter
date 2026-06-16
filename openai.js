@@ -1122,6 +1122,7 @@ function serializeAccountStatus(accountStatus) {
         last_checked_at: accountStatus.lastCheckedAt,
         reason: accountStatus.reason,
         quota_check_failures: accountStatus.quotaCheckFailures,
+        unavailable_until: accountStatus.unavailableUntil,
         api_key_request_window: accountStatus.apiKeyRequestWindow ? {
             failure_count: accountStatus.apiKeyRequestWindow.failureCount,
             sample_size: accountStatus.apiKeyRequestWindow.sampleSize,

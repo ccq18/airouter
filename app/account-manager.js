@@ -8,6 +8,7 @@ const APIKEY_REQUEST_WINDOW_SIZE = 10;
 const APIKEY_REQUEST_FAILURE_THRESHOLD = 3;
 const APIKEY_REQUEST_SAMPLE_TTL_MS = 30 * 60 * 1000;
 const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
+const DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS = 60 * 60 * 1000;
 const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 const APIKEY_RECOVERY_REQUEST_BODY = {
   model: 'gpt-5.5',
@@ -25,6 +26,7 @@ function createAccountManager(options) {
     quotaCheckPath,
     quotaCheckTimeoutMs = 0,
     apiKeyRecoveryTimeoutMs = DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS,
+    tokenUnavailableCooldownMs = DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS,
     quotaCheckIntervalMs,
     allQuotaCheckIntervalMs = 10 * 60 * 1000,
     allQuotaCheckDelayMs = 1000,
@@ -157,7 +159,23 @@ function createAccountManager(options) {
       parts.push(`错误=${runtime.lastError}`);
     }
 
+    const unavailableUntil = normalizeUnavailableUntil(config);
+    if (unavailableUntil) {
+      parts.push(`冷却至=${formatRuntimeTimestamp(unavailableUntil)}`);
+    }
+
     return parts.join(' | ');
+  }
+
+  function formatRuntimeTimestamp(epochMs) {
+    if (!Number.isFinite(epochMs) || epochMs <= 0) {
+      return 'unknown';
+    }
+
+    return new Date(epochMs).toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      hour12: false,
+    });
   }
 
   /**
@@ -183,6 +201,7 @@ function createAccountManager(options) {
       lastCheckedAt: config.runtime.lastCheckedAt,
       reason: config.runtime.reason,
       quotaCheckFailures: isDispatchManagedConfig(config) ? getQuotaCheckFailures(config) : null,
+      unavailableUntil: isDispatchManagedConfig(config) ? normalizeUnavailableUntil(config) : null,
       apiKeyRequestWindow: config.type === 'apikey' ? summarizeApiKeyRequestResults(config) : null,
       apiKeyRecovery: config.type === 'apikey' ? summarizeApiKeyRecovery(config) : null,
       inFlight: isDispatchManagedConfig(config) ? normalizeInFlight(config) : null,
@@ -371,6 +390,7 @@ function createAccountManager(options) {
     config.runtime.secondaryResetAfterSeconds = quotaState.secondaryResetAfterSeconds;
     config.runtime.lastError = null;
     config.runtime.quotaCheckFailures = 0;
+    config.runtime.unavailableUntil = null;
   }
 
   /**
@@ -406,6 +426,9 @@ function createAccountManager(options) {
     config.runtime.reason = reason;
     config.runtime.lastCheckedAt = now();
     config.runtime.lastError = lastError;
+    if (isDispatchManagedConfig(config)) {
+      config.runtime.unavailableUntil = calculateUnavailableUntil(options);
+    }
 
     if (allowSwitch && config === getActiveConfig()) {
       return ensureActiveConfig(switchReason);
@@ -417,6 +440,29 @@ function createAccountManager(options) {
   function getQuotaCheckFailures(config) {
     const value = Number(config?.runtime?.quotaCheckFailures || 0);
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  }
+
+  function normalizeUnavailableUntil(config) {
+    const value = Number(config?.runtime?.unavailableUntil);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+  }
+
+  function calculateUnavailableUntil(options = {}) {
+    if (Object.prototype.hasOwnProperty.call(options, 'unavailableUntil')) {
+      return normalizeUnavailableUntil({ runtime: { unavailableUntil: options.unavailableUntil } });
+    }
+
+    const cooldownMs = Number(options.cooldownMs ?? tokenUnavailableCooldownMs);
+    if (!Number.isFinite(cooldownMs) || cooldownMs <= 0) {
+      return null;
+    }
+
+    return now() + Math.floor(cooldownMs);
+  }
+
+  function isCoolingDown(config) {
+    const unavailableUntil = normalizeUnavailableUntil(config);
+    return unavailableUntil !== null && unavailableUntil > now();
   }
 
   function recordQuotaCheckFailure(config, err) {
@@ -585,7 +631,7 @@ function createAccountManager(options) {
    * 判断账号当前是否可用。
    */
   function isConfigAvailable(config) {
-    return Boolean(config && config.runtime && config.runtime.enabled && config.runtime.available);
+    return Boolean(config && config.runtime && config.runtime.enabled && config.runtime.available && !isCoolingDown(config));
   }
 
   function findHighestPriorityAvailableConfigIndex(predicate = () => true) {
@@ -904,11 +950,16 @@ function createAccountManager(options) {
   function getFallbackDispatchConfig(predicate = () => true, excludedConfigs = []) {
     const excluded = normalizeExcludedIdentitySet(excludedConfigs);
     const currentConfig = configs[activeConfigIndex] || null;
-    if (isDispatchManagedConfig(currentConfig) && predicate(currentConfig) && !excluded.has(getDispatchIdentity(currentConfig))) {
+    if (isDispatchManagedConfig(currentConfig) && predicate(currentConfig) && !excluded.has(getDispatchIdentity(currentConfig)) && !isCoolingDown(currentConfig)) {
       return currentConfig;
     }
 
-    return configs.find(config => isDispatchManagedConfig(config) && predicate(config) && !excluded.has(getDispatchIdentity(config))) || null;
+    return configs.find(config => (
+      isDispatchManagedConfig(config) &&
+      predicate(config) &&
+      !excluded.has(getDispatchIdentity(config)) &&
+      !isCoolingDown(config)
+    )) || null;
   }
 
   function pickByRendezvousHash(sessionKey, candidates) {

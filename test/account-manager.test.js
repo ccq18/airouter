@@ -75,6 +75,7 @@ function createManager(configs, overrides = {}) {
     quotaCheckPath: '/backend-api/wham/usage',
     quotaCheckTimeoutMs: overrides.quotaCheckTimeoutMs ?? 10 * 1000,
     apiKeyRecoveryTimeoutMs: overrides.apiKeyRecoveryTimeoutMs,
+    tokenUnavailableCooldownMs: overrides.tokenUnavailableCooldownMs,
     quotaCheckIntervalMs: overrides.quotaCheckIntervalMs ?? 60 * 1000,
     allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 10 * 60 * 1000,
     allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
@@ -429,6 +430,75 @@ test('acquireConfig can disable unavailable fallback for failover selection', ()
   });
 
   assert.equal(lease, null);
+});
+
+test('acquireConfig skips a token that is still cooling down after a responses failure', () => {
+  let nowMs = 1713337200000;
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs, {
+    now: () => nowMs,
+    tokenUnavailableCooldownMs: 60 * 1000,
+  });
+
+  const selected = manager.markConfigUnavailable(configs[0], 'responses_usage_limit_reached', {
+    allowSwitch: false,
+    lastError: 'stream:usage_limit_reached',
+  });
+
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.unavailableUntil, 1713337260000);
+  assert.equal(manager.getAccountStatus(configs[0]).unavailableUntil, 1713337260000);
+
+  const coolingLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'cooldown-session',
+  });
+
+  assert.equal(coolingLease.config, configs[1]);
+  coolingLease.release();
+
+  nowMs = 1713337260000;
+  const retryLease = manager.acquireConfig('proxy_request', config => config.index === 0, {
+    sessionKey: 'cooldown-session',
+  });
+
+  assert.equal(retryLease.config, configs[0]);
+  assert.equal(retryLease.fallback, true);
+  retryLease.release();
+});
+
+test('applyQuotaPayload clears token cooldown when quota check recovers the account', () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'responses_usage_limit_reached',
+      unavailableUntil: 1713337260000,
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  manager.applyQuotaPayload(configs[0], {
+    plan_type: 'plus',
+    rate_limit: {
+      primary_window: {
+        used_percent: 5,
+        reset_at: 1713340000,
+      },
+      secondary_window: {
+        used_percent: 10,
+        reset_at: 1713940000,
+      },
+    },
+  }, {
+    allowSwitch: false,
+  });
+
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.unavailableUntil, null);
 });
 
 test('acquireConfig ignores apikey configs because concurrent dispatch is token-only', () => {

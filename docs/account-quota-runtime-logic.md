@@ -50,6 +50,7 @@
 - `secondaryRemainingPercent`
 - `inFlight`（仅 token 并发调度使用）
 - `quotaCheckFailures`（仅 token 额度检查失败保护使用）
+- `unavailableUntil`（仅 token 请求失败冷却使用）
 - `apiKeyRequestResults`（仅 apikey 最近请求窗口使用）
 
 其中：
@@ -57,6 +58,7 @@
 - `primary*` 表示主额度窗口
 - `secondary*` 表示辅助/周额度窗口
 - 对外汇总口径跟随主额度窗口；可用性同时检查主额度和周额度
+- `unavailableUntil` 是毫秒时间戳；为空表示没有请求失败冷却
 
 ## 3. 账号可用性判定
 
@@ -68,6 +70,8 @@
    - 包括 `subscription.active === false`、`has_active_subscription === false`、`plan_type === "free"` 等形态
    - 标记为不可用
    - `reason = membership_expired`
+
+额度接口成功返回可用状态时，会清空 token 的请求失败冷却字段 `unavailableUntil`。
 2. 主额度窗口存在但周额度窗口缺失，且没有明确的付费计划信号
    - 作为会员过期/未订阅的兼容兜底
    - 标记为不可用

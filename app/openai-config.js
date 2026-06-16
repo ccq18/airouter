@@ -22,7 +22,8 @@ function createDefaultTokenRuntime(isEnabled) {
         secondaryResetAt: null,
         secondaryResetAfterSeconds: null,
         reason: isEnabled ? 'unchecked' : 'missing_credentials',
-        lastError: null
+        lastError: null,
+        unavailableUntil: null
     };
 }
 

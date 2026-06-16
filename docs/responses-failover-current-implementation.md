@@ -104,17 +104,19 @@
    - `runtime.available = false`
    - `runtime.reason = responses_*`
    - `runtime.lastError = <retrySource>:<retryKey>`
-3. 如果当前请求有会话 key，排除失败账号后按 HRW/Rendezvous 一致性哈希重新选择可用 token 账号
-4. 如果当前请求没有会话 key，按可用 token 账号的 `inFlight` 计数选择重试账号
-5. 用新账号重放同一个 `/responses` 请求
+   - `runtime.unavailableUntil = now + token 冷却时间`
+3. 调度会跳过仍在冷却期内的 token 账号
+4. 如果当前请求有会话 key，排除失败账号后按 HRW/Rendezvous 一致性哈希重新选择可用 token 账号
+5. 如果当前请求没有会话 key，按可用 token 账号的 `inFlight` 计数选择重试账号
+6. 用新账号重放同一个 `/responses` 请求
 
 如果失败账号正好是活动账号，活动账号也会按现有规则切换；如果失败账号不是活动账号，则只影响运行态可用性和后续请求调度。
 
 也就是说：
 
 - `usage_not_included` 当前和其他额度类错误一致
-- 命中后会把当前账号整体摘除
-- 直到后续额度刷新或配置重载把它恢复
+- 命中后会把当前账号整体摘除并进入冷却
+- 冷却结束后允许作为无可用账号时的 fallback 探测；额度刷新成功会直接恢复并清空冷却
 
 ## 7. 无可用账号或无法重试时的退化行为
 
