@@ -815,14 +815,12 @@
       <div id="batchToolbar" class="batch-toolbar" hidden>
         <div class="batch-toolbar-left">
           <span id="batchSelectionSummary" class="count">已选择 0 项</span>
-          <button class="secondary" type="button" data-action="toggle-select-all-configs">全选启用配置</button>
-          <button class="secondary" type="button" data-action="toggle-select-all-disabled-configs">全选停用配置</button>
-          <button class="secondary" type="button" data-action="toggle-select-all-apikeys">全选 apikey</button>
+          <button class="secondary" type="button" id="batchSelectProblemConfigsButton" data-action="batch-select-problem-configs">选择异常配置</button>
         </div>
         <div class="batch-toolbar-right">
-          <button class="danger" type="button" id="batchDeleteConfigsButton" data-action="batch-delete-configs" disabled>批量删除启用配置</button>
-          <button class="danger" type="button" id="batchDeleteDisabledConfigsButton" data-action="batch-delete-disabled-configs" disabled>批量删除停用配置</button>
-          <button class="danger" type="button" id="batchDeleteApiKeysButton" data-action="batch-delete-apikeys" disabled>批量删除 apikey</button>
+          <button class="secondary" type="button" id="batchEnableSelectedButton" data-action="batch-enable-selected" disabled>批量启用所选</button>
+          <button class="secondary" type="button" id="batchDisableSelectedButton" data-action="batch-disable-selected" disabled>批量停用所选</button>
+          <button class="danger" type="button" id="batchDeleteSelectedButton" data-action="batch-delete-selected" disabled>批量删除所选</button>
         </div>
       </div>
       <section id="cards"></section>
@@ -990,9 +988,10 @@
     const addApiKeyButton = document.getElementById('addApiKeyButton');
     const saveResponsesSettingsButton = document.getElementById('saveResponsesSettingsButton');
     const saveProxySettingsButton = document.getElementById('saveProxySettingsButton');
-    const batchDeleteConfigsButton = document.getElementById('batchDeleteConfigsButton');
-    const batchDeleteDisabledConfigsButton = document.getElementById('batchDeleteDisabledConfigsButton');
-    const batchDeleteApiKeysButton = document.getElementById('batchDeleteApiKeysButton');
+    const batchSelectProblemConfigsButton = document.getElementById('batchSelectProblemConfigsButton');
+    const batchEnableSelectedButton = document.getElementById('batchEnableSelectedButton');
+    const batchDisableSelectedButton = document.getElementById('batchDisableSelectedButton');
+    const batchDeleteSelectedButton = document.getElementById('batchDeleteSelectedButton');
     const apiKeysListEl = document.getElementById('apiKeysList');
     const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
     const servicePortInput = document.getElementById('servicePortInput');
@@ -1025,6 +1024,7 @@
       formatResponseModelStatus,
       formatApiKeyRecoveryStatus,
       hasRefreshTokenConfig,
+      hasRuntimeProblem,
       normalizePortValue,
       buildProxyAccessInfo,
       buildRuntimeSyncText,
@@ -1092,6 +1092,14 @@
         .filter(index => index !== null);
     }
 
+    function getProblemConfigIndexes(data = snapshot) {
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      return configs
+        .filter(item => item && hasRuntimeProblem(item.runtime))
+        .map(item => normalizeSelectionIndex(item.index))
+        .filter(index => index !== null);
+    }
+
     function pruneSelections() {
       ['configs', 'disabled_configs', 'apikeys'].forEach(type => {
         const available = new Set(getSnapshotIndexes(type));
@@ -1110,6 +1118,7 @@
         disabled_configs: selectedState.disabled_configs.size,
         apikeys: selectedState.apikeys.size,
       };
+      const problemIndexes = getProblemConfigIndexes();
       const total = getTotalSelectedCount();
       const parts = [];
 
@@ -1123,11 +1132,12 @@
         parts.push(`apikey ${counts.apikeys}`);
       }
 
-      batchToolbarEl.hidden = total === 0;
+      batchToolbarEl.hidden = total === 0 && problemIndexes.length === 0;
       batchSelectionSummaryEl.textContent = total > 0 ? `已选择 ${parts.join('、')}` : '已选择 0 项';
-      batchDeleteConfigsButton.disabled = counts.configs === 0;
-      batchDeleteDisabledConfigsButton.disabled = counts.disabled_configs === 0;
-      batchDeleteApiKeysButton.disabled = counts.apikeys === 0;
+      batchSelectProblemConfigsButton.disabled = problemIndexes.length === 0;
+      batchEnableSelectedButton.disabled = counts.disabled_configs === 0;
+      batchDisableSelectedButton.disabled = counts.configs === 0;
+      batchDeleteSelectedButton.disabled = total === 0;
     }
 
     function setSelectedIndex(type, value, checked) {
@@ -1145,23 +1155,24 @@
       updateBatchToolbar();
     }
 
-    function toggleSelectAll(type) {
-      const indexes = getSnapshotIndexes(type);
-      const selected = selectedState[type];
-      const shouldSelectAll = indexes.some(index => !selected.has(index));
-
-      if (shouldSelectAll) {
-        indexes.forEach(index => selected.add(index));
-      } else {
-        indexes.forEach(index => selected.delete(index));
-      }
-
-      renderCards(snapshot || {});
-    }
-
     function clearSelectedIndexes(type, indexes) {
       indexes.forEach(index => selectedState[type].delete(index));
       updateBatchToolbar();
+    }
+
+    function selectProblemConfigs() {
+      const indexes = getProblemConfigIndexes();
+      selectedState.configs.clear();
+      selectedState.disabled_configs.clear();
+      selectedState.apikeys.clear();
+      indexes.forEach(index => selectedState.configs.add(index));
+      renderCards(snapshot || {});
+
+      if (indexes.length) {
+        setMessage('success', `已选择 ${indexes.length} 个异常启用配置。`);
+      } else {
+        setMessage('error', '当前没有可选择的异常启用配置。');
+      }
     }
 
     function renderProxySettings(data) {
@@ -1384,7 +1395,7 @@
             <thead>
               <tr>
                 <th class="selection-col">
-                  <button class="secondary" type="button" data-action="toggle-select-all-configs">全选</button>
+                  选择
                 </th>
                 <th class="config-col">配置</th>
                 <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
@@ -1443,7 +1454,7 @@
               <thead>
                 <tr>
                   <th class="selection-col">
-                    <button class="secondary" type="button" data-action="toggle-select-all-disabled-configs">全选</button>
+                    选择
                   </th>
                   <th class="config-col">配置</th>
                   <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
@@ -1753,20 +1764,134 @@
       setMessage('info', 'apikey 已删除。');
     }
 
-    async function batchDeleteApiKeys() {
-      const indexes = getSelectedIndexes('apikeys');
-      const result = await requestJson('/admin/api/apikeys/batch-delete', {
-        method: 'DELETE',
-        body: JSON.stringify({ indexes }),
-      });
+    function buildSelectedDeletePlan() {
+      return [
+        {
+          type: 'configs',
+          label: '启用配置项',
+          indexes: getSelectedIndexes('configs'),
+          url: '/admin/api/configs/batch-delete',
+        },
+        {
+          type: 'disabled_configs',
+          label: '停用配置项',
+          indexes: getSelectedIndexes('disabled_configs'),
+          url: '/admin/api/disabled-configs/batch-delete',
+        },
+        {
+          type: 'apikeys',
+          label: 'apikey',
+          indexes: getSelectedIndexes('apikeys'),
+          url: '/admin/api/apikeys/batch-delete',
+        },
+      ].filter(entry => entry.indexes.length > 0);
+    }
 
-      snapshot = result;
-      clearSelectedIndexes('apikeys', indexes);
-      renderSnapshot(snapshot);
-      setRuntimeSyncState('synced', {
-        syncedAt: new Date(),
+    function formatSelectedDeletePlan(plan) {
+      return plan.map(entry => `${entry.indexes.length} 个${entry.label}`).join('、');
+    }
+
+    function buildSelectedDisablePlan() {
+      const indexes = getSelectedIndexes('configs');
+      return indexes.length ? [{
+        type: 'configs',
+        label: '启用配置项',
+        indexes,
+        url: '/admin/api/configs/batch-disable',
+      }] : [];
+    }
+
+    function buildSelectedEnablePlan() {
+      const indexes = getSelectedIndexes('disabled_configs');
+      return indexes.length ? [{
+        type: 'disabled_configs',
+        label: '停用配置项',
+        indexes,
+        url: '/admin/api/disabled-configs/batch-enable',
+      }] : [];
+    }
+
+    function formatSelectedMovePlan(plan) {
+      return plan.map(entry => `${entry.indexes.length} 个${entry.label}`).join('、');
+    }
+
+    async function batchMoveSelected(plan, options) {
+      if (!plan.length) {
+        throw new Error(options.emptyMessage);
+      }
+
+      const movedParts = [];
+      let changed = false;
+
+      try {
+        for (const entry of plan) {
+          const result = await requestJson(entry.url, {
+            method: 'POST',
+            body: JSON.stringify({ indexes: entry.indexes }),
+          });
+
+          snapshot = result;
+          entry.indexes.forEach(index => selectedState[entry.type].delete(index));
+          movedParts.push(`${entry.indexes.length} 个${entry.label}`);
+          changed = true;
+        }
+      } finally {
+        if (changed) {
+          renderSnapshot(snapshot);
+          setRuntimeSyncState('synced', {
+            syncedAt: new Date(),
+          });
+        }
+      }
+
+      setMessage('info', `${options.donePrefix}${movedParts.join('、')}。`);
+    }
+
+    async function batchDisableSelected() {
+      await batchMoveSelected(buildSelectedDisablePlan(), {
+        emptyMessage: '请先选择要停用的启用配置项',
+        donePrefix: '已批量停用 ',
       });
-      setMessage('info', `已批量删除 ${indexes.length} 个 apikey。`);
+    }
+
+    async function batchEnableSelected() {
+      await batchMoveSelected(buildSelectedEnablePlan(), {
+        emptyMessage: '请先选择要启用的停用配置项',
+        donePrefix: '已批量启用 ',
+      });
+    }
+
+    async function batchDeleteSelected() {
+      const plan = buildSelectedDeletePlan();
+      if (!plan.length) {
+        throw new Error('请先选择要删除的项目');
+      }
+
+      const deletedParts = [];
+      let changed = false;
+
+      try {
+        for (const entry of plan) {
+          const result = await requestJson(entry.url, {
+            method: 'DELETE',
+            body: JSON.stringify({ indexes: entry.indexes }),
+          });
+
+          snapshot = result;
+          entry.indexes.forEach(index => selectedState[entry.type].delete(index));
+          deletedParts.push(`${entry.indexes.length} 个${entry.label}`);
+          changed = true;
+        }
+      } finally {
+        if (changed) {
+          renderSnapshot(snapshot);
+          setRuntimeSyncState('synced', {
+            syncedAt: new Date(),
+          });
+        }
+      }
+
+      setMessage('info', `已批量删除 ${deletedParts.join('、')}。`);
     }
 
     async function activateConfig(index) {
@@ -1850,22 +1975,6 @@
       setMessage('info', '配置项已删除并热重载。');
     }
 
-    async function batchDeleteConfigs() {
-      const indexes = getSelectedIndexes('configs');
-      const result = await requestJson('/admin/api/configs/batch-delete', {
-        method: 'DELETE',
-        body: JSON.stringify({ indexes }),
-      });
-
-      snapshot = result;
-      clearSelectedIndexes('configs', indexes);
-      renderSnapshot(snapshot);
-      setRuntimeSyncState('synced', {
-        syncedAt: new Date(),
-      });
-      setMessage('info', `已批量删除 ${indexes.length} 个启用配置项并热重载。`);
-    }
-
     async function deleteDisabledConfig(index) {
       const result = await requestJson(`/admin/api/disabled-configs/${index}`, {
         method: 'DELETE',
@@ -1878,22 +1987,6 @@
         syncedAt: new Date(),
       });
       setMessage('info', '停用配置项已删除。');
-    }
-
-    async function batchDeleteDisabledConfigs() {
-      const indexes = getSelectedIndexes('disabled_configs');
-      const result = await requestJson('/admin/api/disabled-configs/batch-delete', {
-        method: 'DELETE',
-        body: JSON.stringify({ indexes }),
-      });
-
-      snapshot = result;
-      clearSelectedIndexes('disabled_configs', indexes);
-      renderSnapshot(snapshot);
-      setRuntimeSyncState('synced', {
-        syncedAt: new Date(),
-      });
-      setMessage('info', `已批量删除 ${indexes.length} 个停用配置项。`);
     }
 
     async function sendHelloTestRequest() {
@@ -2002,24 +2095,10 @@
         return;
       }
 
-      const toggleSelectAllConfigsButton = event.target.closest('[data-action="toggle-select-all-configs"]');
-      if (toggleSelectAllConfigsButton) {
+      const batchSelectProblemConfigsButtonEl = event.target.closest('[data-action="batch-select-problem-configs"]');
+      if (batchSelectProblemConfigsButtonEl) {
         event.preventDefault();
-        toggleSelectAll('configs');
-        return;
-      }
-
-      const toggleSelectAllDisabledConfigsButton = event.target.closest('[data-action="toggle-select-all-disabled-configs"]');
-      if (toggleSelectAllDisabledConfigsButton) {
-        event.preventDefault();
-        toggleSelectAll('disabled_configs');
-        return;
-      }
-
-      const toggleSelectAllApiKeysButton = event.target.closest('[data-action="toggle-select-all-apikeys"]');
-      if (toggleSelectAllApiKeysButton) {
-        event.preventDefault();
-        toggleSelectAll('apikeys');
+        selectProblemConfigs();
         return;
       }
 
@@ -2070,50 +2149,51 @@
         return;
       }
 
-      const batchDeleteConfigsButtonEl = event.target.closest('[data-action="batch-delete-configs"]');
-      if (batchDeleteConfigsButtonEl) {
-        if (!armDeleteButton(batchDeleteConfigsButtonEl, `再次点击确认删除这 ${getSelectedIndexes('configs').length} 个启用配置项。`)) {
-          return;
-        }
-        batchDeleteConfigsButtonEl.disabled = true;
+      const batchEnableSelectedButtonEl = event.target.closest('[data-action="batch-enable-selected"]');
+      if (batchEnableSelectedButtonEl) {
+        batchEnableSelectedButtonEl.disabled = true;
         try {
-          await batchDeleteConfigs();
+          await batchEnableSelected();
         } catch (error) {
           setMessage('error', error.message);
         } finally {
-          batchDeleteConfigsButtonEl.disabled = false;
+          batchEnableSelectedButtonEl.disabled = false;
         }
         return;
       }
 
-      const batchDeleteDisabledConfigsButtonEl = event.target.closest('[data-action="batch-delete-disabled-configs"]');
-      if (batchDeleteDisabledConfigsButtonEl) {
-        if (!armDeleteButton(batchDeleteDisabledConfigsButtonEl, `再次点击确认删除这 ${getSelectedIndexes('disabled_configs').length} 个停用配置项。`)) {
+      const batchDisableSelectedButtonEl = event.target.closest('[data-action="batch-disable-selected"]');
+      if (batchDisableSelectedButtonEl) {
+        const disablePlan = buildSelectedDisablePlan();
+        const disableSummary = formatSelectedMovePlan(disablePlan);
+        if (!armDeleteButton(batchDisableSelectedButtonEl, `再次点击确认停用已选择的 ${disableSummary}。`, '确认停用', '批量停用所选')) {
           return;
         }
-        batchDeleteDisabledConfigsButtonEl.disabled = true;
+        batchDisableSelectedButtonEl.disabled = true;
         try {
-          await batchDeleteDisabledConfigs();
+          await batchDisableSelected();
         } catch (error) {
           setMessage('error', error.message);
         } finally {
-          batchDeleteDisabledConfigsButtonEl.disabled = false;
+          batchDisableSelectedButtonEl.disabled = false;
         }
         return;
       }
 
-      const batchDeleteApiKeysButtonEl = event.target.closest('[data-action="batch-delete-apikeys"]');
-      if (batchDeleteApiKeysButtonEl) {
-        if (!armDeleteButton(batchDeleteApiKeysButtonEl, `再次点击确认删除这 ${getSelectedIndexes('apikeys').length} 个 apikey。`)) {
+      const batchDeleteSelectedButtonEl = event.target.closest('[data-action="batch-delete-selected"]');
+      if (batchDeleteSelectedButtonEl) {
+        const deletePlan = buildSelectedDeletePlan();
+        const deleteSummary = formatSelectedDeletePlan(deletePlan);
+        if (!armDeleteButton(batchDeleteSelectedButtonEl, `再次点击确认删除已选择的 ${deleteSummary}。`)) {
           return;
         }
-        batchDeleteApiKeysButtonEl.disabled = true;
+        batchDeleteSelectedButtonEl.disabled = true;
         try {
-          await batchDeleteApiKeys();
+          await batchDeleteSelected();
         } catch (error) {
           setMessage('error', error.message);
         } finally {
-          batchDeleteApiKeysButtonEl.disabled = false;
+          batchDeleteSelectedButtonEl.disabled = false;
         }
         return;
       }

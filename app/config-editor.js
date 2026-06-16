@@ -360,6 +360,35 @@ function disableConfigItem(parsed, index, options = {}) {
     return validateParsedConfig(nextParsed);
 }
 
+function disableConfigItems(parsed, indexes, options = {}) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const targetIndexes = normalizeDeleteIndexes(indexes, nextParsed.configs.length, '配置项');
+    const disabledStatuses = options.disabledStatuses && typeof options.disabledStatuses === 'object'
+        ? options.disabledStatuses
+        : {};
+    const movedItems = [];
+
+    for (const index of targetIndexes) {
+        const [item] = nextParsed.configs.splice(index, 1);
+        const disabledStatus = normalizeString(disabledStatuses[index]);
+        const disabledItem = { ...item };
+
+        if (disabledStatus) {
+            disabledItem.disabled_status = disabledStatus;
+        } else {
+            delete disabledItem.disabled_status;
+        }
+
+        movedItems.unshift(disabledItem);
+    }
+
+    nextParsed.disabled_configs = Array.isArray(nextParsed.disabled_configs)
+        ? nextParsed.disabled_configs
+        : [];
+    nextParsed.disabled_configs.push(...movedItems);
+    return validateParsedConfig(nextParsed);
+}
+
 function enableConfigItem(parsed, index) {
     const nextParsed = cloneParsedConfig(parsed);
     const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
@@ -371,6 +400,25 @@ function enableConfigItem(parsed, index) {
 
     nextParsed.disabled_configs = disabledConfigs;
     nextParsed.configs.push(normalizeConfigItem(item));
+    return validateParsedConfig(nextParsed);
+}
+
+function enableConfigItems(parsed, indexes) {
+    const nextParsed = cloneParsedConfig(parsed);
+    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
+        ? nextParsed.disabled_configs
+        : [];
+    const targetIndexes = normalizeDeleteIndexes(indexes, disabledConfigs.length, '停用配置项');
+    const movedItems = [];
+
+    for (const index of targetIndexes) {
+        const [item] = disabledConfigs.splice(index, 1);
+        delete item.disabled_status;
+        movedItems.unshift(normalizeConfigItem(item));
+    }
+
+    nextParsed.disabled_configs = disabledConfigs;
+    nextParsed.configs.push(...movedItems);
     return validateParsedConfig(nextParsed);
 }
 
@@ -479,7 +527,9 @@ module.exports = {
     deleteDisabledConfigItem,
     deleteDisabledConfigItems,
     disableConfigItem,
+    disableConfigItems,
     enableConfigItem,
+    enableConfigItems,
     moveConfigItem,
     readParsedConfigFile,
     writeParsedConfigFile,

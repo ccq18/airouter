@@ -214,6 +214,16 @@ test('admin exposes batch delete routes for configs, disabled configs, and apike
   assert.match(source, /function deleteApiKeys\(parsed, indexes\)/);
 });
 
+test('admin exposes batch enable and disable routes for configs', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+
+  assert.match(source, /app\.post\('\/admin\/api\/configs\/batch-disable'/);
+  assert.match(source, /app\.post\('\/admin\/api\/disabled-configs\/batch-enable'/);
+  assert.match(source, /disableConfigItems\(/);
+  assert.match(source, /enableConfigItems\(/);
+  assert.match(source, /moved_count:\s*Array\.isArray\(req\.body && req\.body\.indexes\)\s*\?\s*req\.body\.indexes\.length\s*:\s*0/);
+});
+
 test('admin batch delete routes respond with deleted counts on success', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
 

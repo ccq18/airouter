@@ -9,10 +9,12 @@ const {
   addConfigItem,
   buildImportedConfigItem,
   disableConfigItem,
+  disableConfigItems,
   deleteConfigItems,
   deleteDisabledConfigItem,
   deleteDisabledConfigItems,
   enableConfigItem,
+  enableConfigItems,
   moveConfigItem,
   updateConfigItem,
   updateConfigSettings,
@@ -374,6 +376,45 @@ test('disableConfigItem appends to an existing disabled config list', () => {
   assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled', 'primary']);
 });
 
+test('disableConfigItems moves multiple enabled configs and preserves original order', () => {
+  const next = disableConfigItems(createTokenConfig({
+    configs: [
+      {
+        access_token: 'token-1',
+        account_id: 'account-1',
+        description: 'first',
+      },
+      {
+        access_token: 'token-2',
+        account_id: 'account-2',
+        description: 'second',
+      },
+      {
+        access_token: 'token-3',
+        account_id: 'account-3',
+        description: 'third',
+      },
+    ],
+    disabled_configs: [
+      {
+        access_token: 'disabled-token',
+        account_id: 'disabled-account',
+        description: 'disabled',
+      },
+    ],
+  }), [2, 0], {
+    disabledStatuses: {
+      0: '可用=否 | 状态=失败',
+      2: '可用=是 | 额度=83%',
+    },
+  });
+
+  assert.deepEqual(next.configs.map(item => item.description), ['second']);
+  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled', 'first', 'third']);
+  assert.equal(next.disabled_configs[1].disabled_status, '可用=否 | 状态=失败');
+  assert.equal(next.disabled_configs[2].disabled_status, '可用=是 | 额度=83%');
+});
+
 test('enableConfigItem moves a disabled config back to enabled configs', () => {
   const next = enableConfigItem(createTokenConfig({
     configs: [],
@@ -397,6 +438,44 @@ test('enableConfigItem moves a disabled config back to enabled configs', () => {
       description: 'disabled key',
     },
   ]);
+});
+
+test('enableConfigItems moves multiple disabled configs back and clears disabled status', () => {
+  const next = enableConfigItems(createTokenConfig({
+    configs: [
+      {
+        access_token: 'token-1',
+        account_id: 'account-1',
+        description: 'enabled',
+      },
+    ],
+    disabled_configs: [
+      {
+        access_token: 'disabled-token-1',
+        account_id: 'disabled-account-1',
+        description: 'disabled first',
+        disabled_status: '可用=否',
+      },
+      {
+        type: 'apikey',
+        apikey: 'sk-disabled',
+        base_url: 'https://api.example.com/v1',
+        description: 'disabled key',
+        disabled_status: '服务不可见',
+      },
+      {
+        access_token: 'disabled-token-3',
+        account_id: 'disabled-account-3',
+        description: 'disabled third',
+        disabled_status: '可用=否',
+      },
+    ],
+  }), [2, 0]);
+
+  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled key']);
+  assert.deepEqual(next.configs.map(item => item.description), ['enabled', 'disabled first', 'disabled third']);
+  assert.equal(next.configs[1].disabled_status, undefined);
+  assert.equal(next.configs[2].disabled_status, undefined);
 });
 
 test('deleteDisabledConfigItem permanently removes a disabled config only', () => {

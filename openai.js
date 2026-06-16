@@ -49,7 +49,9 @@ const {
     deleteDisabledConfigItem,
     deleteDisabledConfigItems,
     disableConfigItem,
+    disableConfigItems,
     enableConfigItem,
+    enableConfigItems,
     moveConfigItem,
     readParsedConfigFile,
     updateConfigSettings,
@@ -2781,6 +2783,32 @@ app.post('/admin/api/configs/:index/disable', async (req, res) => {
     );
 });
 
+app.post('/admin/api/configs/batch-disable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => {
+            const indexes = parseBatchIndexes(req.body, '配置项');
+            const disabledStatuses = {};
+
+            for (const index of indexes) {
+                disabledStatuses[index] = getConfigRuntimeSummary(index);
+            }
+
+            return disableConfigItems(parsed, indexes, {
+                disabledStatuses
+            });
+        },
+        'admin_batch_disable_config',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                moved_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
+        }
+    );
+});
+
 app.post('/admin/api/disabled-configs/:index/enable', async (req, res) => {
     await handleConfigMutation(
         res,
@@ -2789,6 +2817,21 @@ app.post('/admin/api/disabled-configs/:index/enable', async (req, res) => {
         200,
         {
             skipQuotaRefresh: true
+        }
+    );
+});
+
+app.post('/admin/api/disabled-configs/batch-enable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => enableConfigItems(parsed, parseBatchIndexes(req.body, '停用配置项')),
+        'admin_batch_enable_config',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                moved_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
         }
     );
 });

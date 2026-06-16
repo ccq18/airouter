@@ -27,6 +27,7 @@ const {
   getDispatchModeSummary,
   getActiveConfigLabel,
   hasRefreshTokenConfig,
+  hasRuntimeProblem,
   extractResponseSummary,
   normalizePortValue,
   buildProxyAccessInfo,
@@ -83,20 +84,32 @@ test('config admin exposes enable and disable controls for soft-deleted configs'
 test('config admin exposes batch delete controls for configs, disabled configs, and apikeys', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
-  assert.match(html, /data-action="toggle-select-all-configs"/);
-  assert.match(html, /data-action="toggle-select-all-disabled-configs"/);
-  assert.match(html, /data-action="toggle-select-all-apikeys"/);
+  assert.doesNotMatch(html, /data-action="toggle-select-all-configs"/);
+  assert.doesNotMatch(html, /data-action="toggle-select-all-disabled-configs"/);
+  assert.doesNotMatch(html, /data-action="toggle-select-all-apikeys"/);
+  assert.match(html, /id="batchSelectProblemConfigsButton"/);
+  assert.match(html, /data-action="batch-select-problem-configs"/);
+  assert.match(html, /选择异常配置/);
+  assert.match(html, /id="batchEnableSelectedButton"/);
+  assert.match(html, /data-action="batch-enable-selected"/);
+  assert.match(html, /批量启用所选/);
+  assert.match(html, /id="batchDisableSelectedButton"/);
+  assert.match(html, /data-action="batch-disable-selected"/);
+  assert.match(html, /批量停用所选/);
   assert.match(html, /data-action="toggle-select-config"/);
   assert.match(html, /data-action="toggle-select-disabled-config"/);
   assert.match(html, /data-action="toggle-select-apikey"/);
-  assert.match(html, /id="batchDeleteConfigsButton"/);
-  assert.match(html, /id="batchDeleteDisabledConfigsButton"/);
-  assert.match(html, /id="batchDeleteApiKeysButton"/);
-  assert.match(html, /\/admin\/api\/configs\/batch-delete/);
-  assert.match(html, /\/admin\/api\/disabled-configs\/batch-delete/);
-  assert.match(html, /\/admin\/api\/apikeys\/batch-delete/);
-  assert.match(html, /批量删除/);
+  assert.doesNotMatch(html, /id="batchDeleteConfigsButton"/);
+  assert.doesNotMatch(html, /id="batchDeleteDisabledConfigsButton"/);
+  assert.doesNotMatch(html, /id="batchDeleteApiKeysButton"/);
+  assert.match(html, /id="batchDeleteSelectedButton"/);
+  assert.match(html, /data-action="batch-delete-selected"/);
+  assert.match(html, /批量删除所选/);
+  assert.match(html, /\/admin\/api\/configs\/batch-disable/);
+  assert.match(html, /\/admin\/api\/disabled-configs\/batch-enable/);
   assert.match(html, /已批量删除/);
+  assert.match(html, /已批量启用/);
+  assert.match(html, /已批量停用/);
 });
 
 test('config admin exposes copy controls for config item JSON', () => {
@@ -412,6 +425,16 @@ test('hasRefreshTokenConfig detects token configs that can be refreshed', () => 
       apikey: 'sk-1',
     },
   }), false);
+});
+
+test('hasRuntimeProblem detects unavailable and failed runtime summaries', () => {
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=unknown | 状态=额度检查失败 | 错误=request timeout',
+  }), true);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=是 | 额度=83%',
+  }), false);
+  assert.equal(hasRuntimeProblem(null), false);
 });
 
 test('buildConfigItemFromForm keeps token mode as pasted AuthSession JSON', () => {

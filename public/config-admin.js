@@ -1037,6 +1037,7 @@
     formatApiKeyRecoveryStatus,
     extractRuntimeStatusTags,
     getActiveConfigLabel,
+    hasRuntimeProblem,
     hasRefreshTokenConfig,
     buildHelloTestRequest,
     formatResponsesModelAliasesInput,
