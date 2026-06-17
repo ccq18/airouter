@@ -7,6 +7,8 @@
 - [codex-error-recognition.md](/Users/lrd/code/airouter/docs/codex-error-recognition.md) 关注接口层错误识别规则
 - 本文档只记录当前代码里真正接进自动切号链路的行为
 
+Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它有独立的图片业务 failover 入口；本文只描述直接 `/v1/responses` 和 `/cpa/v1/responses` 请求里的 Responses 流式识别逻辑。
+
 ## 1. 生效范围
 
 当前自动切号只对以下请求生效：

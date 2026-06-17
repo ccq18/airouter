@@ -15,6 +15,7 @@ const {
   isResponsesFailoverInspectionCandidate,
   normalizeProxyJsonBody,
   shouldForceResponsesStoreFalse,
+  createImageGenerationsHandler,
 } = require('../openai');
 const { createClaudeMessagesHandler } = require('../app/claude-messages-handler');
 
@@ -32,6 +33,9 @@ function createJsonResponseRecorder() {
     },
     setHeader(name, value) {
       this.headers[String(name).toLowerCase()] = value;
+    },
+    flushHeaders() {
+      this.headersSent = true;
     },
     write() {
       this.headersSent = true;
@@ -60,6 +64,23 @@ function createClaudeRequest(body) {
   req.method = 'POST';
   req.baseUrl = '';
   req.url = '/v1/messages';
+  req.headers = {
+    'content-type': 'application/json',
+  };
+
+  process.nextTick(() => {
+    req.emit('data', Buffer.from(JSON.stringify(body)));
+    req.emit('end');
+  });
+
+  return req;
+}
+
+function createJsonRequest(url, body) {
+  const req = new EventEmitter();
+  req.method = 'POST';
+  req.baseUrl = '';
+  req.url = url;
   req.headers = {
     'content-type': 'application/json',
   };
@@ -343,6 +364,198 @@ test('server registers token image compatibility before the generic v1 proxy', (
   assert.ok(editsRouteIndex < genericProxyIndex, 'edits route should run before generic proxy');
 });
 
+test('image generations token business request retries the next config before responding to the client', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary token image',
+      access_token: 'token-1',
+      apiBasePath: '/backend-api/codex',
+      baseUrl: 'https://chatgpt-primary.example.com',
+      runtime: { available: true },
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup token image',
+      access_token: 'token-2',
+      apiBasePath: '/backend-api/codex',
+      baseUrl: 'https://chatgpt-backup.example.com',
+      runtime: { available: true },
+    },
+  ];
+  const released = [];
+  const unavailable = [];
+  const requests = [];
+  const accountManager = {
+    getActiveConfig() {
+      return null;
+    },
+    ensureActiveConfig() {
+      return null;
+    },
+    acquireConfig(reason, predicate, options = {}) {
+      const excluded = Array.isArray(options.exclude) ? options.exclude : [];
+      const config = configs.find(item => predicate(item) && !excluded.includes(item));
+      if (!config) {
+        return null;
+      }
+
+      return {
+        config,
+        sessionKey: options.sessionKey || '',
+        release: () => released.push(config.description),
+      };
+    },
+    markConfigUnavailable(config, reason) {
+      unavailable.push({ config, reason });
+    },
+  };
+  const successfulImageEvent = [
+    'event: response.output_item.done',
+    `data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      item: {
+        type: 'image_generation_call',
+        status: 'completed',
+        result: Buffer.from('image-data').toString('base64'),
+      },
+    })}`,
+    '',
+  ].join('\n');
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    requestBuffered: async request => {
+      requests.push(request);
+      if (requests.length === 1) {
+        const bodyText = JSON.stringify({
+          error: {
+            type: 'usage_limit_reached',
+            message: 'primary exhausted',
+          },
+        });
+        return {
+          statusCode: 429,
+          headers: { 'content-type': 'application/json' },
+          body: Buffer.from(bodyText),
+          bodyText,
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: Buffer.from(successfulImageEvent),
+        bodyText: successfulImageEvent,
+      };
+    },
+    now: () => 123000,
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw a small red hat',
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(requests.map(request => request.targetUrl), [
+    'https://chatgpt-primary.example.com/backend-api/codex/responses',
+    'https://chatgpt-backup.example.com/backend-api/codex/responses',
+  ]);
+  assert.deepEqual(requests.map(request => request.headers.authorization), [
+    'Bearer token-1',
+    'Bearer token-2',
+  ]);
+  assert.deepEqual(unavailable, [
+    {
+      config: configs[0],
+      reason: 'responses_usage_limit_reached',
+    },
+  ]);
+  assert.deepEqual(released, [
+    'primary token image',
+    'backup token image',
+  ]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload, {
+    created: 123,
+    data: [
+      {
+        b64_json: Buffer.from('image-data').toString('base64'),
+      },
+    ],
+  });
+});
+
+test('image generations apikey business request keeps native Images forwarding', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'native image apikey',
+    apiKey: 'native-image-key',
+    baseUrl: 'https://images.example.com/v1',
+    support: ['gpt'],
+    runtime: { enabled: true, available: true },
+  };
+  const requests = [];
+  const observations = [];
+  const accountManager = {
+    getActiveConfig(predicate) {
+      return predicate(config) ? config : null;
+    },
+    acquireConfig() {
+      throw new Error('token dispatch should not be used for active apikey image requests');
+    },
+    ensureActiveConfig() {
+      return null;
+    },
+    recordApiKeyRequestResult(observedConfig, result) {
+      observations.push({ observedConfig, result });
+      return { unavailable: false, sampleSize: 1, failureCount: 0 };
+    },
+  };
+  const bodyText = JSON.stringify({
+    created: 123,
+    data: [
+      {
+        b64_json: 'bmF0aXZlLWltYWdl',
+      },
+    ],
+  });
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    requestBuffered: async request => {
+      requests.push(request);
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'application/json' },
+        body: Buffer.from(bodyText),
+        bodyText,
+      };
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw a small red hat',
+    n: 2,
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].targetUrl, 'https://images.example.com/v1/images/generations?client_version=1');
+  assert.equal(requests[0].headers.authorization, 'Bearer native-image-key');
+  assert.deepEqual(observations, [
+    {
+      observedConfig: config,
+      result: { ok: true },
+    },
+  ]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.writableEnded, true);
+});
+
 test('server defaults upstream requests to the official SDK timeout window', () => {
   const openaiSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const upstreamSource = fs.readFileSync(path.join(__dirname, '..', 'app/upstream-request.js'), 'utf8');
@@ -352,17 +565,23 @@ test('server defaults upstream requests to the official SDK timeout window', () 
   assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);
 });
 
-test('generic apikey proxy records success only after the upstream response body completes', () => {
+test('generic apikey proxy records success after committing the upstream response to the client', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const startForwardingIndex = source.indexOf('function startForwardingResponse');
+  const flushHeadersIndex = source.indexOf('res.flushHeaders();', startForwardingIndex);
+  const successRecordIndex = source.indexOf('recordCurrentApiKeyRequestResult({ ok: true })', flushHeadersIndex);
   const responseEndIndex = source.indexOf("response.on('end'", startForwardingIndex);
   const responseErrorIndex = source.indexOf("response.on('error'", startForwardingIndex);
+  const responseResumeIndex = source.indexOf('response.resume();', responseErrorIndex);
+  const responseErrorBlock = source.slice(responseErrorIndex, responseResumeIndex);
 
   assert.notEqual(startForwardingIndex, -1);
+  assert.notEqual(flushHeadersIndex, -1);
+  assert.notEqual(successRecordIndex, -1);
   assert.notEqual(responseEndIndex, -1);
   assert.notEqual(responseErrorIndex, -1);
-  assert.notEqual(source.indexOf('recordCurrentApiKeyRequestResult({ ok: true })', responseEndIndex), -1);
-  assert.notEqual(source.indexOf('recordCurrentApiKeyRequestResult({', responseErrorIndex), -1);
+  assert.ok(successRecordIndex < responseEndIndex);
+  assert.match(responseErrorBlock, /if \(!res\.headersSent\) \{\n\s+recordCurrentApiKeyRequestResult\(\{\n\s+ok: false/);
   assert.equal(source.includes('accountManager.recordApiKeyRequestResult(config, { ok: true })'), false);
 });
 
@@ -651,6 +870,168 @@ test('createClaudeMessagesHandler reports direct claude apikey retryable upstrea
     retryKey: '429',
     retrySource: 'http',
   });
+});
+
+test('createClaudeMessagesHandler retries direct claude apikey failures with the next config immediately', async () => {
+  const configs = [
+    {
+      type: 'apikey',
+      index: 0,
+      description: 'primary claude upstream',
+      apiKey: 'upstream-claude-key-1',
+      baseUrl: 'https://claude-primary.example.com/v1',
+      support: ['claude'],
+    },
+    {
+      type: 'apikey',
+      index: 1,
+      description: 'backup claude upstream',
+      apiKey: 'upstream-claude-key-2',
+      baseUrl: 'https://claude-backup.example.com/v1',
+      support: ['claude'],
+    },
+  ];
+  const upstreamRequests = [];
+  const classifications = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (failedConfig, classification, context) => {
+      classifications.push({ failedConfig, classification, context });
+      return configs[1];
+    },
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      if (upstreamRequests.length === 1) {
+        return {
+          responsePromise: Promise.resolve(createUpstreamResponse(429, {
+            'content-type': 'application/json',
+          }, JSON.stringify({
+            error: {
+              message: 'rate limited',
+            },
+          }))),
+          abort() {},
+        };
+      }
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'application/json',
+        }, JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-sonnet-4',
+          stop_reason: 'end_turn',
+          content: [
+            {
+              type: 'text',
+              text: 'hello from backup',
+            },
+          ],
+        }))),
+        abort() {},
+      };
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamRequests.map(request => request.targetUrl), [
+    'https://claude-primary.example.com/v1/messages?client_version=1',
+    'https://claude-backup.example.com/v1/messages?client_version=1',
+  ]);
+  assert.deepEqual(upstreamRequests.map(request => request.headers.authorization), [
+    'Bearer upstream-claude-key-1',
+    'Bearer upstream-claude-key-2',
+  ]);
+  assert.equal(classifications.length, 1);
+  assert.equal(classifications[0].failedConfig, configs[0]);
+  assert.equal(classifications[0].classification.reason, 'apikey_rate_limited');
+  assert.deepEqual(classifications[0].context.excludedConfigs.map(config => config.description), [
+    'primary claude upstream',
+  ]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'hello from backup',
+    },
+  ]);
+});
+
+test('createClaudeMessagesHandler treats direct claude apikey stream errors after client commit as success', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'streaming claude upstream',
+    apiKey: 'upstream-claude-key',
+    baseUrl: 'https://claude-stream.example.com/v1',
+    support: ['claude'],
+  };
+  const upstreamResponse = new PassThrough();
+  upstreamResponse.statusCode = 200;
+  upstreamResponse.headers = {
+    'content-type': 'text/event-stream',
+  };
+  const observations = [];
+  let retryAttempts = 0;
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    handleRetryableUpstreamError: () => {
+      retryAttempts += 1;
+      return null;
+    },
+    observeApiKeyRequestResult: (observedConfig, result) => {
+      observations.push({ observedConfig, result });
+      return { unavailable: false, sampleSize: 1, failureCount: 0 };
+    },
+    createUpstreamRequest: () => ({
+      responsePromise: Promise.resolve(upstreamResponse),
+      abort() {},
+    }),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    stream: true,
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  upstreamResponse.write('event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n');
+  await new Promise(resolve => setImmediate(resolve));
+  upstreamResponse.destroy(new Error('late stream disconnect'));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(retryAttempts, 0);
+  assert.equal(res.headersSent, true);
+  assert.equal(res.writableEnded, true);
+  assert.deepEqual(observations, [
+    {
+      observedConfig: config,
+      result: { ok: true },
+    },
+  ]);
 });
 
 test('createClaudeMessagesHandler reports direct claude apikey non-200 statuses as failures', async () => {

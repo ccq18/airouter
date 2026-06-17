@@ -460,6 +460,8 @@ function forwardClaudeApiKeyMessagesRequest({
     upstreamRequestTimeoutMs,
     handleRetryableUpstreamError,
     observeApiKeyRequestResult = null,
+    getRetryConfig = null,
+    retryWithSelection = null,
     releaseConfig = null,
     error
 }) {
@@ -495,6 +497,8 @@ function forwardClaudeApiKeyMessagesRequest({
     let responseFinished = false;
     let requestClosed = false;
     let released = false;
+    let apiKeyRequestResultRecorded = false;
+    let successfulClientResponseCommitted = false;
 
     function releaseCurrentConfig() {
         if (released) {
@@ -508,11 +512,59 @@ function forwardClaudeApiKeyMessagesRequest({
     }
 
     function observeDirectApiKeyResult(result) {
-        if (config.type !== 'apikey' || typeof observeApiKeyRequestResult !== 'function') {
+        if (
+            apiKeyRequestResultRecorded ||
+            config.type !== 'apikey' ||
+            typeof observeApiKeyRequestResult !== 'function'
+        ) {
             return null;
         }
 
+        apiKeyRequestResultRecorded = true;
         return observeApiKeyRequestResult(config, result);
+    }
+
+    function observeSuccessfulClientCommit(statusCode) {
+        if (!isSuccessfulResponsesStatus(statusCode)) {
+            return null;
+        }
+
+        successfulClientResponseCommitted = true;
+        return observeDirectApiKeyResult({ ok: true });
+    }
+
+    function tryRetryWithNextConfig(classification, response = null) {
+        const result = {
+            handled: false,
+            retried: false
+        };
+
+        if (
+            typeof getRetryConfig !== 'function' ||
+            typeof retryWithSelection !== 'function' ||
+            requestClosed ||
+            res.headersSent
+        ) {
+            return result;
+        }
+
+        result.handled = true;
+        const nextSelection = getRetryConfig(config, classification);
+        if (!nextSelection || !nextSelection.config || nextSelection.config === config) {
+            if (nextSelection && typeof nextSelection.release === 'function') {
+                nextSelection.release();
+            }
+            return result;
+        }
+
+        responseFinished = true;
+        if (response && typeof response.resume === 'function') {
+            response.resume();
+        }
+        releaseCurrentConfig();
+        retryWithSelection(nextSelection);
+        result.retried = true;
+        return result;
     }
 
     upstream.responsePromise.then(response => {
@@ -520,17 +572,22 @@ function forwardClaudeApiKeyMessagesRequest({
         const upstreamHeaders = normalizeUpstreamHeaders(response.headers);
         const contentType = upstreamHeaders['content-type'] || '';
         const apiKeyFailure = classifyApiKeyUpstreamStatus(statusCode);
-        if (apiKeyFailure && typeof handleRetryableUpstreamError === 'function') {
-            handleRetryableUpstreamError(config, apiKeyFailure);
-        } else if (apiKeyFailure) {
-            observeDirectApiKeyResult({
-                ok: false,
-                reason: apiKeyFailure.reason,
-                lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
-                switchReason: 'apikey_upstream_failover'
-            });
-        } else {
-            observeDirectApiKeyResult({ ok: true });
+        if (apiKeyFailure) {
+            const retryResult = tryRetryWithNextConfig(apiKeyFailure, response);
+            if (retryResult.retried) {
+                return;
+            }
+
+            if (!retryResult.handled && typeof handleRetryableUpstreamError === 'function') {
+                handleRetryableUpstreamError(config, apiKeyFailure);
+            } else if (!retryResult.handled) {
+                observeDirectApiKeyResult({
+                    ok: false,
+                    reason: apiKeyFailure.reason,
+                    lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
+                    switchReason: 'apikey_upstream_failover'
+                });
+            }
         }
 
         if (isClientStream) {
@@ -540,12 +597,14 @@ function forwardClaudeApiKeyMessagesRequest({
             }
 
             response.on('data', chunk => {
+                observeSuccessfulClientCommit(statusCode);
                 res.write(chunk);
             });
             response.on('end', () => {
                 responseFinished = true;
                 releaseCurrentConfig();
                 if (!res.writableEnded) {
+                    observeSuccessfulClientCommit(statusCode);
                     res.end();
                 }
             });
@@ -555,6 +614,30 @@ function forwardClaudeApiKeyMessagesRequest({
                 }
 
                 error(`代理请求失败: ${err.message}`);
+                if (successfulClientResponseCommitted || res.headersSent) {
+                    releaseCurrentConfig();
+                    if (!res.writableEnded) {
+                        res.end();
+                    }
+                    return;
+                }
+
+                const retryResult = tryRetryWithNextConfig({
+                    reason: 'apikey_upstream_error',
+                    retryKey: err.message || 'response_error',
+                    retrySource: 'stream'
+                });
+                if (retryResult.retried) {
+                    return;
+                }
+                if (!retryResult.handled) {
+                    observeDirectApiKeyResult({
+                        ok: false,
+                        reason: 'apikey_upstream_error',
+                        lastError: err.message,
+                        switchReason: 'apikey_upstream_failover'
+                    });
+                }
                 releaseCurrentConfig();
                 if (!res.headersSent) {
                     sendJsonError(res, getGatewayStatusCode(err), {
@@ -578,6 +661,7 @@ function forwardClaudeApiKeyMessagesRequest({
             releaseCurrentConfig();
 
             if (isSuccessfulResponsesStatus(statusCode)) {
+                observeSuccessfulClientCommit(statusCode);
                 sendBufferedUpstreamResponse(res, statusCode, contentType, bodyBuffer);
                 return;
             }
@@ -590,6 +674,22 @@ function forwardClaudeApiKeyMessagesRequest({
             }
 
             error(`代理请求失败: ${err.message}`);
+            const retryResult = tryRetryWithNextConfig({
+                reason: 'apikey_upstream_error',
+                retryKey: err.message || 'response_error',
+                retrySource: 'stream'
+            });
+            if (retryResult.retried) {
+                return;
+            }
+            if (!retryResult.handled) {
+                observeDirectApiKeyResult({
+                    ok: false,
+                    reason: 'apikey_upstream_error',
+                    lastError: err.message,
+                    switchReason: 'apikey_upstream_failover'
+                });
+            }
             releaseCurrentConfig();
             sendJsonError(res, getGatewayStatusCode(err), {
                 error: 'Bad Gateway',
@@ -603,12 +703,22 @@ function forwardClaudeApiKeyMessagesRequest({
 
         const message = err.message || 'upstream request failed';
         error(`代理请求失败: ${message}`);
-        observeDirectApiKeyResult({
-            ok: false,
+        const retryResult = tryRetryWithNextConfig({
             reason: 'apikey_upstream_error',
-            lastError: message,
-            switchReason: 'apikey_upstream_failover'
+            retryKey: message,
+            retrySource: 'request'
         });
+        if (retryResult.retried) {
+            return;
+        }
+        if (!retryResult.handled) {
+            observeDirectApiKeyResult({
+                ok: false,
+                reason: 'apikey_upstream_error',
+                lastError: message,
+                switchReason: 'apikey_upstream_failover'
+            });
+        }
         releaseCurrentConfig();
         sendJsonError(res, getGatewayStatusCode(err), {
             error: 'Bad Gateway',
@@ -713,46 +823,7 @@ function createClaudeMessagesHandler({
             });
         }
 
-        try {
-            if (configSupportsClaudeMessages(config)) {
-                forwardClaudeApiKeyMessagesRequest({
-                    req,
-                    res,
-                    config,
-                    incomingUrl,
-                    rawBody,
-                    isClientStream,
-                    accessLogEnabled,
-                    logRequestSnapshot,
-                    createUpstreamRequestImpl,
-                    upstreamRequestTimeoutMs,
-                    handleRetryableUpstreamError,
-                    observeApiKeyRequestResult,
-                    releaseConfig: configSelection.release,
-                    error
-                });
-                return;
-            }
-
-            responsesRequest = transformClaudeMessagesRequest(claudeRequest, {
-                model: CLAUDE_RESPONSES_COMPAT_MODEL,
-                reasoningEffort,
-                responsesOptions,
-                stream: true,
-                includeMaxOutputTokens: false,
-                cpaStyleCompatibility
-            });
-        } catch (err) {
-            if (typeof configSelection.release === 'function') {
-                configSelection.release();
-            }
-            return sendJsonError(res, 400, {
-                error: '请求体处理失败',
-                details: err.message
-            });
-        }
-
-        const upstreamBody = Buffer.from(JSON.stringify(responsesRequest));
+        let upstreamBody = null;
         let responseFinished = false;
         let requestClosed = false;
         let currentUpstream = null;
@@ -791,6 +862,34 @@ function createClaudeMessagesHandler({
             return null;
         }
 
+        function ensureResponsesRequest(activeSelection) {
+            if (responsesRequest && upstreamBody) {
+                return true;
+            }
+
+            try {
+                responsesRequest = transformClaudeMessagesRequest(claudeRequest, {
+                    model: CLAUDE_RESPONSES_COMPAT_MODEL,
+                    reasoningEffort,
+                    responsesOptions,
+                    stream: true,
+                    includeMaxOutputTokens: false,
+                    cpaStyleCompatibility
+                });
+                upstreamBody = Buffer.from(JSON.stringify(responsesRequest));
+                return true;
+            } catch (err) {
+                if (activeSelection && typeof activeSelection.release === 'function') {
+                    activeSelection.release();
+                }
+                sendJsonError(res, 400, {
+                    error: '请求体处理失败',
+                    details: err.message
+                });
+                return false;
+            }
+        }
+
         function setCurrentConfigSelection(selection) {
             currentConfigSelection = normalizeConfigSelection(selection);
             currentConfigReleased = false;
@@ -821,6 +920,51 @@ function createClaudeMessagesHandler({
             if (currentConfigSelection && typeof currentConfigSelection.release === 'function') {
                 currentConfigSelection.release();
             }
+        }
+
+        function startAttempt(activeSelection, failoverAttempt = 0) {
+            const normalizedSelection = normalizeConfigSelection(activeSelection);
+            const activeConfig = normalizedSelection.config;
+            if (!activeConfig) {
+                if (typeof normalizedSelection.release === 'function') {
+                    normalizedSelection.release();
+                }
+                sendJsonError(res, 502, {
+                    error: 'Bad Gateway',
+                    message: '当前没有可用配置'
+                });
+                return;
+            }
+
+            if (configSupportsClaudeMessages(activeConfig)) {
+                forwardClaudeApiKeyMessagesRequest({
+                    req,
+                    res,
+                    config: activeConfig,
+                    incomingUrl,
+                    rawBody,
+                    isClientStream,
+                    accessLogEnabled,
+                    logRequestSnapshot,
+                    createUpstreamRequestImpl,
+                    upstreamRequestTimeoutMs,
+                    handleRetryableUpstreamError,
+                    observeApiKeyRequestResult,
+                    getRetryConfig: typeof handleRetryableUpstreamError === 'function'
+                        ? (failedConfig, classification) => getRetryConfig(failedConfig, classification, failoverAttempt)
+                        : null,
+                    retryWithSelection: nextSelection => startAttempt(nextSelection, failoverAttempt + 1),
+                    releaseConfig: normalizedSelection.release,
+                    error
+                });
+                return;
+            }
+
+            if (!ensureResponsesRequest(normalizedSelection)) {
+                return;
+            }
+
+            startUpstreamAttempt(normalizedSelection, failoverAttempt);
         }
 
         function startUpstreamAttempt(activeSelection, failoverAttempt = 0) {
@@ -957,7 +1101,7 @@ function createClaudeMessagesHandler({
                             if (nextSelection) {
                                 responseFinished = false;
                                 releaseCurrentConfigSelection();
-                                startUpstreamAttempt(nextSelection, failoverAttempt + 1);
+                                startAttempt(nextSelection, failoverAttempt + 1);
                                 return;
                             }
                         }
@@ -997,7 +1141,7 @@ function createClaudeMessagesHandler({
                     if (nextSelection) {
                         responseFinished = false;
                         releaseCurrentConfigSelection();
-                        startUpstreamAttempt(nextSelection, failoverAttempt + 1);
+                        startAttempt(nextSelection, failoverAttempt + 1);
                         return;
                     }
 
@@ -1046,7 +1190,7 @@ function createClaudeMessagesHandler({
             });
         }
 
-        startUpstreamAttempt(configSelection);
+        startAttempt(configSelection);
 
         const closeUpstream = () => {
             requestClosed = true;
