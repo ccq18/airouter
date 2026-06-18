@@ -833,7 +833,7 @@
 
   function buildHelloTestRequest(snapshot) {
     return {
-      model: 'gpt-5.5',
+      model: 'gpt-5.4-mini',
       instructions: '',
       input: [
         {

@@ -77,7 +77,7 @@ function createManager(configs, overrides = {}) {
     apiKeyRecoveryTimeoutMs: overrides.apiKeyRecoveryTimeoutMs,
     tokenUnavailableCooldownMs: overrides.tokenUnavailableCooldownMs,
     quotaCheckIntervalMs: overrides.quotaCheckIntervalMs ?? 60 * 1000,
-    allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 10 * 60 * 1000,
+    allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 3 * 60 * 1000,
     allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
     minRemainingPercent: 3,
     buildAuthHeadersForConfig: config => ({
@@ -679,13 +679,13 @@ test('getAccountStatus exposes token quota failure and apikey request window sum
   assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRecovery, {
     enabled: true,
     pending: false,
-    intervalMs: 10 * 60 * 1000,
+    intervalMs: 3 * 60 * 1000,
     lastCheckedAt: null,
     result: 'never',
     statusCode: null,
     reason: null,
     lastError: null,
-    model: 'gpt-5.5',
+    model: 'gpt-5.4-mini',
   });
 });
 
@@ -1238,7 +1238,7 @@ test('refreshQuotas marks token unavailable only after three consecutive quota c
   assert.equal(configs[0].runtime.quotaCheckFailures, 0);
 });
 
-test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls', async () => {
+test('startQuotaMonitor schedules minute and three-minute spaced all-account polls', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -1284,7 +1284,7 @@ test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls
   const { manager } = createManager(configs, {
     requestBufferedFn: quotaResponses.requestBuffered,
     quotaCheckIntervalMs: 60 * 1000,
-    allQuotaCheckIntervalMs: 10 * 60 * 1000,
+    allQuotaCheckIntervalMs: 3 * 60 * 1000,
     allQuotaCheckDelayMs: 1000,
     sleepFn: async ms => {
       delayCalls.push(ms);
@@ -1301,7 +1301,7 @@ test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls
 
   manager.startQuotaMonitor();
 
-  assert.deepEqual(intervalMs, [60 * 1000, 10 * 60 * 1000]);
+  assert.deepEqual(intervalMs, [60 * 1000, 3 * 60 * 1000]);
 
   intervalCallbacks[0]();
   await flushAsyncWork();
@@ -1326,7 +1326,7 @@ test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls
   assert.deepEqual(clearedTimers, ['timer-1', 'timer-2']);
 });
 
-test('startQuotaMonitor schedules ten-minute apikey recovery when no token configs exist', async () => {
+test('startQuotaMonitor schedules three-minute apikey recovery when no token configs exist', async () => {
   const configs = [
     createConfig(0, {
       available: false,
@@ -1360,7 +1360,7 @@ test('startQuotaMonitor schedules ten-minute apikey recovery when no token confi
 
   manager.startQuotaMonitor();
 
-  assert.deepEqual(intervalMs, [60 * 1000, 10 * 60 * 1000]);
+  assert.deepEqual(intervalMs, [60 * 1000, 3 * 60 * 1000]);
 
   intervalCallbacks[0]();
   await flushAsyncWork();
@@ -1480,7 +1480,7 @@ test('refreshQuotas treats non-200 apikey recovery statuses as failed', async ()
     statusCode: 201,
     reason: 'apikey_upstream_error',
     lastError: 'http:201',
-    model: 'gpt-5.5',
+    model: 'gpt-5.4-mini',
   });
 });
 
@@ -1907,8 +1907,8 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
   assert.deepEqual(
     calls.map(call => JSON.parse(call.body.toString('utf8'))),
     [
-      { model: 'gpt-5.5', input: 'hello', stream: false },
-      { model: 'gpt-5.5', input: 'hello', stream: false },
+      { model: 'gpt-5.4-mini', input: 'hello', stream: false },
+      { model: 'gpt-5.4-mini', input: 'hello', stream: false },
     ],
   );
   assert.equal(configs[0].runtime.available, true);
@@ -1920,13 +1920,13 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
   assert.deepEqual(manager.getAccountStatus(configs[1]).apiKeyRecovery, {
     enabled: true,
     pending: false,
-    intervalMs: 10 * 60 * 1000,
+    intervalMs: 3 * 60 * 1000,
     lastCheckedAt: 1713337200000,
     result: 'success',
     statusCode: 200,
     reason: 'apikey',
     lastError: null,
-    model: 'gpt-5.5',
+    model: 'gpt-5.4-mini',
   });
   assert.equal(configs[2].runtime.available, false);
   assert.equal(configs[2].runtime.reason, 'apikey_rate_limited');
@@ -1935,13 +1935,13 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
   assert.deepEqual(manager.getAccountStatus(configs[2]).apiKeyRecovery, {
     enabled: true,
     pending: true,
-    intervalMs: 10 * 60 * 1000,
+    intervalMs: 3 * 60 * 1000,
     lastCheckedAt: 1713337200000,
     result: 'failed',
     statusCode: 429,
     reason: 'apikey_rate_limited',
     lastError: 'http:429',
-    model: 'gpt-5.5',
+    model: 'gpt-5.4-mini',
   });
   assert.equal(configs[3].runtime.available, false);
   assert.equal(configs[3].runtime.lastCheckedAt, null);

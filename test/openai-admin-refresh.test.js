@@ -87,7 +87,7 @@ test('serializeAccountStatus includes apikey recovery probe observability', () =
       apiKeyRecovery: {
         enabled: true,
         pending: true,
-        intervalMs: 600000,
+        intervalMs: 180000,
         lastCheckedAt: 1713337200000,
         result: 'failed',
         statusCode: 429,
@@ -104,7 +104,7 @@ test('serializeAccountStatus includes apikey recovery probe observability', () =
     {
       enabled: true,
       pending: true,
-      interval_ms: 600000,
+      interval_ms: 180000,
       last_checked_at: 1713337200000,
       result: 'failed',
       status_code: 429,

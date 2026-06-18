@@ -562,6 +562,7 @@ test('server defaults upstream requests to the official SDK timeout window', () 
 
   assert.match(openaiSource, /UPSTREAM_REQUEST_TIMEOUT_MS', 10 \* 60 \* 1000/);
   assert.match(openaiSource, /APIKEY_RECOVERY_TIMEOUT_MS', 10 \* 60 \* 1000/);
+  assert.match(openaiSource, /ALL_QUOTA_CHECK_INTERVAL_MS = 3 \* 60 \* 1000/);
   assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);
 });
 

@@ -11,7 +11,7 @@ const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
 const DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS = 60 * 60 * 1000;
 const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
 const APIKEY_RECOVERY_REQUEST_BODY = {
-  model: 'gpt-5.5',
+  model: 'gpt-5.4-mini',
   input: 'hello',
   stream: false,
 };
@@ -28,7 +28,7 @@ function createAccountManager(options) {
     apiKeyRecoveryTimeoutMs = DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS,
     tokenUnavailableCooldownMs = DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS,
     quotaCheckIntervalMs,
-    allQuotaCheckIntervalMs = 10 * 60 * 1000,
+    allQuotaCheckIntervalMs = 3 * 60 * 1000,
     allQuotaCheckDelayMs = 1000,
     minRemainingPercent,
     buildAuthHeadersForConfig,
@@ -1289,7 +1289,7 @@ function createAccountManager(options) {
   }
 
   /**
-   * 轮询 token 账号额度；十分钟全量校正会额外探测已不可用的 GPT API Key。
+   * 轮询 token 账号额度；定时全量校正会额外探测已不可用的 GPT API Key。
    */
   async function refreshQuotas(reason = 'poll', options = {}) {
     if (!hasQuotaOrApiKeyRecoveryTargets(reason)) {

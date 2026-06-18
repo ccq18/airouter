@@ -286,7 +286,7 @@ test('buildHelloTestRequest matches the Codex CLI responses probe shape', () => 
   const requestBody = buildHelloTestRequest({});
 
   assert.deepEqual(requestBody, {
-    model: 'gpt-5.5',
+    model: 'gpt-5.4-mini',
     instructions: '',
     input: [
       {
@@ -863,7 +863,7 @@ test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {
       api_key_recovery: {
         enabled: true,
         pending: true,
-        interval_ms: 600000,
+        interval_ms: 180000,
         last_checked_at: 1713337200000,
         result: 'failed',
         status_code: 429,
@@ -878,7 +878,7 @@ test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {
     {
       title: 'API Key 探测',
       label: '仍不可用',
-      detail: '上次 07:00:00 · 模型 gpt-4.1-mini · HTTP 429 · http:429 · 仅不可用时每 10 分钟恢复探测',
+      detail: '上次 07:00:00 · 模型 gpt-4.1-mini · HTTP 429 · http:429 · 仅不可用时每 3 分钟恢复探测',
       active: false,
       tone: 'danger',
     },
@@ -889,7 +889,7 @@ test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {
       api_key_recovery: {
         enabled: true,
         pending: true,
-        interval_ms: 600000,
+        interval_ms: 180000,
         last_checked_at: null,
         result: 'never',
         model: 'gpt-5.5',
@@ -898,7 +898,7 @@ test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {
     {
       title: 'API Key 探测',
       label: '等待探测',
-      detail: '模型 gpt-5.5 · 仅不可用时每 10 分钟恢复探测',
+      detail: '模型 gpt-5.5 · 仅不可用时每 3 分钟恢复探测',
       active: false,
       tone: 'warn',
     },
