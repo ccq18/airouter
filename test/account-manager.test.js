@@ -578,6 +578,7 @@ test('observeResponseModel records requested and upstream response models', () =
   manager.observeResponseModel(config, {
     responseModel: 'gpt-5.4-mini',
     statusCode: 200,
+    downgraded: true,
   });
   manager.observeResponseModel(config, {
     active: false,
@@ -588,6 +589,24 @@ test('observeResponseModel records requested and upstream response models', () =
     requestModel: 'gpt-5.5',
     responseModel: 'gpt-5.4-mini',
     active: false,
+    source: 'proxy_request',
+    statusCode: 200,
+    observedAt: 1713337200000,
+    lastSeenAt: 1713337200000,
+    downgraded: true,
+  });
+
+  manager.observeResponseModel(config, {
+    requestModel: 'gpt-5.5',
+    active: true,
+    source: 'proxy_request',
+  });
+
+  status = manager.getAccountStatus(config);
+  assert.deepEqual(status.responseModel, {
+    requestModel: 'gpt-5.5',
+    responseModel: null,
+    active: true,
     source: 'proxy_request',
     statusCode: 200,
     observedAt: 1713337200000,

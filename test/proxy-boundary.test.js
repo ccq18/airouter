@@ -148,6 +148,19 @@ test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () 
   }), false);
 });
 
+test('isResponsesFailoverInspectionCandidate inspects successful JSON when model downgrade is possible', () => {
+  assert.equal(isResponsesFailoverInspectionCandidate(200, {
+    'content-type': 'application/json',
+  }, {
+    requestedModel: 'gpt-5.5',
+  }), true);
+  assert.equal(isResponsesFailoverInspectionCandidate(200, {
+    'content-type': 'application/json',
+  }, {
+    requestedModel: 'gpt-5.4-mini',
+  }), false);
+});
+
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {
   assert.equal(shouldForceResponsesStoreFalse({
     type: 'token',
@@ -1195,6 +1208,99 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
     {
       type: 'text',
       text: 'hello',
+    },
+  ]);
+});
+
+test('createClaudeMessagesHandler retries downgraded gpt-5.4-mini responses with the next config', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary',
+      access_token: 'token-1',
+      account_id: 'account-1',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup',
+      access_token: 'token-2',
+      account_id: 'account-2',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+  ];
+  const upstreamAccountIds = [];
+  const classifications = [];
+  const createEvents = (model, text) => [
+    `data: {"type":"response.created","response":{"id":"resp_1","model":"${model}"}}`,
+    '',
+    'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+    '',
+    'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+    '',
+    `data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"${text}"}`,
+    '',
+    'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+    '',
+    `data: {"type":"response.completed","response":{"id":"resp_1","model":"${model}","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+    '',
+  ].join('\n');
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (config, classification) => {
+      classifications.push({ config, classification });
+      return configs[1];
+    },
+    createUpstreamRequest: request => {
+      upstreamAccountIds.push(request.headers['chatgpt-account-id']);
+      const events = upstreamAccountIds.length === 1
+        ? createEvents('gpt-5.4-mini', 'primary')
+        : createEvents('gpt-5.5', 'backup');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+  });
+
+  const res = createJsonResponseRecorder();
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
+  assert.equal(classifications.length, 1);
+  assert.equal(classifications[0].config, configs[0]);
+  assert.deepEqual(classifications[0].classification, {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'backup',
     },
   ]);
 });

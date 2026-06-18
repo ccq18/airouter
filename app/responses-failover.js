@@ -13,6 +13,7 @@ const RETRYABLE_STREAM_ERROR_CODES = new Map([
   ['usage_limit_reached', { reason: 'responses_usage_limit_reached' }],
   ['usage_not_included', { reason: 'responses_usage_not_included' }],
 ]);
+const DOWNGRADED_RESPONSE_MODEL = 'gpt-5.4-mini';
 
 const IGNORABLE_PRELUDE_EVENT_TYPES = new Set([
   'response.created',
@@ -29,6 +30,53 @@ function isSuccessfulResponsesStatus(statusCode) {
 
 function normalizeErrorText(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function normalizeModelName(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function shouldInspectForResponsesModelDowngrade(requestedModel) {
+  const normalizedRequestedModel = normalizeModelName(requestedModel);
+  return Boolean(normalizedRequestedModel && normalizedRequestedModel !== DOWNGRADED_RESPONSE_MODEL);
+}
+
+function classifyResponsesModelDowngrade({ requestedModel, responseModel } = {}) {
+  const normalizedResponseModel = normalizeModelName(responseModel);
+  if (!shouldInspectForResponsesModelDowngrade(requestedModel) || normalizedResponseModel !== DOWNGRADED_RESPONSE_MODEL) {
+    return null;
+  }
+
+  const normalizedRequestedModel = String(requestedModel || '').trim();
+  const normalizedObservedModel = String(responseModel || '').trim();
+  return {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: `${normalizedRequestedModel}->${normalizedObservedModel}`,
+    retrySource: 'model',
+    requestedModel: normalizedRequestedModel,
+    responseModel: normalizedObservedModel,
+  };
+}
+
+function isResponsesModelDowngradeClassification(classification) {
+  return Boolean(classification && classification.reason === 'responses_model_downgraded');
+}
+
+function shouldMarkResponsesFailoverUnavailable(classification) {
+  return !isResponsesModelDowngradeClassification(classification);
+}
+
+function extractResponsesPayloadModel(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return '';
+  }
+
+  if (typeof payload.response?.model === 'string' && payload.response.model.trim()) {
+    return payload.response.model.trim();
+  }
+
+  return typeof payload.model === 'string' && payload.model.trim() ? payload.model.trim() : '';
 }
 
 function getUsageLimitMessageKey(...values) {
@@ -167,7 +215,15 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   };
 }
 
-function classifyRetryableResponsesStreamPayload(payload) {
+function classifyRetryableResponsesStreamPayload(payload, options = {}) {
+  const modelDowngrade = classifyResponsesModelDowngrade({
+    requestedModel: options.requestedModel,
+    responseModel: extractResponsesPayloadModel(payload),
+  });
+  if (modelDowngrade) {
+    return modelDowngrade;
+  }
+
   const eventType = typeof payload?.type === 'string' ? payload.type : '';
   const errorCode = payload && payload.response && payload.response.error && typeof payload.response.error.code === 'string'
     ? payload.response.error.code
@@ -283,6 +339,7 @@ function drainAbandonedResponse(response) {
 function createResponsesEventStreamInspector(options = {}) {
   const {
     maxBufferBytes = 64 * 1024,
+    requestedModel = '',
   } = options;
 
   const decoder = new StringDecoder('utf8');
@@ -331,7 +388,9 @@ function createResponsesEventStreamInspector(options = {}) {
     }
 
     const eventType = typeof payload.type === 'string' ? payload.type : '';
-    const classification = classifyRetryableResponsesStreamPayload(payload);
+    const classification = classifyRetryableResponsesStreamPayload(payload, {
+      requestedModel,
+    });
 
     if (classification) {
       return classification;
@@ -365,6 +424,7 @@ function createResponsesEventStreamInspector(options = {}) {
 
 module.exports = {
   applyResponsesFailoverRequestHeaders,
+  classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
   classifyRetryableResponsesStreamPayload,
   createResponsesEventStreamInspector,
@@ -372,5 +432,8 @@ module.exports = {
   getHeaderValue,
   isInspectableResponsesEventStream,
   isSuccessfulResponsesStatus,
+  isResponsesModelDowngradeClassification,
   normalizeContentEncoding,
+  shouldMarkResponsesFailoverUnavailable,
+  shouldInspectForResponsesModelDowngrade,
 };

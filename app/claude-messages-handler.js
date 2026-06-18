@@ -1038,6 +1038,10 @@ function createClaudeMessagesHandler({
             }
 
             function handleUpstreamSseEvent(upstreamEventName, payload) {
+                if (retryClassification) {
+                    return;
+                }
+
                 const responseModel = typeof payload?.response?.model === 'string' && payload.response.model.trim()
                     ? payload.response.model.trim()
                     : '';
@@ -1049,7 +1053,9 @@ function createClaudeMessagesHandler({
                     });
                 }
 
-                const classification = classifyRetryableResponsesStreamPayload(payload);
+                const classification = classifyRetryableResponsesStreamPayload(payload, {
+                    requestedModel: responsesRequest && responsesRequest.model,
+                });
                 if (classification && !streamInitialized && !collector.build()) {
                     retryClassification = classification;
                     return;

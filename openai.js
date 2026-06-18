@@ -24,12 +24,16 @@ const { createAccountManager } = require('./app/account-manager');
 const { refreshOpenAIToken } = require('./app/openai-token-refresh');
 const {
     applyResponsesFailoverRequestHeaders,
+    classifyResponsesModelDowngrade,
     classifyRetryableResponsesHttpError,
     createResponsesEventStreamInspector,
     drainAbandonedResponse,
     isInspectableResponsesEventStream,
+    isResponsesModelDowngradeClassification,
     isSuccessfulResponsesStatus,
     normalizeContentEncoding,
+    shouldMarkResponsesFailoverUnavailable,
+    shouldInspectForResponsesModelDowngrade,
 } = require('./app/responses-failover');
 const {
     resolveClaudeCodeOptions,
@@ -565,10 +569,20 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
     return null;
 }
 
-function isResponsesFailoverInspectionCandidate(statusCode, headers) {
+function isResponsesFailoverInspectionCandidate(statusCode, headers, options = {}) {
     const normalizedStatusCode = Number(statusCode);
-    return (Number.isFinite(normalizedStatusCode) && !isSuccessfulResponsesStatus(normalizedStatusCode)) ||
-        isInspectableResponsesEventStream(headers);
+    if (Number.isFinite(normalizedStatusCode) && !isSuccessfulResponsesStatus(normalizedStatusCode)) {
+        return true;
+    }
+
+    if (isInspectableResponsesEventStream(headers)) {
+        return true;
+    }
+
+    const contentType = getHeaderValue(headers, 'content-type').toLowerCase();
+    return isSuccessfulResponsesStatus(normalizedStatusCode) &&
+        contentType.includes('json') &&
+        shouldInspectForResponsesModelDowngrade(options.requestedModel);
 }
 
 function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) {
@@ -582,8 +596,10 @@ function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) 
     return responseMeta;
 }
 
-async function inspectResponsesEventStream(response) {
-    const inspector = createResponsesEventStreamInspector();
+async function inspectResponsesEventStream(response, options = {}) {
+    const inspector = createResponsesEventStreamInspector({
+        requestedModel: options.requestedModel,
+    });
     const bufferedChunks = [];
     const contentEncoding = normalizeContentEncoding(getHeaderValue(response.headers, 'content-encoding'));
     let decoder = null;
@@ -712,7 +728,7 @@ async function inspectResponsesEventStream(response) {
     });
 }
 
-async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders) {
+async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders, options = {}) {
     if (Number.isFinite(Number(statusCode)) && !isSuccessfulResponsesStatus(statusCode)) {
         const bodyBuffer = await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
@@ -737,7 +753,9 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
     }
 
     if (isInspectableResponsesEventStream(rawHeaders)) {
-        const streamInspection = await inspectResponsesEventStream(response);
+        const streamInspection = await inspectResponsesEventStream(response, {
+            requestedModel: options.requestedModel,
+        });
 
         if (streamInspection.decision.action === 'retry') {
             return {
@@ -759,6 +777,42 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
         return {
             action: 'forward-stream',
             initialChunks: streamInspection.bufferedChunks,
+        };
+    }
+
+    const contentType = getHeaderValue(rawHeaders, 'content-type').toLowerCase();
+    if (
+        isSuccessfulResponsesStatus(statusCode) &&
+        contentType.includes('json') &&
+        shouldInspectForResponsesModelDowngrade(options.requestedModel)
+    ) {
+        const bodyBuffer = await consumeResponseBody(response);
+        const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
+        let responseModel = '';
+
+        try {
+            responseModel = extractResponseModelFromPayload(JSON.parse(bodyText));
+        } catch (err) {
+            responseModel = '';
+        }
+
+        const classification = classifyResponsesModelDowngrade({
+            requestedModel: options.requestedModel,
+            responseModel,
+        });
+
+        if (classification) {
+            return {
+                action: 'retry',
+                classification,
+                forwardMode: 'buffered',
+                bodyBuffer,
+            };
+        }
+
+        return {
+            action: 'forward-buffered',
+            bodyBuffer,
         };
     }
 
@@ -842,6 +896,27 @@ function createClaudeMessagesRequestHandler(options = {}) {
         cpaStyleCompatibility,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
+            if (isResponsesModelDowngradeClassification(classification)) {
+                warn(`claude responses 模型降级，自动切号: #${config.index + 1} ${config.description} (${classification.retryKey})`);
+                accountManager.observeResponseModel(config, {
+                    requestModel: classification.requestedModel,
+                    responseModel: classification.responseModel,
+                    source: 'claude_messages',
+                    statusCode: 200,
+                    downgraded: true,
+                });
+
+                if (!context) {
+                    return null;
+                }
+
+                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                    ? context.excludedConfigs
+                    : [config];
+
+                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_model_downgrade');
+            }
+
             if (config && config.type === 'apikey') {
                 const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
                     ok: false,
@@ -866,10 +941,12 @@ function createClaudeMessagesRequestHandler(options = {}) {
             }
 
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
-            accountManager.markConfigUnavailable(config, classification.reason, {
-                lastError: `${classification.retrySource}:${classification.retryKey}`,
-                switchReason: 'claude_responses_failover',
-            });
+            if (shouldMarkResponsesFailoverUnavailable(classification)) {
+                accountManager.markConfigUnavailable(config, classification.reason, {
+                    lastError: `${classification.retrySource}:${classification.retryKey}`,
+                    switchReason: 'claude_responses_failover',
+                });
+            }
 
             if (!context) {
                 return null;
@@ -1185,6 +1262,7 @@ function serializeAccountStatus(accountStatus) {
             status_code: accountStatus.responseModel.statusCode,
             observed_at: accountStatus.responseModel.observedAt,
             last_seen_at: accountStatus.responseModel.lastSeenAt,
+            downgraded: accountStatus.responseModel.downgraded === true,
         } : null,
         runtime_summary: accountStatus.runtimeSummary,
         summary_line: accountStatus.summaryLine,
@@ -2141,18 +2219,33 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
 
         const shouldInspectResponses = canAttemptResponsesFailover(config, req.url)
-            && isResponsesFailoverInspectionCandidate(statusCode, response.headers);
+            && isResponsesFailoverInspectionCandidate(statusCode, response.headers, {
+                requestedModel: requestedResponseModel,
+            });
 
         if (shouldInspectResponses) {
-            const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers);
+            const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers, {
+                requestedModel: requestedResponseModel,
+            });
 
             if (inspection.action === 'retry') {
-                warn(`responses 自动切号: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
-                accountManager.markConfigUnavailable(config, inspection.classification.reason, {
-                    lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
-                    switchReason: 'responses_failover',
-                });
-                const nextLease = acquireFailoverLease('responses_failover');
+                const modelDowngraded = isResponsesModelDowngradeClassification(inspection.classification);
+                warn(`${modelDowngraded ? 'responses 模型降级，自动切号' : 'responses 自动切号'}: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
+                if (modelDowngraded) {
+                    observeCurrentResponseModel({
+                        active: true,
+                        responseModel: inspection.classification.responseModel,
+                        statusCode,
+                        downgraded: true,
+                    });
+                } else if (shouldMarkResponsesFailoverUnavailable(inspection.classification)) {
+                    accountManager.markConfigUnavailable(config, inspection.classification.reason, {
+                        lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                        switchReason: 'responses_failover',
+                    });
+                }
+
+                const nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
                 const nextConfig = nextLease ? nextLease.config : null;
 
                 if (!requestClosed && nextConfig && nextConfig !== config) {

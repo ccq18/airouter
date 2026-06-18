@@ -610,10 +610,15 @@
         : '';
     const statusCode = Number(model.status_code ?? model.statusCode);
     const active = Boolean(model.active);
+    const downgraded = Boolean(model.downgraded);
     const detailParts = [];
 
     if (active) {
       detailParts.push('进行中');
+    }
+
+    if (downgraded) {
+      detailParts.push('已降级');
     }
 
     if (requestModel && responseModel && requestModel !== responseModel) {

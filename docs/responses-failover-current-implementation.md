@@ -30,6 +30,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 - HTTP `429` 且 `error.type == "usage_not_included"`
 - HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
 - 其他 HTTP 非 `200` 响应，包括 `201`、`400`、`500`、`503` 等
+- 请求模型不是 `gpt-5.4-mini`，但成功响应里的实际模型是 `gpt-5.4-mini`
 - SSE `response.failed` 且 `response.error.code == "insufficient_quota"`
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
 - 其他 `response.failed`
@@ -42,6 +43,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 | `429 + usage_not_included` | `responses_usage_not_included` |
 | `401/403 + unauthorized/token_revoked` | `missing_credentials` |
 | `其他 HTTP 非 200` | `responses_unknown_error` |
+| `请求模型 != gpt-5.4-mini` 但响应模型为 `gpt-5.4-mini` | `responses_model_downgraded` |
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
 | `其他 response.failed` | `responses_unknown_error` |
@@ -57,20 +59,21 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 这些情况现在不会被当成成功透传，而是会统一归到 `responses_unknown_error`，然后继续触发账号切换。
 
-## 4. 流式检查方式
+## 4. 响应检查方式
 
-`/responses` 的流式自动切号不是等整个响应结束后再判断，而是先做一段前置检查：
+`/responses` 的自动切号会尽量在响应提交给客户端前完成判断：
 
 1. 如果上游是 HTTP 非 `200`，先读取完整 body，再提取 `error.type` / `error.code` / 顶层 `type` / 顶层 `code`
-2. 如果上游是 `text/event-stream`，先检查前几个 SSE 事件
-3. 如果在前置事件里看到：
+2. 如果上游是成功 JSON，且请求模型不是 `gpt-5.4-mini`，会先缓冲完整响应体并检查 `model` / `response.model`；只有确认没有被降级时才继续透传
+3. 如果上游是 `text/event-stream`，先检查前几个 SSE 事件
+4. 如果在前置事件里看到：
    - `response.created`
    - `response.in_progress`
-   这两类事件，会继续等待
-4. 如果看到：
+   这两类事件，会继续等待；如果这些事件里的 `response.model` 已经从请求模型降级成 `gpt-5.4-mini`，会立即切号
+5. 如果看到：
    - `response.failed` 且错误码命中可切号集合
    就中断当前转发流程，改走切号重试
-5. 如果在前置阶段先看到了正常输出事件，例如 `response.output_text.delta`
+6. 如果在前置阶段先看到了正常输出事件，例如 `response.output_text.delta`
    就认为这条流已经开始正常产出内容，直接透传，不再尝试切号
 
 这意味着当前逻辑是“只在流的开头窗口内识别可切号失败”，不是在整条流生命周期内持续拦截所有错误事件。
@@ -98,7 +101,9 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 ## 6. 触发切号后的行为
 
-一旦命中第 2 节里的任一条件，当前逻辑会先把失败账号整体摘除，再按请求级调度寻找重试账号：
+一旦命中第 2 节里的任一条件，当前逻辑会先按请求级调度寻找重试账号。额度错误、上游错误会把当前账号整体摘除；模型降级只排除当前请求里的这个账号，不改变账号可用性。
+
+额度错误或上游错误会：
 
 1. 调用 `markConfigUnavailable(...)`
 2. 把当前账号的：
@@ -107,16 +112,26 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
    - `runtime.lastError = <retrySource>:<retryKey>`
    - `runtime.unavailableUntil = now + token 冷却时间`
 3. 调度会跳过仍在冷却期内的 token 账号
-4. 如果当前请求有会话 key，排除失败账号后按 HRW/Rendezvous 一致性哈希重新选择可用 token 账号
-5. 如果当前请求没有会话 key，按可用 token 账号的 `inFlight` 计数选择重试账号
-6. 用新账号重放同一个 `/responses` 请求
 
-如果失败账号正好是活动账号，活动账号也会按现有规则切换；如果失败账号不是活动账号，则只影响运行态可用性和后续请求调度。
+模型降级会：
+
+1. 保持当前账号的 `runtime.available`、`runtime.reason` 和 `runtime.unavailableUntil` 不变
+2. 在运行态模型观测里记录 `response_model.downgraded = true`
+3. 只在本次请求的重试候选中排除当前账号
+
+随后：
+
+1. 如果当前请求有会话 key，排除本次失败或降级账号后按 HRW/Rendezvous 一致性哈希重新选择可用 token 账号
+2. 如果当前请求没有会话 key，按可用 token 账号的 `inFlight` 计数选择重试账号
+3. 用新账号重放同一个 `/responses` 请求
+
+如果失败账号正好是活动账号，活动账号也会按现有规则切换；如果失败账号不是活动账号，则只影响运行态可用性和后续请求调度。模型降级不会触发活动账号切换，只影响本次请求重试。
 
 也就是说：
 
 - `usage_not_included` 当前和其他额度类错误一致
-- 命中后会把当前账号整体摘除并进入冷却
+- 命中额度或上游错误后会把当前账号整体摘除并进入冷却
+- 命中 `responses_model_downgraded` 后只切走本次请求，并标记模型观测为已降级
 - 冷却结束后允许作为无可用账号时的 fallback 探测；额度刷新成功会直接恢复并清空冷却
 
 ## 7. 无可用账号或无法重试时的退化行为

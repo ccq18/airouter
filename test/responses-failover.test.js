@@ -4,10 +4,12 @@ const { PassThrough } = require('node:stream');
 
 const {
   applyResponsesFailoverRequestHeaders,
+  classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
   createResponsesEventStreamInspector,
   isInspectableResponsesEventStream,
   drainAbandonedResponse,
+  shouldMarkResponsesFailoverUnavailable,
 } = require('../app/responses-failover');
 
 test('classifyRetryableResponsesHttpError detects usage_limit_reached', () => {
@@ -304,6 +306,54 @@ test('createResponsesEventStreamInspector passes through on the first non-prelud
   ));
 
   assert.deepEqual(result, { action: 'pass' });
+});
+
+test('classifyResponsesModelDowngrade retries non-mini requests downgraded to gpt-5.4-mini', () => {
+  assert.deepEqual(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  }), {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  });
+
+  assert.equal(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.4-mini',
+    responseModel: 'gpt-5.4-mini',
+  }), null);
+});
+
+test('createResponsesEventStreamInspector retries downgraded response.created models', () => {
+  const inspector = createResponsesEventStreamInspector({
+    requestedModel: 'gpt-5.5',
+  });
+
+  const result = inspector.push(Buffer.from(
+    'data: {"type":"response.created","response":{"id":"resp_123","model":"gpt-5.4-mini"}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  });
+});
+
+test('shouldMarkResponsesFailoverUnavailable keeps model downgrades available', () => {
+  assert.equal(shouldMarkResponsesFailoverUnavailable({
+    reason: 'responses_model_downgraded',
+  }), false);
+  assert.equal(shouldMarkResponsesFailoverUnavailable({
+    reason: 'responses_usage_limit_reached',
+  }), true);
 });
 
 test('applyResponsesFailoverRequestHeaders forces identity encoding for responses requests', () => {

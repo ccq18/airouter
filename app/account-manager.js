@@ -102,6 +102,7 @@ function createAccountManager(options) {
       responses_insufficient_quota: 'responses 配额不足',
       responses_usage_limit_reached: 'responses 窗口额度已用尽',
       responses_usage_not_included: 'responses 套餐不支持',
+      responses_model_downgraded: 'responses 模型被降级',
       responses_unknown_error: 'responses 未知错误',
       apikey_auth_failed: 'API Key 鉴权失败',
       apikey_rate_limited: 'API Key 被限流',
@@ -154,6 +155,10 @@ function createAccountManager(options) {
 
     if (runtime.lastError) {
       parts.push(`错误=${runtime.lastError}`);
+    }
+
+    if (runtime.responseModel && runtime.responseModel.downgraded) {
+      parts.push('模型=已降级');
     }
 
     const unavailableUntil = normalizeUnavailableUntil(config);
@@ -728,7 +733,7 @@ function createAccountManager(options) {
       return null;
     }
 
-    return {
+    const serialized = {
       requestModel: typeof responseModel.requestModel === 'string' && responseModel.requestModel
         ? responseModel.requestModel
         : null,
@@ -741,6 +746,12 @@ function createAccountManager(options) {
       observedAt: Number.isFinite(responseModel.observedAt) ? responseModel.observedAt : null,
       lastSeenAt: Number.isFinite(responseModel.lastSeenAt) ? responseModel.lastSeenAt : null,
     };
+
+    if (responseModel.downgraded) {
+      serialized.downgraded = true;
+    }
+
+    return serialized;
   }
 
   function observeResponseModel(config, observation = {}) {
@@ -757,6 +768,13 @@ function createAccountManager(options) {
     const responseModel = observedResponseModel || (observation.active === true ? null : previous.responseModel || null);
     const timestamp = now();
     const statusCode = Number(observation.statusCode);
+    const hasDowngradeObservation = Object.prototype.hasOwnProperty.call(observation, 'downgraded');
+    let downgraded = Boolean(previous.downgraded);
+    if (hasDowngradeObservation) {
+      downgraded = Boolean(observation.downgraded);
+    } else if (hasObservedResponseModel || observation.active === true) {
+      downgraded = false;
+    }
 
     config.runtime.responseModel = {
       requestModel,
@@ -768,6 +786,7 @@ function createAccountManager(options) {
       statusCode: Number.isInteger(statusCode) && statusCode > 0 ? statusCode : previous.statusCode ?? null,
       observedAt: hasObservedResponseModel && responseModel ? timestamp : previous.observedAt ?? null,
       lastSeenAt: timestamp,
+      downgraded,
     };
 
     return serializeResponseModel(config.runtime.responseModel);
