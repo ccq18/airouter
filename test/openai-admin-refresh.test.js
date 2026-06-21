@@ -193,14 +193,50 @@ test('activateConfigAdminResponse activates the first config without rewriting t
 test('admin reorder route moves the selected config to the top', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const routeStart = source.indexOf("app.post('/admin/api/configs/:index/move-up'");
-  const routeEnd = source.indexOf("app.post('/admin/api/configs/:index/refresh-token'", routeStart);
+  const routeEnd = source.indexOf("app.post('/admin/api/configs/:index/move-previous'", routeStart);
   const routeSource = routeStart >= 0 && routeEnd > routeStart
     ? source.slice(routeStart, routeEnd)
     : '';
 
   assert.match(routeSource, /moveConfigItem\(parsed,\s*targetIndex,\s*0\)/);
-  assert.match(routeSource, /preserveActiveConfig:\s*true/);
+  assert.match(routeSource, /readParsedConfigFile\(CONFIG_FILE,\s*\{\s*validate:\s*false\s*\}\)/);
+  assert.match(routeSource, /persistMovedConfigItem\(/);
+  assert.match(routeSource, /moved_from:\s*movedFrom/);
+  assert.match(routeSource, /moved_to:\s*0/);
+  assert.doesNotMatch(routeSource, /handleConfigMutation/);
+  assert.doesNotMatch(routeSource, /persistAndReloadConfig/);
   assert.doesNotMatch(routeSource, /accountManager\.activateConfig\(0,\s*'admin_move_config'\)/);
+});
+
+test('admin adjacent reorder routes swap configs with neighbors', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const routeStart = source.indexOf("app.post('/admin/api/configs/:index/move-previous'");
+  const routeEnd = source.indexOf("app.post('/admin/api/configs/:index/disable'", routeStart);
+  const routeSource = routeStart >= 0 && routeEnd > routeStart
+    ? source.slice(routeStart, routeEnd)
+    : '';
+
+  assert.match(routeSource, /app\.post\('\/admin\/api\/configs\/:index\/move-previous'/);
+  assert.match(routeSource, /app\.post\('\/admin\/api\/configs\/:index\/move-next'/);
+  assert.match(routeSource, /moveConfigItem\(parsed,\s*targetIndex,\s*targetIndex - 1\)/);
+  assert.match(routeSource, /moveConfigItem\(parsed,\s*targetIndex,\s*targetIndex \+ 1\)/);
+  assert.match(routeSource, /persistMovedConfigItem\(/);
+  assert.match(routeSource, /readParsedConfigFile\(CONFIG_FILE,\s*\{\s*validate:\s*false\s*\}\)/);
+  assert.doesNotMatch(routeSource, /persistAndReloadConfig/);
+});
+
+test('admin create route appends configs without pre-validating runtime configs', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const routeStart = source.indexOf("app.post('/admin/api/configs',");
+  const routeEnd = source.indexOf("app.post('/admin/api/apikeys'", routeStart);
+  const routeSource = routeStart >= 0 && routeEnd > routeStart
+    ? source.slice(routeStart, routeEnd)
+    : '';
+
+  assert.match(routeSource, /readParsedConfigFile\(CONFIG_FILE,\s*\{\s*validate:\s*false\s*\}\)/);
+  assert.match(routeSource, /persistAppendedConfigItems\(/);
+  assert.doesNotMatch(routeSource, /validateConfigItemBeforeAdd/);
+  assert.doesNotMatch(routeSource, /persistAndReloadConfig/);
 });
 
 test('admin exposes batch delete routes for configs, disabled configs, and apikeys', () => {

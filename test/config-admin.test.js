@@ -33,6 +33,7 @@ const {
   buildProxyAccessInfo,
   buildRuntimeSyncText,
   formatConfigItemCopyText,
+  moveConfigSnapshotItem,
 } = require('../public/config-admin.js');
 
 test('config admin hides the responses settings module', () => {
@@ -134,7 +135,9 @@ test('config admin keeps the upstream config column compact after adding activat
   assert.match(html, /min-width:\s*1040px;/);
   assert.match(html, /\.account-id-col,\s*\.account-id-cell\s*\{\s*width:\s*240px;\s*min-width:\s*240px;/);
   assert.match(html, /\.account-id-cell\s*\{\s*white-space:\s*normal;\s*word-break:\s*break-word;\s*overflow-wrap:\s*anywhere;/);
-  assert.match(html, /\.action-cell\s*\{\s*width:\s*360px;\s*white-space:\s*nowrap;/);
+  assert.match(html, /\.action-cell\s*\{\s*width:\s*360px;\s*min-width:\s*360px;\s*white-space:\s*normal;/);
+  assert.match(html, /\.action-stack\s*\{\s*display:\s*grid;\s*gap:\s*6px;/);
+  assert.match(html, /\.action-row\s*\{\s*display:\s*flex;\s*flex-wrap:\s*nowrap;\s*gap:\s*6px;/);
 });
 
 test('config admin keeps all console controls after UI refresh', () => {
@@ -188,10 +191,20 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /name="apiKeySupport" value="claude"/);
   assert.match(html, /data-action="activate"/);
   assert.match(html, /data-action="move-up"/);
+  assert.match(html, /data-action="move-previous"/);
+  assert.match(html, /data-action="move-next"/);
+  assert.match(html, /class="action-stack"/);
+  assert.match(html, /class="action-row action-row-sort"/);
+  assert.match(html, /class="action-row action-row-state"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
+  assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-previous/);
+  assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-next/);
   assert.match(html, />置顶<\/button>/);
-  assert.doesNotMatch(html, />上移<\/button>/);
+  assert.match(html, />上移<\/button>/);
+  assert.match(html, />下移<\/button>/);
   assert.match(html, /配置项已置顶，当前使用账号未改变/);
+  assert.match(html, /配置项已上移，当前使用账号未改变/);
+  assert.match(html, /配置项已下移，当前使用账号未改变/);
   assert.match(html, /data-action="disable"/);
   assert.match(html, /data-action="enable"/);
   assert.match(html, /data-action="delete-apikey"/);
@@ -843,6 +856,24 @@ test('formatResponseModelStatus summarizes requested and actual response models'
   assert.deepEqual(
     formatResponseModelStatus({
       response_model: {
+        request_model: 'gpt-5.4-mini',
+        response_model: 'gpt-5.4-mini-2026-03-17',
+        active: false,
+        status_code: 200,
+      },
+    }),
+    {
+      title: '响应模型',
+      label: 'gpt-5.4-mini-2026-03-17',
+      detail: 'HTTP 200',
+      active: false,
+      tone: 'muted',
+    },
+  );
+
+  assert.deepEqual(
+    formatResponseModelStatus({
+      response_model: {
         request_model: 'gpt-5.5',
         response_model: null,
         active: true,
@@ -856,6 +887,49 @@ test('formatResponseModelStatus summarizes requested and actual response models'
       tone: 'active',
     },
   );
+});
+
+test('moveConfigSnapshotItem reorders configs locally and reindexes rows', () => {
+  const snapshot = {
+    active_config_index: 1,
+    configs: [
+      {
+        index: 0,
+        item: { description: 'first' },
+        is_active: false,
+        runtime: { index: 0 },
+      },
+      {
+        index: 1,
+        item: { description: 'second' },
+        is_active: true,
+        runtime: { index: 1 },
+      },
+      {
+        index: 2,
+        item: { description: 'third' },
+        is_active: false,
+        runtime: { index: 2 },
+      },
+    ],
+    disabled_configs: [
+      {
+        index: 0,
+        item: { description: 'disabled' },
+      },
+    ],
+  };
+
+  const moved = moveConfigSnapshotItem(snapshot, 2, 0);
+
+  assert.deepEqual(moved.configs.map(item => item.item.description), ['third', 'first', 'second']);
+  assert.deepEqual(moved.configs.map(item => item.index), [0, 1, 2]);
+  assert.equal(moved.configs[2].is_active, true);
+  assert.equal(moved.active_config_index, 2);
+  assert.equal(moved.configs[0].runtime.index, 0);
+  assert.notEqual(moved.configs, snapshot.configs);
+  assert.equal(snapshot.configs[0].item.description, 'first');
+  assert.equal(moved.disabled_configs, snapshot.disabled_configs);
 });
 
 test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {

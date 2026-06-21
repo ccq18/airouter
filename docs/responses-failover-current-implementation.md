@@ -30,7 +30,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 - HTTP `429` 且 `error.type == "usage_not_included"`
 - HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
 - 其他 HTTP 非 `200` 响应，包括 `201`、`400`、`500`、`503` 等
-- 请求模型不是 `gpt-5.4-mini`，但成功响应里的实际模型是 `gpt-5.4-mini`
+- 请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但成功响应里的实际模型是 `gpt-5.4-mini` 或同名日期版本
 - SSE `response.failed` 且 `response.error.code == "insufficient_quota"`
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
 - 其他 `response.failed`
@@ -43,7 +43,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 | `429 + usage_not_included` | `responses_usage_not_included` |
 | `401/403 + unauthorized/token_revoked` | `missing_credentials` |
 | `其他 HTTP 非 200` | `responses_unknown_error` |
-| `请求模型 != gpt-5.4-mini` 但响应模型为 `gpt-5.4-mini` | `responses_model_downgraded` |
+| 请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但响应模型为 `gpt-5.4-mini` 或同名日期版本 | `responses_model_downgraded` |
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
 | `其他 response.failed` | `responses_unknown_error` |
@@ -64,12 +64,12 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 `/responses` 的自动切号会尽量在响应提交给客户端前完成判断：
 
 1. 如果上游是 HTTP 非 `200`，先读取完整 body，再提取 `error.type` / `error.code` / 顶层 `type` / 顶层 `code`
-2. 如果上游是成功 JSON，且请求模型不是 `gpt-5.4-mini`，会先缓冲完整响应体并检查 `model` / `response.model`；只有确认没有被降级时才继续透传
+2. 如果上游是成功 JSON，且请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，会先缓冲完整响应体并检查 `model` / `response.model`；只有确认没有被降级时才继续透传
 3. 如果上游是 `text/event-stream`，先检查前几个 SSE 事件
 4. 如果在前置事件里看到：
    - `response.created`
    - `response.in_progress`
-   这两类事件，会继续等待；如果这些事件里的 `response.model` 已经从请求模型降级成 `gpt-5.4-mini`，会立即切号
+   这两类事件，会继续等待；如果这些事件里的 `response.model` 已经从请求模型降级成 `gpt-5.4-mini` 或同名日期版本，会立即切号
 5. 如果看到：
    - `response.failed` 且错误码命中可切号集合
    就中断当前转发流程，改走切号重试

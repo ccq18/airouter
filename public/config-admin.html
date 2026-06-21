@@ -681,15 +681,27 @@
 
     .action-cell {
       width: 360px;
-      white-space: nowrap;
+      min-width: 360px;
+      white-space: normal;
+    }
+
+    .action-stack {
+      display: grid;
+      gap: 6px;
+    }
+
+    .action-row {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 6px;
     }
 
     .action-cell button {
-      padding: 8px 12px;
+      padding: 8px 10px;
     }
 
     .action-cell button + button {
-      margin-left: 6px;
+      margin-left: 0;
     }
 
     .selection-cell {
@@ -1022,6 +1034,7 @@
       extractRuntimeStatusTags,
       formatDispatchSessionStatus,
       formatResponseModelStatus,
+      moveConfigSnapshotItem,
       formatApiKeyRecoveryStatus,
       hasRefreshTokenConfig,
       hasRuntimeProblem,
@@ -1420,11 +1433,19 @@
                   <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
                   <td>${renderSummary(item.runtime)}</td>
                   <td class="action-cell">
-                    <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
-                    <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
-                    <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${getActivateButtonText(item)}</button>
-                    <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
-                    <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
+                    <div class="action-stack">
+                      <div class="action-row action-row-sort">
+                        <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
+                        <button class="secondary" type="button" data-action="move-previous" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>上移</button>
+                        <button class="secondary" type="button" data-action="move-next" data-index="${item.index}" ${item.index >= configs.length - 1 ? 'disabled' : ''}>下移</button>
+                        <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
+                      </div>
+                      <div class="action-row action-row-state">
+                        <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${getActivateButtonText(item)}</button>
+                        <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
+                        <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
+                      </div>
+                    </div>
                   </td>
                 </tr>
               `).join('')}
@@ -1911,16 +1932,39 @@
     }
 
     async function moveConfigUp(index) {
-      const result = await requestJson(`/admin/api/configs/${index}/move-up`, {
+      await requestJson(`/admin/api/configs/${index}/move-up`, {
         method: 'POST',
       });
 
-      snapshot = result;
+      snapshot = moveConfigSnapshotItem(snapshot, index, 0);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已置顶，当前使用账号未改变。');
+    }
+
+    async function moveConfigAdjacent(index, direction) {
+      const numericIndex = Number(index);
+      const isPrevious = direction === 'previous';
+      const fallbackToIndex = isPrevious ? numericIndex - 1 : numericIndex + 1;
+      const requestUrl = isPrevious
+        ? `/admin/api/configs/${index}/move-previous`
+        : `/admin/api/configs/${index}/move-next`;
+      const result = await requestJson(requestUrl, {
+        method: 'POST',
+      });
+      const movedTo = Number(result && result.moved_to);
+      const targetIndex = Number.isInteger(movedTo) ? movedTo : fallbackToIndex;
+
+      snapshot = moveConfigSnapshotItem(snapshot, numericIndex, targetIndex);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', isPrevious
+        ? '配置项已上移，当前使用账号未改变。'
+        : '配置项已下移，当前使用账号未改变。');
     }
 
     async function copyConfigItemJson(index) {
@@ -2249,6 +2293,32 @@
           setMessage('error', error.message);
         } finally {
           moveUpButton.disabled = false;
+        }
+        return;
+      }
+
+      const movePreviousButton = event.target.closest('[data-action="move-previous"]');
+      if (movePreviousButton) {
+        movePreviousButton.disabled = true;
+        try {
+          await moveConfigAdjacent(movePreviousButton.dataset.index, 'previous');
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          movePreviousButton.disabled = false;
+        }
+        return;
+      }
+
+      const moveNextButton = event.target.closest('[data-action="move-next"]');
+      if (moveNextButton) {
+        moveNextButton.disabled = true;
+        try {
+          await moveConfigAdjacent(moveNextButton.dataset.index, 'next');
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          moveNextButton.disabled = false;
         }
         return;
       }

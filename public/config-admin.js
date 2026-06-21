@@ -590,6 +590,34 @@
     };
   }
 
+  function normalizeModelName(value) {
+    return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : '';
+  }
+
+  function modelNameHasVersionPrefix(model, prefix) {
+    const normalizedModel = normalizeModelName(model);
+    const normalizedPrefix = normalizeModelName(prefix);
+    if (!normalizedModel || !normalizedPrefix) {
+      return false;
+    }
+
+    if (normalizedModel === normalizedPrefix) {
+      return true;
+    }
+
+    if (!normalizedModel.startsWith(normalizedPrefix)) {
+      return false;
+    }
+
+    const suffix = normalizedModel.slice(normalizedPrefix.length);
+    return /^-\d{4}-\d{2}-\d{2}(?:$|[-._])/.test(suffix);
+  }
+
+  function areResponseModelsConsistent(requestModel, responseModel) {
+    return modelNameHasVersionPrefix(responseModel, requestModel) ||
+      modelNameHasVersionPrefix(requestModel, responseModel);
+  }
+
   function formatResponseModelStatus(runtime) {
     const model = runtime && typeof runtime === 'object'
       ? runtime.response_model || runtime.responseModel
@@ -621,7 +649,13 @@
       detailParts.push('已降级');
     }
 
-    if (requestModel && responseModel && requestModel !== responseModel) {
+    const modelsDiffer = Boolean(
+      requestModel &&
+      responseModel &&
+      !areResponseModelsConsistent(requestModel, responseModel)
+    );
+
+    if (modelsDiffer) {
       detailParts.push(`请求 ${requestModel}`);
     }
 
@@ -634,7 +668,55 @@
       label: responseModel || requestModel || '等待响应',
       detail: detailParts.join(' · '),
       active,
-      tone: responseModel && requestModel && responseModel !== requestModel ? 'warn' : active ? 'active' : 'muted',
+      tone: modelsDiffer ? 'warn' : active ? 'active' : 'muted',
+    };
+  }
+
+  function moveConfigSnapshotItem(snapshot, fromIndex, toIndex = 0) {
+    const data = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const configs = Array.isArray(data.configs) ? data.configs.slice() : [];
+    const normalizedFromIndex = Number(fromIndex);
+    const normalizedToIndex = Number(toIndex);
+
+    if (
+      !Number.isInteger(normalizedFromIndex) ||
+      !Number.isInteger(normalizedToIndex) ||
+      normalizedFromIndex < 0 ||
+      normalizedToIndex < 0 ||
+      normalizedToIndex >= configs.length
+    ) {
+      return data;
+    }
+
+    const sourcePosition = configs.findIndex(item => Number(item && item.index) === normalizedFromIndex);
+    if (sourcePosition < 0) {
+      return data;
+    }
+
+    const [movedItem] = configs.splice(sourcePosition, 1);
+    configs.splice(Math.min(normalizedToIndex, configs.length), 0, movedItem);
+
+    const reindexedConfigs = configs.map((item, index) => {
+      const nextItem = {
+        ...item,
+        index,
+      };
+
+      if (item && item.runtime && typeof item.runtime === 'object') {
+        nextItem.runtime = {
+          ...item.runtime,
+          index,
+        };
+      }
+
+      return nextItem;
+    });
+    const activeConfig = reindexedConfigs.find(item => item && item.is_active);
+
+    return {
+      ...data,
+      active_config_index: activeConfig ? activeConfig.index : data.active_config_index,
+      configs: reindexedConfigs,
     };
   }
 
@@ -1039,6 +1121,7 @@
     getDispatchModeSummary,
     formatDispatchSessionStatus,
     formatResponseModelStatus,
+    moveConfigSnapshotItem,
     formatApiKeyRecoveryStatus,
     extractRuntimeStatusTags,
     getActiveConfigLabel,

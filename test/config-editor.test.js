@@ -7,6 +7,7 @@ const path = require('node:path');
 const {
   ConfigEditorError,
   addConfigItem,
+  addConfigItems,
   buildImportedConfigItem,
   disableConfigItem,
   disableConfigItems,
@@ -81,6 +82,92 @@ test('addConfigItem appends a token config and preserves top-level settings', ()
     access_token: 'token-2',
     account_id: '42',
     description: 'backup',
+  });
+});
+
+test('addConfigItems appends multiple configs in one update', () => {
+  const parsed = createTokenConfig();
+
+  const next = addConfigItems(parsed, [
+    {
+      access_token: 'token-2',
+      account_id: 42,
+      description: 'backup',
+    },
+    {
+      type: 'apikey',
+      apikey: 'sk-example',
+      base_url: 'https://api.example.com/v1/',
+      description: 'gpt api',
+      support: ['gpt'],
+    },
+  ]);
+
+  assert.equal(parsed.configs.length, 1);
+  assert.equal(next.proxy_port, 7890);
+  assert.equal(next.port, 3009);
+  assert.equal(next.configs.length, 3);
+  assert.deepEqual(next.configs[1], {
+    access_token: 'token-2',
+    account_id: '42',
+    description: 'backup',
+  });
+  assert.deepEqual(next.configs[2], {
+    type: 'apikey',
+    apikey: 'sk-example',
+    base_url: 'https://api.example.com/v1',
+    description: 'gpt api',
+    support: ['gpt'],
+  });
+});
+
+test('addConfigItems appends without validating existing configs', () => {
+  const parsed = createApiKeyConfig({
+    configs: [
+      {
+        type: 'apikey',
+        apikey: '',
+        base_url: '',
+        description: 'historical draft',
+      },
+    ],
+  });
+
+  const next = addConfigItems(parsed, [
+    {
+      access_token: 'token-2',
+      account_id: 'account-2',
+      description: 'new token',
+    },
+  ]);
+
+  assert.equal(next.configs.length, 2);
+  assert.deepEqual(next.configs[0], parsed.configs[0]);
+  assert.deepEqual(next.configs[1], {
+    access_token: 'token-2',
+    account_id: 'account-2',
+    description: 'new token',
+  });
+});
+
+test('addConfigItems appends without validating new runtime fields', () => {
+  const parsed = createTokenConfig();
+
+  const next = addConfigItems(parsed, [
+    {
+      type: 'apikey',
+      apikey: '',
+      base_url: '',
+      description: 'new draft apikey',
+    },
+  ]);
+
+  assert.equal(next.configs.length, 2);
+  assert.deepEqual(next.configs[1], {
+    type: 'apikey',
+    apikey: '',
+    base_url: '',
+    description: 'new draft apikey',
   });
 });
 
@@ -543,6 +630,28 @@ test('moveConfigItem moves a config earlier while preserving top-level settings'
   assert.equal(parsed.configs[0].description, 'first');
 });
 
+test('moveConfigItem reorders without validating config contents', () => {
+  const parsed = createApiKeyConfig({
+    configs: [
+      {
+        access_token: 'token-1',
+        account_id: 'account-1',
+        description: 'primary',
+      },
+      {
+        type: 'apikey',
+        apikey: '',
+        base_url: '',
+        description: 'historical draft',
+      },
+    ],
+  });
+
+  const next = moveConfigItem(parsed, 1, 0);
+
+  assert.deepEqual(next.configs.map(item => item.description), ['historical draft', 'primary']);
+});
+
 test('updateConfigSettings normalizes top-level apikeys and auth_token', () => {
   const withSecuritySettings = updateConfigSettings(createTokenConfig(), {
     apikeys: ['  router-secret  ', '', 'backup-secret'],
@@ -640,6 +749,47 @@ test('writeParsedConfigFile persists a validated config file', () => {
 
   assert.equal(loaded.configs.length, 2);
   assert.equal(loaded.configs[1].description, 'secondary');
+});
+
+test('readParsedConfigFile can skip full validation', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
+  const configPath = path.join(tempDir, 'openai.json');
+  fs.writeFileSync(configPath, `${JSON.stringify(createApiKeyConfig({
+    configs: [
+      {
+        type: 'apikey',
+        apikey: '',
+        base_url: '',
+        description: 'historical draft',
+      },
+    ],
+  }), null, 2)}\n`, 'utf8');
+
+  const loaded = readParsedConfigFile(configPath, { validate: false });
+
+  assert.equal(loaded.configs.length, 1);
+  assert.equal(loaded.configs[0].description, 'historical draft');
+});
+
+test('writeParsedConfigFile can persist without full validation', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
+  const configPath = path.join(tempDir, 'openai.json');
+
+  writeParsedConfigFile(configPath, createApiKeyConfig({
+    configs: [
+      {
+        type: 'apikey',
+        apikey: '',
+        base_url: '',
+        description: 'historical draft',
+      },
+    ],
+  }), { validate: false });
+
+  const loaded = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+  assert.equal(loaded.configs.length, 1);
+  assert.equal(loaded.configs[0].description, 'historical draft');
 });
 
 test('writeParsedConfigFile rejects invalid apikey entries', () => {

@@ -39,6 +39,8 @@ const {
     resolveClaudeCodeOptions,
     resolveResponsesOptions,
     createRuntimeConfigs,
+    createTokenRuntimeConfig,
+    createApiKeyRuntimeConfig,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring,
     configSupportsCapability,
@@ -46,7 +48,7 @@ const {
 } = require('./app/openai-config');
 const {
     ConfigEditorError,
-    addConfigItem,
+    addConfigItems,
     buildImportedConfigItem,
     deleteConfigItem,
     deleteConfigItems,
@@ -1064,6 +1066,132 @@ function persistConfigWithoutRuntimeReload(nextParsed) {
     return savedParsed;
 }
 
+function createInvalidRuntimeConfig(item, index, message) {
+    const configType = getConfigItemType(item) === 'apikey' ? 'apikey' : 'token';
+    const rawDescription = typeof item?.description === 'string' ? item.description.trim() : '';
+    const description = rawDescription || `${configType === 'apikey' ? 'APIKey 配置' : 'OpenAI 配置'} #${index + 1}`;
+    const runtime = {
+        enabled: false,
+        available: false,
+        lastCheckedAt: null,
+        remainingPercent: null,
+        primaryRemainingPercent: null,
+        primaryResetAt: null,
+        primaryResetAfterSeconds: null,
+        secondaryRemainingPercent: null,
+        secondaryResetAt: null,
+        secondaryResetAfterSeconds: null,
+        reason: 'invalid_config',
+        lastError: message || 'invalid config',
+        unavailableUntil: null
+    };
+
+    if (configType === 'apikey') {
+        return {
+            type: 'apikey',
+            index,
+            baseUrl: '',
+            apiBasePath: '',
+            apiKey: '',
+            support: ['gpt'],
+            health: {},
+            description,
+            runtime
+        };
+    }
+
+    return {
+        type: 'token',
+        index,
+        baseUrl: '',
+        apiBasePath: '',
+        access_token: '',
+        refresh_token: '',
+        client_id: '',
+        account_id: '',
+        description,
+        runtime
+    };
+}
+
+function createRuntimeConfigWithoutThrow(item, index) {
+    try {
+        if (getConfigItemType(item) === 'apikey') {
+            return createApiKeyRuntimeConfig(item, index);
+        }
+
+        return createTokenRuntimeConfig(item, index);
+    } catch (err) {
+        return createInvalidRuntimeConfig(item, index, err.message);
+    }
+}
+
+function getConfigItemDescription(item, runtimeConfig, index) {
+    const rawDescription = typeof item?.description === 'string' ? item.description.trim() : '';
+
+    if (rawDescription) {
+        return rawDescription;
+    }
+
+    const type = runtimeConfig && runtimeConfig.type === 'apikey' ? 'apikey' : 'token';
+    return `${type === 'apikey' ? 'APIKey 配置' : 'OpenAI 配置'} #${index + 1}`;
+}
+
+function reindexRuntimeConfig(runtimeConfig, item, index) {
+    return {
+        ...runtimeConfig,
+        index,
+        description: getConfigItemDescription(item, runtimeConfig, index)
+    };
+}
+
+function alignRuntimeConfigsToParsed(parsed, runtimeConfigs = apiConfigs) {
+    const configs = Array.isArray(parsed && parsed.configs) ? parsed.configs : [];
+
+    return configs.map((item, index) => {
+        const runtimeConfig = runtimeConfigs[index] || createRuntimeConfigWithoutThrow(item, index);
+        return reindexRuntimeConfig(runtimeConfig, item, index);
+    });
+}
+
+function buildPreparedLoadedConfig(savedParsed, runtimeConfigs) {
+    return {
+        parsed: savedParsed,
+        configs: runtimeConfigs,
+        claudeCode: claudeCodeConfig,
+        responses: responsesConfig
+    };
+}
+
+async function persistAppendedConfigItems(previousParsed, nextParsed, appendedItems, reason, options = {}) {
+    const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed, { validate: false });
+    const previousRuntimeConfigs = alignRuntimeConfigsToParsed(previousParsed);
+    const appendedRuntimeConfigs = appendedItems.map((item, offset) => (
+        createRuntimeConfigWithoutThrow(item, previousRuntimeConfigs.length + offset)
+    ));
+    const nextRuntimeConfigs = alignRuntimeConfigsToParsed(savedParsed, [
+        ...previousRuntimeConfigs,
+        ...appendedRuntimeConfigs
+    ]);
+
+    return reloadRuntime(buildPreparedLoadedConfig(savedParsed, nextRuntimeConfigs), reason, options);
+}
+
+async function persistMovedConfigItem(previousParsed, nextParsed, fromIndex, toIndex, reason, options = {}) {
+    const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed, { validate: false });
+    const previousRuntimeConfigs = alignRuntimeConfigsToParsed(previousParsed);
+    const nextRuntimeConfigs = previousRuntimeConfigs.slice();
+    const [movedConfig] = nextRuntimeConfigs.splice(fromIndex, 1);
+
+    if (movedConfig) {
+        nextRuntimeConfigs.splice(toIndex, 0, movedConfig);
+    }
+
+    const reindexedRuntimeConfigs = alignRuntimeConfigsToParsed(savedParsed, nextRuntimeConfigs);
+
+    return reloadRuntime(buildPreparedLoadedConfig(savedParsed, reindexedRuntimeConfigs), reason, options);
+}
+
 function persistTokenRefreshForConfig(update) {
     const config = update && update.config;
     const accessToken = typeof update?.accessToken === 'string' ? update.accessToken.trim() : '';
@@ -1681,17 +1809,6 @@ function parseConfigItemJson(rawJson) {
         }
 
         throw new ConfigEditorError(`配置项 JSON 解析失败: ${err.message}`);
-    }
-}
-
-function validateConfigItemBeforeAdd(type, item) {
-    try {
-        return createRuntimeConfigs({
-            configs: [item],
-            claude_code: {},
-        })[0];
-    } catch (err) {
-        throw new ConfigEditorError(err.message);
     }
 }
 
@@ -2870,8 +2987,14 @@ async function handleConfigMutation(res, mutate, reason, successStatus = 200, pe
         const parsed = readParsedConfigFile(CONFIG_FILE);
         const nextParsed = mutate(parsed);
         await persistAndReloadConfig(nextParsed, reason, persistOptions);
+        const responseBody = typeof persistOptions.buildResponse === 'function'
+            ? persistOptions.buildResponse({ parsed, nextParsed })
+            : {
+                ...buildConfigAdminResponse(),
+                ...(persistOptions.responseExtras || {})
+            };
         res.status(successStatus).json({
-            ...buildConfigAdminResponse(),
+            ...responseBody,
             ...(persistOptions.responseExtras || {})
         });
     } catch (err) {
@@ -3048,23 +3171,91 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
 });
 
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
-    await handleConfigMutation(
-        res,
-        parsed => {
-            const targetIndex = parseConfigIndex(req.params.index);
-            if (targetIndex === 0) {
-                throw new ConfigEditorError('第一个配置项已经在最前');
-            }
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
+        const targetIndex = parseConfigIndex(req.params.index);
+        if (targetIndex === 0) {
+            throw new ConfigEditorError('第一个配置项已经在最前');
+        }
 
-            return moveConfigItem(parsed, targetIndex, 0);
-        },
-        'admin_move_config',
-        200,
-        {
+        const movedFrom = targetIndex;
+        const nextParsed = moveConfigItem(parsed, targetIndex, 0);
+        await persistMovedConfigItem(parsed, nextParsed, targetIndex, 0, 'admin_move_config', {
             preserveActiveConfig: true,
             skipQuotaRefresh: true
+        });
+
+        res.status(200).json({
+            ok: true,
+            moved_from: movedFrom,
+            moved_to: 0
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置置顶失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs/:index/move-previous', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
+        const targetIndex = parseConfigIndex(req.params.index);
+        if (targetIndex === 0) {
+            throw new ConfigEditorError('第一个配置项已经在最前');
         }
-    );
+
+        const movedFrom = targetIndex;
+        const nextParsed = moveConfigItem(parsed, targetIndex, targetIndex - 1);
+        await persistMovedConfigItem(parsed, nextParsed, targetIndex, targetIndex - 1, 'admin_move_config', {
+            preserveActiveConfig: true,
+            skipQuotaRefresh: true
+        });
+
+        res.status(200).json({
+            ok: true,
+            moved_from: movedFrom,
+            moved_to: targetIndex - 1
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置上移失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs/:index/move-next', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
+        const targetIndex = parseConfigIndex(req.params.index);
+        const configsLength = Array.isArray(parsed && parsed.configs) ? parsed.configs.length : 0;
+        if (targetIndex >= configsLength - 1) {
+            throw new ConfigEditorError('最后一个配置项已经在最后');
+        }
+
+        const movedFrom = targetIndex;
+        const nextParsed = moveConfigItem(parsed, targetIndex, targetIndex + 1);
+        await persistMovedConfigItem(parsed, nextParsed, targetIndex, targetIndex + 1, 'admin_move_config', {
+            preserveActiveConfig: true,
+            skipQuotaRefresh: true
+        });
+
+        res.status(200).json({
+            ok: true,
+            moved_from: movedFrom,
+            moved_to: targetIndex + 1
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置下移失败' : '配置更新失败',
+            details: err.message
+        });
+    }
 });
 
 app.post('/admin/api/configs/:index/disable', async (req, res) => {
@@ -3152,7 +3343,7 @@ app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
 
 app.post('/admin/api/configs', async (req, res) => {
     try {
-        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
         const rawInput = parseConfigItemJson(req.body && req.body.raw_json);
         const configType = req.body && typeof req.body.config_type === 'string'
             ? req.body.config_type.trim()
@@ -3179,22 +3370,8 @@ app.post('/admin/api/configs', async (req, res) => {
                 throw err;
             }
         });
-        const validatedRuntimeConfigs = itemsWithCreatedAt.map((item, index) => {
-            try {
-                return validateConfigItemBeforeAdd(null, item);
-            } catch (err) {
-                if (itemsWithCreatedAt.length > 1) {
-                    throw new ConfigEditorError(`第 ${index + 1} 个配置项无效: ${err.message}`);
-                }
-                throw err;
-            }
-        });
-        const nextParsed = itemsWithCreatedAt.reduce(
-            (next, item) => addConfigItem(next, item),
-            parsed
-        );
-        await persistAndReloadConfig(nextParsed, 'admin_create', {
-            runtimeOverrides: validatedRuntimeConfigs,
+        const nextParsed = addConfigItems(parsed, itemsWithCreatedAt);
+        await persistAppendedConfigItems(parsed, nextParsed, itemsWithCreatedAt, 'admin_create', {
             skipQuotaRefresh: true
         });
         res.status(201).json({

@@ -129,16 +129,27 @@ function cloneParsedConfig(parsed) {
     return cloned;
 }
 
-function readParsedConfigFile(configFile) {
+function readParsedConfigFile(configFile, options = {}) {
     const raw = fs.readFileSync(configFile, 'utf8');
 
+    let parsed;
     try {
-        return validateParsedConfig(JSON.parse(raw));
+        parsed = JSON.parse(raw);
     } catch (err) {
         if (err instanceof SyntaxError) {
             throw new ConfigEditorError(`配置文件不是合法 JSON: ${err.message}`);
         }
 
+        throw err;
+    }
+
+    if (options.validate === false) {
+        return parsed;
+    }
+
+    try {
+        return validateParsedConfig(parsed);
+    } catch (err) {
         if (err instanceof ConfigEditorError) {
             throw err;
         }
@@ -309,9 +320,17 @@ function normalizeDeleteIndexes(indexes, length, label) {
 }
 
 function addConfigItem(parsed, item) {
+    return addConfigItems(parsed, [item]);
+}
+
+function addConfigItems(parsed, items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        throw new ConfigEditorError('配置项数组不能为空');
+    }
+
     const nextParsed = cloneParsedConfig(parsed);
-    nextParsed.configs.push(normalizeConfigItem(item));
-    return validateParsedConfig(nextParsed);
+    nextParsed.configs.push(...items.map(item => normalizeConfigItem(item)));
+    return nextParsed;
 }
 
 function updateConfigItem(parsed, index, item) {
@@ -456,7 +475,7 @@ function moveConfigItem(parsed, fromIndex, toIndex) {
     const [item] = nextParsed.configs.splice(sourceIndex, 1);
 
     nextParsed.configs.splice(targetIndex, 0, item);
-    return validateParsedConfig(nextParsed);
+    return nextParsed;
 }
 
 function updateConfigSettings(parsed, settings) {
@@ -506,8 +525,8 @@ function updateConfigSettings(parsed, settings) {
     return validateParsedConfig(nextParsed);
 }
 
-function writeParsedConfigFile(configFile, parsed) {
-    const validated = validateParsedConfig(parsed);
+function writeParsedConfigFile(configFile, parsed, options = {}) {
+    const validated = options.validate === false ? parsed : validateParsedConfig(parsed);
     const tempFile = `${configFile}.tmp`;
 
     fs.writeFileSync(tempFile, `${JSON.stringify(validated, null, 2)}\n`, 'utf8');
@@ -519,6 +538,7 @@ function writeParsedConfigFile(configFile, parsed) {
 module.exports = {
     ConfigEditorError,
     addConfigItem,
+    addConfigItems,
     buildImportedConfigItem,
     updateConfigItem,
     updateConfigSettings,

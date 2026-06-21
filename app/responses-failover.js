@@ -36,14 +36,44 @@ function normalizeModelName(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function modelNameHasVersionPrefix(model, prefix) {
+  const normalizedModel = normalizeModelName(model);
+  const normalizedPrefix = normalizeModelName(prefix);
+  if (!normalizedModel || !normalizedPrefix) {
+    return false;
+  }
+
+  if (normalizedModel === normalizedPrefix) {
+    return true;
+  }
+
+  if (!normalizedModel.startsWith(normalizedPrefix)) {
+    return false;
+  }
+
+  const suffix = normalizedModel.slice(normalizedPrefix.length);
+  return /^-\d{4}-\d{2}-\d{2}(?:$|[-._])/.test(suffix);
+}
+
+function areResponseModelsConsistent(requestedModel, responseModel) {
+  return modelNameHasVersionPrefix(responseModel, requestedModel) ||
+    modelNameHasVersionPrefix(requestedModel, responseModel);
+}
+
 function shouldInspectForResponsesModelDowngrade(requestedModel) {
   const normalizedRequestedModel = normalizeModelName(requestedModel);
-  return Boolean(normalizedRequestedModel && normalizedRequestedModel !== DOWNGRADED_RESPONSE_MODEL);
+  return Boolean(
+    normalizedRequestedModel &&
+    !areResponseModelsConsistent(normalizedRequestedModel, DOWNGRADED_RESPONSE_MODEL)
+  );
 }
 
 function classifyResponsesModelDowngrade({ requestedModel, responseModel } = {}) {
   const normalizedResponseModel = normalizeModelName(responseModel);
-  if (!shouldInspectForResponsesModelDowngrade(requestedModel) || normalizedResponseModel !== DOWNGRADED_RESPONSE_MODEL) {
+  if (
+    !shouldInspectForResponsesModelDowngrade(requestedModel) ||
+    !areResponseModelsConsistent(normalizedResponseModel, DOWNGRADED_RESPONSE_MODEL)
+  ) {
     return null;
   }
 

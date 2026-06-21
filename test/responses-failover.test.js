@@ -325,6 +325,35 @@ test('classifyResponsesModelDowngrade retries non-mini requests downgraded to gp
     requestedModel: 'gpt-5.4-mini',
     responseModel: 'gpt-5.4-mini',
   }), null);
+
+  assert.equal(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.4-mini',
+    responseModel: 'gpt-5.4-mini-2026-03-17',
+  }), null);
+
+  assert.deepEqual(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini-2026-03-17',
+  }), {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini-2026-03-17',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini-2026-03-17',
+  });
+
+  assert.deepEqual(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.4',
+    responseModel: 'gpt-5.4-mini',
+  }), {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.4->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.4',
+    responseModel: 'gpt-5.4-mini',
+  });
 });
 
 test('createResponsesEventStreamInspector retries downgraded response.created models', () => {
