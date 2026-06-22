@@ -262,6 +262,58 @@ function sendBufferedUpstreamResponse(res, status, contentType, bodyBuffer) {
     res.send(bodyText);
 }
 
+function isClaudeCodeQuotaCheckRequest(req, body) {
+    if (!body || typeof body !== 'object' || body.stream === true) {
+        return false;
+    }
+
+    const userAgent = String(req.headers['user-agent'] || '').toLowerCase();
+    const appName = String(req.headers['x-app'] || '').toLowerCase();
+    if (
+        appName !== 'cli' ||
+        !userAgent.includes('claude-code') ||
+        !req.headers['x-claude-code-session-id']
+    ) {
+        return false;
+    }
+
+    if (Number(body.max_tokens) !== 1) {
+        return false;
+    }
+
+    if (!Array.isArray(body.messages) || body.messages.length !== 1) {
+        return false;
+    }
+
+    const [message] = body.messages;
+    const content = message && message.content;
+
+    return message &&
+        message.role === 'user' &&
+        content === 'quota';
+}
+
+function sendClaudeCodeQuotaCheckResponse(res, body) {
+    res.status(200).json({
+        id: `msg_airouter_quota_${Date.now()}`,
+        type: 'message',
+        role: 'assistant',
+        model: body.model || 'claude-haiku-4-5',
+        content: [
+            {
+                type: 'text',
+                text: 'ok'
+            }
+        ],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: {
+            input_tokens: 1,
+            output_tokens: 1
+        }
+    });
+}
+
 function normalizeConfigSelection(selection) {
     if (selection && selection.config) {
         return {
@@ -831,6 +883,10 @@ function createClaudeMessagesHandler({
                 error: '请求体处理失败',
                 details: err.message
             });
+        }
+
+        if (isClaudeCodeQuotaCheckRequest(req, claudeRequest)) {
+            return sendClaudeCodeQuotaCheckResponse(res, claudeRequest);
         }
 
         try {

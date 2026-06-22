@@ -958,6 +958,62 @@ test('createClaudeMessagesHandler forwards claude_token configs by replacing aut
   assert.equal(res.payload.content[0].text, 'hello from oauth');
 });
 
+test('createClaudeMessagesHandler handles Claude Code quota check locally', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'claude_token',
+      index: 0,
+      description: 'Claude OAuth config',
+      access_token: 'real-claude-oauth-token',
+      baseUrl: 'https://api.anthropic.com/v1',
+      runtime: { enabled: true, available: true },
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(500, {
+          'content-type': 'application/json',
+        }, '{}')),
+        abort() {},
+      };
+    },
+  });
+
+  const req = createClaudeRequest({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 1,
+    messages: [
+      {
+        role: 'user',
+        content: 'quota',
+      },
+    ],
+    metadata: {
+      user_id: '{"session_id":"session-example"}',
+    },
+  });
+  req.headers.authorization = 'Bearer local-airouter-oauth-token';
+  req.headers['x-app'] = 'cli';
+  req.headers['user-agent'] = 'claude-code/2.1.185';
+  req.headers['x-claude-code-session-id'] = 'session-example';
+  req.headers['anthropic-version'] = '2023-06-01';
+
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 0);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.type, 'message');
+  assert.equal(res.payload.role, 'assistant');
+  assert.equal(res.payload.model, 'claude-haiku-4-5-20251001');
+  assert.equal(res.payload.content[0].type, 'text');
+  assert.equal(res.payload.stop_reason, 'end_turn');
+  assert.equal(res.payload.usage.output_tokens, 1);
+});
+
 test('createClaudeMessagesHandler forwards Claude count_tokens subpath with claude_token auth', async () => {
   const upstreamRequests = [];
   const handler = createClaudeMessagesHandler({
