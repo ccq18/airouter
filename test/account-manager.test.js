@@ -118,6 +118,23 @@ test('createAccountManager honors the initial active config index', () => {
   assert.equal(manager.getActiveConfig(), configs[2]);
 });
 
+test('findConfig returns a matching config without switching the active account', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }, {
+      type: 'claude_token',
+      access_token: 'claude-access-token',
+      local_auth_token: 'airouter-oauth-local-token',
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  const found = manager.findConfig(config => config.local_auth_token === 'airouter-oauth-local-token');
+
+  assert.equal(found, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
 test('ensureActiveConfig keeps the current account when it is still available', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),

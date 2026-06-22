@@ -8,6 +8,7 @@
     "stop": "node run.js stop",
     "restart": "node run.js restart",
     "logs": "node run.js logs",
+    "claude:login": "node scripts/claude-auth-login.js",
     "test": "node --test"
   },
   "keywords": [

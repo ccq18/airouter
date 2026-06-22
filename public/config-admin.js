@@ -412,7 +412,7 @@
     const disabledConfigs = Array.isArray(snapshot && snapshot.disabled_configs) ? snapshot.disabled_configs : [];
     return [...configs, ...disabledConfigs].some(item => {
       const configItem = item && item.item ? item.item : item;
-      return configItem && configItem.type === 'apikey';
+      return configItem && (configItem.type === 'apikey' || configItem.type === 'claude_token');
     });
   }
 
@@ -430,6 +430,15 @@
       const apikey = configItem && configItem.apikey;
 
       return `${baseUrl} (${maskSecret(apikey)})`;
+    }
+
+    if (configItem && configItem.type === 'claude_token') {
+      const baseUrl = typeof configItem.base_url === 'string' && configItem.base_url.trim()
+        ? configItem.base_url.trim()
+        : 'https://api.anthropic.com';
+      const identity = configItem.local_auth_token || configItem.account_uuid || configItem.access_token;
+
+      return `${baseUrl} (${maskSecret(identity)})`;
     }
 
     const value = configItem && configItem.account_id;

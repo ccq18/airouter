@@ -107,6 +107,10 @@ function getEditableFields(type) {
         return ['type', 'access_token', 'refresh_token', 'account_id', 'description'];
     }
 
+    if (type === 'claude_token') {
+        return ['type', 'access_token', 'refresh_token', 'expires_at', 'account_uuid', 'organization_uuid', 'local_auth_token', 'request_auth_token_sha256s', 'base_url', 'description'];
+    }
+
     throw new ConfigEditorError(`不支持的配置类型: ${type}`);
 }
 
@@ -188,6 +192,30 @@ function normalizeConfigItem(item, existingItem = {}) {
         nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
         if (Object.prototype.hasOwnProperty.call(item, 'support')) {
             nextItem.support = normalizeApiKeySupport(item.support);
+        }
+    }
+
+    if (type === 'claude_token') {
+        nextItem.type = 'claude_token';
+        if (nextItem.base_url) {
+            nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
+        } else {
+            delete nextItem.base_url;
+        }
+        if (!nextItem.refresh_token) {
+            delete nextItem.refresh_token;
+        }
+        if (!nextItem.expires_at) {
+            delete nextItem.expires_at;
+        }
+        if (!nextItem.account_uuid) {
+            delete nextItem.account_uuid;
+        }
+        if (!nextItem.organization_uuid) {
+            delete nextItem.organization_uuid;
+        }
+        if (!nextItem.local_auth_token) {
+            delete nextItem.local_auth_token;
         }
     }
 

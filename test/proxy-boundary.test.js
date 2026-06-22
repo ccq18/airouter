@@ -377,6 +377,16 @@ test('server registers token image compatibility before the generic v1 proxy', (
   assert.ok(editsRouteIndex < genericProxyIndex, 'edits route should run before generic proxy');
 });
 
+test('server accepts configured Claude OAuth tokens only on Claude messages routes', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+
+  assert.match(source, /function getClaudeMessagesConfiguredRequestAuthTokens\(parsedConfig\)/);
+  assert.match(source, /if \(configuredApiKeys\.length === 0\)\s*{\s*return \[\];\s*}/);
+  assert.match(source, /getConfiguredClaudeTokenRequestAuthTokens\(parsedConfig\)/);
+  assert.match(source, /requestPath === '\/v1\/messages' \|\| requestPath === '\/cpa\/v1\/messages'/);
+  assert.match(source, /isClaudeMessagesProxyPath\(req\)\s*\?\s*getClaudeMessagesConfiguredRequestAuthTokens\(currentParsedConfig\)\s*:\s*getConfiguredApiKeys\(currentParsedConfig\)/);
+});
+
 test('image generations token business request retries the next config before responding to the client', async () => {
   const configs = [
     {
@@ -833,6 +843,124 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
   assert.equal(apiKeyResults.length, 1);
   assert.equal(apiKeyResults[0].config.description, 'Claude API config');
   assert.deepEqual(apiKeyResults[0].result, { ok: true });
+});
+
+test('createClaudeMessagesHandler forwards claude_token configs by replacing auth only', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'claude_token',
+      index: 0,
+      description: 'Claude OAuth config',
+      access_token: 'real-claude-oauth-token',
+      baseUrl: 'https://api.anthropic.com/v1',
+      runtime: { enabled: true, available: true },
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'application/json',
+        }, JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'hello from oauth',
+            },
+          ],
+        }))),
+        abort() {},
+      };
+    },
+  });
+
+  const req = createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  });
+  req.headers.authorization = 'Bearer local-airouter-oauth-token';
+  req.headers['x-api-key'] = 'local-airouter-api-key';
+  req.headers['anthropic-version'] = '2023-06-01';
+  req.headers['anthropic-beta'] = 'oauth-2025-04-20,claude-code-20250219';
+  req.headers['user-agent'] = 'claude-code/2.0.0';
+  req.headers['x-app'] = 'cli';
+  req.headers['x-claude-code-session-id'] = 'session-example';
+  req.headers['x-client-request-id'] = 'client-request-example';
+  req.headers['x-stainless-package-version'] = '0.68.0';
+  req.headers['x-stainless-runtime'] = 'node';
+  req.headers['anthropic-dangerous-direct-browser-access'] = 'true';
+  req.headers.host = 'localhost:3009';
+  req.headers.connection = 'keep-alive';
+
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 1);
+  assert.equal(upstreamRequests[0].targetUrl, 'https://api.anthropic.com/v1/messages');
+  assert.equal(upstreamRequests[0].headers.authorization, 'Bearer real-claude-oauth-token');
+  assert.equal(upstreamRequests[0].headers['x-api-key'], undefined);
+  assert.equal(upstreamRequests[0].headers.host, undefined);
+  assert.equal(upstreamRequests[0].headers.connection, undefined);
+  assert.equal(upstreamRequests[0].headers['anthropic-version'], '2023-06-01');
+  assert.equal(upstreamRequests[0].headers['anthropic-beta'], 'oauth-2025-04-20,claude-code-20250219');
+  assert.equal(upstreamRequests[0].headers['user-agent'], 'claude-code/2.0.0');
+  assert.equal(upstreamRequests[0].headers['x-app'], 'cli');
+  assert.equal(upstreamRequests[0].headers['x-claude-code-session-id'], 'session-example');
+  assert.equal(upstreamRequests[0].headers['x-client-request-id'], 'client-request-example');
+  assert.equal(upstreamRequests[0].headers['x-stainless-package-version'], '0.68.0');
+  assert.equal(upstreamRequests[0].headers['x-stainless-runtime'], 'node');
+  assert.equal(upstreamRequests[0].headers['anthropic-dangerous-direct-browser-access'], 'true');
+  assert.deepEqual(JSON.parse(upstreamRequests[0].body.toString('utf8')), {
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.content[0].text, 'hello from oauth');
+});
+
+test('server does not mark claude_token unavailable after upstream failures', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const claudeTokenBranchIndex = source.indexOf("warn(`claude token 上游返回错误:");
+  assert.ok(claudeTokenBranchIndex >= 0, 'claude_token upstream error log should exist');
+
+  const directBranchStart = source.lastIndexOf('if (config && isDirectClaudeProxyConfig(config))', claudeTokenBranchIndex);
+  const directBranchEnd = source.indexOf("if (config.type === 'claude_token')", claudeTokenBranchIndex);
+  const directBranch = source.slice(directBranchStart, directBranchEnd);
+
+  assert.doesNotMatch(directBranch, /markConfigUnavailable\(config/);
+  assert.doesNotMatch(directBranch, /claude_token_upstream_failover/);
+});
+
+test('server does not fallback to OpenAI configs for unbound local claude auth tokens', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  assert.match(source, /LOCAL_CLAUDE_AUTH_TOKEN_PREFIX\s*=\s*'airouter-oauth-'/);
+  assert.match(source, /isRuntimeConfigEnabled\(boundClaudeTokenConfig\)/);
+  assert.match(source, /item\.access_token === localAuthToken/);
+
+  const boundGuardIndex = source.indexOf('if (boundClaudeTokenConfig)');
+  const localTokenGuardIndex = source.indexOf('if (isLocalClaudeAuthToken(localAuthToken))');
+  const tokenFallbackIndex = source.indexOf('const tokenLease = accountManager.acquireConfig');
+
+  assert.ok(boundGuardIndex >= 0, 'bound claude token guard should exist');
+  assert.ok(localTokenGuardIndex > boundGuardIndex, 'unbound local token guard should run after bound token lookup');
+  assert.ok(tokenFallbackIndex > localTokenGuardIndex, 'OpenAI/token fallback should run after local token guard');
 });
 
 test('createClaudeMessagesHandler reports direct claude apikey retryable upstream failures', async () => {

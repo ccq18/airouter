@@ -995,12 +995,21 @@ test('extractRuntimeStatusTags falls back when runtime data is missing', () => {
   );
 });
 
-test('getConfigIdentityColumnLabel uses upstream config when any apikey item exists', () => {
+test('getConfigIdentityColumnLabel uses upstream config when any upstream item exists', () => {
   assert.equal(getConfigIdentityColumnLabel({
     configs: [
       {
         item: {
           type: 'apikey',
+        },
+      },
+    ],
+  }), '上游配置');
+  assert.equal(getConfigIdentityColumnLabel({
+    configs: [
+      {
+        item: {
+          type: 'claude_token',
         },
       },
     ],
@@ -1032,7 +1041,7 @@ test('getConfigIdentityColumnLabel uses upstream config when any apikey item exi
   }), '上游配置');
 });
 
-test('getConfigIdentityValue shows base_url and masks apikey config secrets', () => {
+test('getConfigIdentityValue shows base_url and masks upstream config secrets', () => {
   assert.equal(
     getConfigIdentityValue(
       { mode: 'mixed' },
@@ -1059,6 +1068,18 @@ test('getConfigIdentityValue shows base_url and masks apikey config secrets', ()
       },
     ),
     'https://claude.example.com/v1 (sk--...3456)',
+  );
+  assert.equal(
+    getConfigIdentityValue(
+      { mode: 'mixed' },
+      {
+        item: {
+          type: 'claude_token',
+          local_auth_token: 'airouter-oauth-local-token',
+        },
+      },
+    ),
+    'https://api.anthropic.com (air-...oken)',
   );
 });
 

@@ -33,6 +33,16 @@
           "model": "gpt-4.1-mini"
         },
         "description": "third-party provider"
+      },
+      {
+        "type": "claude_token",
+        "access_token": "claude-oauth-access-token",
+        "refresh_token": "claude-oauth-refresh-token",
+        "expires_at": 1893456000000,
+        "account_uuid": "account-uuid",
+        "organization_uuid": "organization-uuid",
+        "local_auth_token": "airouter-oauth-local-token",
+        "description": "Claude OAuth account"
       }
     ],
   "disabled_configs": []
@@ -75,7 +85,7 @@
 - `responses.model_aliases` 的键比较时忽略大小写，例如配置 `GPT-5.2` 也会匹配请求里的 `gpt-5.2`
 - 默认示例配置里包含 `gpt-5.2 -> gpt-5.5`
 - 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
-- `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
+- `/v1/messages` 优先使用 `claude_token` 或 `support` 包含 `claude` 的 `apikey` 原样转发；如果请求里的本地 fake auth token 匹配某个 `claude_token.local_auth_token`，会严格绑定到该配置，不会透明切到其它 Claude 登录态。交互式 Claude Code 主请求如果改用本机 Keychain 中同一登录态的真实 Claude OAuth access token，Airouter 也会识别为这条 `claude_token` 配置。`airouter-oauth-` 前缀的本地 fake token 如果没有绑定到可用 `claude_token`，也不会 fallback 到 OpenAI/GPT 上游。没有命中 Claude fake token 绑定且没有可用 Claude 直转配置时，优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
 - `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
 - 每分钟额度轮询会检查所有 `token` 配置项
 - 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
@@ -161,6 +171,40 @@
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
 
+## claude_token 配置项
+
+`type` 为 `claude_token` 时，配置项格式如下：
+
+```json
+{
+  "type": "claude_token",
+  "access_token": "claude-oauth-access-token",
+  "refresh_token": "claude-oauth-refresh-token",
+  "expires_at": 1893456000000,
+  "account_uuid": "account-uuid",
+  "organization_uuid": "organization-uuid",
+  "local_auth_token": "airouter-oauth-local-token",
+  "request_auth_token_sha256s": [
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "description": "Claude OAuth account"
+}
+```
+
+字段说明：
+
+- 推荐通过 `npm run claude:login` 生成，不要手工复制真实 Claude OAuth token
+- `access_token` 是 Airouter 转发到 Anthropic 时使用的真实 OAuth Bearer token
+- `refresh_token` 和 `expires_at` 由登录脚本保存，供后续 token 刷新能力复用
+- `local_auth_token` 是 Airouter 分配给 Claude Code 使用的本地 fake auth token；脚本会同步写入顶层 `apikeys`
+- `request_auth_token_sha256s` 是可选入站鉴权哈希列表，用于兼容 Claude Code 交互式主请求从本机 Keychain 读取另一枚同登录态 OAuth token 的情况；`npm run claude:login` 会尽量自动填充哈希，不保存额外 token 明文
+- Claude Code 侧使用 `CLAUDE_CODE_OAUTH_TOKEN=<local_auth_token>`，并设置 `ANTHROPIC_BASE_URL=http://localhost:<port>`
+- 使用该模式时不要同时设置 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，否则 Claude Code 可能切回外部 API key/auth token 分支
+- 请求中的 `local_auth_token` 命中该配置时，Airouter 只会替换为这一条配置里的真实 `access_token`
+- 顶层 `apikeys` 开启本地入口校验时，`/v1/messages` 还会接受已配置 `claude_token.access_token` 或命中 `request_auth_token_sha256s` 的入站 token，用于兼容 Claude Code 交互式主请求从 Keychain 读取真实 OAuth token 的情况；普通 `/v1/*` OpenAI 兼容入口不接受该扩展鉴权
+- `airouter-oauth-` 前缀的本地 fake token 专用于 Claude OAuth；如果配置中没有对应可用 `claude_token`，请求会失败，不会进入 OpenAI/GPT 兼容转换链路
+- `claude_token` 只参与 `/v1/messages` 原样转发，不参与 `/v1/responses`、Images 或 Codex backend-api 转换链路
+
 ## Claude Messages apikey 示例
 
 需要把 `/v1/messages` 原样转发到第三方 Claude Messages API 时，仍然使用 `type: "apikey"`，并配置 `support: ["claude"]`：
@@ -179,7 +223,7 @@
 
 ## 安全说明
 
-- `access_token`、`apikey` 都属于敏感信息
+- `access_token`、`refresh_token`、`apikey` 都属于敏感信息
 - 顶层 `apikeys`、`auth_token` 也属于敏感信息
 - 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
 - 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效

@@ -41,6 +41,7 @@ const {
     createRuntimeConfigs,
     createTokenRuntimeConfig,
     createApiKeyRuntimeConfig,
+    createClaudeTokenRuntimeConfig,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring,
     configSupportsCapability,
@@ -67,10 +68,15 @@ const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
 const {
     generateRandomSecret,
     getConfiguredApiKeys,
+    getConfiguredClaudeTokenRequestAuthTokenHashes,
+    getConfiguredClaudeTokenRequestAuthTokens,
     getConfiguredAuthToken,
     hasConfiguredApiKeys,
+    extractRequestApiKey,
     isAuthorizedAdminRequest,
-    isAuthorizedRequest
+    isAuthorizedRequest,
+    isAuthorizedRequestWithTokenHashes,
+    sha256Hex
 } = require('./app/request-auth');
 // https://chatgpt.com/api/auth/session
 // ==================== 配置 ====================
@@ -105,6 +111,7 @@ const LOCAL_ONLY_HEADER_PREFIXES = [
     'x-airouter-',
     'x-admin-'
 ];
+const LOCAL_CLAUDE_AUTH_TOKEN_PREFIX = 'airouter-oauth-';
 const SESSION_KEY_HEADERS = [
     'x-airouter-session-id',
     'session-id',
@@ -499,8 +506,50 @@ function isGptApiKeyProxyConfig(item) {
     return configSupportsCapability(item, 'gpt');
 }
 
+function isDirectClaudeProxyConfig(item) {
+    return Boolean(item && (item.type === 'claude_token' || configSupportsCapability(item, 'claude')));
+}
+
 function isRuntimeConfigAvailable(item) {
     return Boolean(item && item.runtime && item.runtime.enabled && item.runtime.available);
+}
+
+function isRuntimeConfigEnabled(item) {
+    return Boolean(item && item.runtime && item.runtime.enabled);
+}
+
+function isLocalClaudeAuthToken(value) {
+    return typeof value === 'string' && value.startsWith(LOCAL_CLAUDE_AUTH_TOKEN_PREFIX);
+}
+
+function getClaudeMessagesConfiguredRequestAuthTokens(parsedConfig) {
+    const configuredApiKeys = getConfiguredApiKeys(parsedConfig);
+    if (configuredApiKeys.length === 0) {
+        return [];
+    }
+
+    return [
+        ...configuredApiKeys,
+        ...getConfiguredClaudeTokenRequestAuthTokens(parsedConfig)
+    ];
+}
+
+function getClaudeMessagesConfiguredRequestAuthTokenHashes(parsedConfig) {
+    const configuredApiKeys = getConfiguredApiKeys(parsedConfig);
+    if (configuredApiKeys.length === 0) {
+        return [];
+    }
+
+    return getConfiguredClaudeTokenRequestAuthTokenHashes(parsedConfig);
+}
+
+function isClaudeMessagesProxyPath(req) {
+    const baseUrl = String(req && req.baseUrl ? req.baseUrl : '');
+    const pathName = String(req && req.path ? req.path : '');
+    const originalUrl = String(req && req.originalUrl ? req.originalUrl : req && req.url ? req.url : '');
+    const requestPath = `${baseUrl}${pathName}` || originalUrl.split('?')[0];
+
+    return requestPath === '/v1/messages' || requestPath === '/cpa/v1/messages';
 }
 
 function isExcludedRuntimeConfig(item, excludedConfigs = []) {
@@ -825,17 +874,54 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
 
 function createClaudeMessagesRequestHandler(options = {}) {
     const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
-    function acquireClaudeMessagesConfig(sessionKey, excludedConfigs = [], reason = 'claude_request') {
-        const isClaudeApiKeyConfig = item => configSupportsCapability(item, 'claude') && !isExcludedRuntimeConfig(item, excludedConfigs);
+    function acquireClaudeMessagesConfig(sessionKey, excludedConfigs = [], reason = 'claude_request', localAuthToken = '') {
+        const isDirectClaudeConfig = item => isDirectClaudeProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+        const matchesClaudeTokenRequestAuth = item => item &&
+            item.type === 'claude_token' &&
+            localAuthToken &&
+            (
+                item.local_auth_token === localAuthToken ||
+                item.access_token === localAuthToken ||
+                (Array.isArray(item.request_auth_token_sha256s) && item.request_auth_token_sha256s.includes(sha256Hex(localAuthToken)))
+            );
+        const isMatchingClaudeTokenConfig = item => item &&
+            matchesClaudeTokenRequestAuth(item) &&
+            !isExcludedRuntimeConfig(item, excludedConfigs);
+        const boundClaudeTokenConfig = localAuthToken && typeof accountManager.findConfig === 'function'
+            ? accountManager.findConfig(matchesClaudeTokenRequestAuth)
+            : null;
         const isGptApiKeyConfig = item => configSupportsCapability(item, 'gpt') && !isExcludedRuntimeConfig(item, excludedConfigs);
-        const currentClaudeApiKeyConfig = accountManager.getActiveConfig(isClaudeApiKeyConfig);
-        if (currentClaudeApiKeyConfig && isRuntimeConfigAvailable(currentClaudeApiKeyConfig)) {
-            return createStaticConfigLease(currentClaudeApiKeyConfig, sessionKey);
+
+        if (boundClaudeTokenConfig) {
+            const matchedClaudeTokenConfig = accountManager.ensureActiveConfig(reason, isMatchingClaudeTokenConfig);
+            if (matchedClaudeTokenConfig && isRuntimeConfigAvailable(matchedClaudeTokenConfig)) {
+                return createStaticConfigLease(matchedClaudeTokenConfig, sessionKey);
+            }
+
+            return isRuntimeConfigEnabled(boundClaudeTokenConfig)
+                ? createStaticConfigLease(boundClaudeTokenConfig, sessionKey)
+                : null;
         }
 
-        const nextClaudeApiKeyConfig = accountManager.ensureActiveConfig(reason, isClaudeApiKeyConfig);
-        if (nextClaudeApiKeyConfig && isRuntimeConfigAvailable(nextClaudeApiKeyConfig)) {
-            return createStaticConfigLease(nextClaudeApiKeyConfig, sessionKey);
+        if (isLocalClaudeAuthToken(localAuthToken)) {
+            return null;
+        }
+
+        const matchedClaudeTokenConfig = localAuthToken
+            ? accountManager.ensureActiveConfig(reason, isMatchingClaudeTokenConfig)
+            : null;
+        if (matchedClaudeTokenConfig && isRuntimeConfigAvailable(matchedClaudeTokenConfig)) {
+            return createStaticConfigLease(matchedClaudeTokenConfig, sessionKey);
+        }
+
+        const currentDirectClaudeConfig = accountManager.getActiveConfig(isDirectClaudeConfig);
+        if (currentDirectClaudeConfig && isRuntimeConfigAvailable(currentDirectClaudeConfig)) {
+            return createStaticConfigLease(currentDirectClaudeConfig, sessionKey);
+        }
+
+        const nextDirectClaudeConfig = accountManager.ensureActiveConfig(reason, isDirectClaudeConfig);
+        if (nextDirectClaudeConfig && isRuntimeConfigAvailable(nextDirectClaudeConfig)) {
+            return createStaticConfigLease(nextDirectClaudeConfig, sessionKey);
         }
 
         const tokenLease = accountManager.acquireConfig(reason, item => item.type === 'token', {
@@ -867,13 +953,13 @@ function createClaudeMessagesRequestHandler(options = {}) {
     return createClaudeMessagesHandler({
         getConfig: (req, context = {}) => {
             const sessionKey = normalizeSessionKey(context.sessionKey);
-            const config = acquireClaudeMessagesConfig(sessionKey);
+            const config = acquireClaudeMessagesConfig(sessionKey, [], 'claude_request', extractRequestApiKey(req.headers));
 
             if (config) {
                 return config;
             }
 
-            throw new Error(`当前没有可用 support 包含 claude 的 apikey、token 或 support 包含 gpt 的 apikey 配置，请先访问 ${buildAdminPath()} 添加账号`);
+            throw new Error(`当前没有可用 claude_token、support 包含 claude 的 apikey、token 或 support 包含 gpt 的 apikey 配置，请先访问 ${buildAdminPath()} 添加账号`);
         },
         accessLogEnabled: ACCESS_LOG_ENABLED,
         log,
@@ -919,16 +1005,24 @@ function createClaudeMessagesRequestHandler(options = {}) {
                 return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_model_downgrade');
             }
 
-            if (config && config.type === 'apikey') {
-                const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
-                    ok: false,
-                    reason: classification.reason,
-                    lastError: `${classification.retrySource}:${classification.retryKey}`,
-                    switchReason: 'apikey_upstream_failover',
-                });
+            if (config && isDirectClaudeProxyConfig(config)) {
+                if (config.type === 'apikey') {
+                    const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
+                        ok: false,
+                        reason: classification.reason,
+                        lastError: `${classification.retrySource}:${classification.retryKey}`,
+                        switchReason: 'apikey_upstream_failover',
+                    });
 
-                if (apiKeyResult.unavailable) {
-                    warn(`claude apikey 上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                    if (apiKeyResult.unavailable) {
+                        warn(`claude apikey 上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                    }
+                } else {
+                    warn(`claude token 上游返回错误: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
+                }
+
+                if (config.type === 'claude_token') {
+                    return null;
                 }
 
                 if (!context) {
@@ -939,7 +1033,7 @@ function createClaudeMessagesRequestHandler(options = {}) {
                     ? context.excludedConfigs
                     : [config];
 
-                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_apikey_failover');
+                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_direct_failover');
             }
 
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
@@ -1067,9 +1161,10 @@ function persistConfigWithoutRuntimeReload(nextParsed) {
 }
 
 function createInvalidRuntimeConfig(item, index, message) {
-    const configType = getConfigItemType(item) === 'apikey' ? 'apikey' : 'token';
+    const itemType = getConfigItemType(item);
+    const configType = itemType === 'apikey' || itemType === 'claude_token' ? itemType : 'token';
     const rawDescription = typeof item?.description === 'string' ? item.description.trim() : '';
-    const description = rawDescription || `${configType === 'apikey' ? 'APIKey 配置' : 'OpenAI 配置'} #${index + 1}`;
+    const description = rawDescription || `${configType === 'apikey' ? 'APIKey 配置' : configType === 'claude_token' ? 'Claude OAuth 配置' : 'OpenAI 配置'} #${index + 1}`;
     const runtime = {
         enabled: false,
         available: false,
@@ -1100,6 +1195,23 @@ function createInvalidRuntimeConfig(item, index, message) {
         };
     }
 
+    if (configType === 'claude_token') {
+        return {
+            type: 'claude_token',
+            index,
+            baseUrl: '',
+            apiBasePath: '',
+            access_token: '',
+            refresh_token: '',
+            local_auth_token: '',
+            account_uuid: '',
+            organization_uuid: '',
+            expires_at: null,
+            description,
+            runtime
+        };
+    }
+
     return {
         type: 'token',
         index,
@@ -1120,6 +1232,10 @@ function createRuntimeConfigWithoutThrow(item, index) {
             return createApiKeyRuntimeConfig(item, index);
         }
 
+        if (getConfigItemType(item) === 'claude_token') {
+            return createClaudeTokenRuntimeConfig(item, index);
+        }
+
         return createTokenRuntimeConfig(item, index);
     } catch (err) {
         return createInvalidRuntimeConfig(item, index, err.message);
@@ -1133,8 +1249,12 @@ function getConfigItemDescription(item, runtimeConfig, index) {
         return rawDescription;
     }
 
-    const type = runtimeConfig && runtimeConfig.type === 'apikey' ? 'apikey' : 'token';
-    return `${type === 'apikey' ? 'APIKey 配置' : 'OpenAI 配置'} #${index + 1}`;
+    const type = runtimeConfig && runtimeConfig.type === 'apikey'
+        ? 'apikey'
+        : runtimeConfig && runtimeConfig.type === 'claude_token'
+            ? 'claude_token'
+            : 'token';
+    return `${type === 'apikey' ? 'APIKey 配置' : type === 'claude_token' ? 'Claude OAuth 配置' : 'OpenAI 配置'} #${index + 1}`;
 }
 
 function reindexRuntimeConfig(runtimeConfig, item, index) {
@@ -1683,14 +1803,19 @@ function isAdminApiRequest(req) {
 }
 
 function requireConfiguredApiKeys(req, res, next) {
-    const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
+    const configuredApiKeys = isClaudeMessagesProxyPath(req)
+        ? getClaudeMessagesConfiguredRequestAuthTokens(currentParsedConfig)
+        : getConfiguredApiKeys(currentParsedConfig);
+    const configuredTokenHashes = isClaudeMessagesProxyPath(req)
+        ? getClaudeMessagesConfiguredRequestAuthTokenHashes(currentParsedConfig)
+        : [];
 
     if (configuredApiKeys.length === 0) {
         next();
         return;
     }
 
-    if (!isAuthorizedRequest(req.headers, configuredApiKeys)) {
+    if (!isAuthorizedRequestWithTokenHashes(req.headers, configuredApiKeys, configuredTokenHashes)) {
         createProxyUnauthorizedResponse(res);
         return;
     }
@@ -3704,7 +3829,7 @@ async function startServer() {
             log('');
             log('路由规则:');
             log('  - token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
-            log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token 或 support 包含 gpt 的 apikey 走 Responses 转换');
+            log('  - /v1/messages -> 本地 fake token 命中 claude_token 时严格绑定该 Claude 登录态；否则优先使用 claude_token 或 support 包含 claude 的 apikey 原样转发；无可用 Claude 直转配置时使用 token 或 support 包含 gpt 的 apikey 走 Responses 转换');
             log('  - /v1/images/generations 与 /v1/images/edits -> token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON');
             log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');

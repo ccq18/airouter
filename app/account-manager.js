@@ -96,6 +96,7 @@ function createAccountManager(options) {
       ok: '正常',
       unchecked: '未检查',
       apikey: 'API Key 模式',
+      claude_token: 'Claude OAuth 模式',
       missing_credentials: '缺少凭证',
       rate_limit_not_allowed: '额度不可用',
       rate_limit_reached: '额度已用尽',
@@ -561,6 +562,10 @@ function createAccountManager(options) {
     return currentConfig && predicate(currentConfig) ? currentConfig : null;
   }
 
+  function findConfig(predicate = () => true) {
+    return configs.find(predicate) || null;
+  }
+
   function activateConfig(index, reason = 'manual') {
     if (!Number.isInteger(index) || index < 0 || index >= configs.length) {
       throw new Error('配置项索引不合法');
@@ -574,6 +579,11 @@ function createAccountManager(options) {
       nextConfig.runtime.lastCheckedAt = now();
       nextConfig.runtime.lastError = null;
       resetApiKeyRequestResults(nextConfig);
+    } else if (nextConfig.type === 'claude_token') {
+      nextConfig.runtime.available = true;
+      nextConfig.runtime.reason = 'claude_token';
+      nextConfig.runtime.lastCheckedAt = now();
+      nextConfig.runtime.lastError = null;
     }
     activeConfigIndex = index;
     if (nextConfig.type === 'token') {
@@ -1405,6 +1415,7 @@ function createAccountManager(options) {
     startQuotaMonitor,
     stopQuotaMonitor,
     getActiveConfig,
+    findConfig,
     activateConfig,
     getAccountStatus,
     applyQuotaPayload,

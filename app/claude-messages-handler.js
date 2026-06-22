@@ -24,6 +24,12 @@ const HOP_BY_HOP_HEADERS = new Set([
     'transfer-encoding',
     'upgrade'
 ]);
+const LOCAL_ONLY_DIRECT_CLAUDE_HEADERS = new Set([
+    'authorization',
+    'x-api-key',
+    'content-length',
+    'host'
+]);
 
 function resolveResponsesApiPath(config) {
     if (config && config.type === 'apikey') {
@@ -65,8 +71,15 @@ function resolveResponsesTarget(config, clientVersion) {
 }
 
 function configSupportsClaudeMessages(config) {
-    return config &&
-        config.type === 'apikey' &&
+    if (!config) {
+        return false;
+    }
+
+    if (config.type === 'claude_token') {
+        return true;
+    }
+
+    return config.type === 'apikey' &&
         Array.isArray(config.support) &&
         config.support.includes('claude');
 }
@@ -143,18 +156,40 @@ function buildUpstreamHeaders(reqHeaders, config, contentLength, isStream, clien
     return headers;
 }
 
-function buildClaudeApiKeyUpstreamHeaders(reqHeaders, config, contentLength, isStream) {
+function getDirectClaudeAuthorization(config) {
+    if (config.type === 'claude_token') {
+        return `Bearer ${config.access_token}`;
+    }
+
+    return `Bearer ${config.apiKey}`;
+}
+
+function buildDirectClaudeUpstreamHeaders(reqHeaders, config, contentLength, isStream) {
     const headers = {
-        authorization: `Bearer ${config.apiKey}`,
+        authorization: getDirectClaudeAuthorization(config),
         'content-type': 'application/json',
         accept: isStream ? 'text/event-stream' : 'application/json'
     };
 
-    for (const headerName of ['accept-language', 'anthropic-version', 'anthropic-beta']) {
-        if (reqHeaders[headerName]) {
-            headers[headerName] = reqHeaders[headerName];
+    for (const [name, value] of Object.entries(reqHeaders || {})) {
+        const headerName = String(name).toLowerCase();
+        if (
+            HOP_BY_HOP_HEADERS.has(headerName) ||
+            LOCAL_ONLY_DIRECT_CLAUDE_HEADERS.has(headerName)
+        ) {
+            continue;
+        }
+
+        if (Array.isArray(value)) {
+            headers[headerName] = value.join(', ');
+        } else if (typeof value !== 'undefined') {
+            headers[headerName] = String(value);
         }
     }
+
+    headers.authorization = getDirectClaudeAuthorization(config);
+    headers['content-type'] = headers['content-type'] || 'application/json';
+    headers.accept = isStream ? 'text/event-stream' : (headers.accept || 'application/json');
 
     if (typeof contentLength === 'number') {
         headers['content-length'] = String(contentLength);
@@ -447,7 +482,7 @@ function processResponsesSseText(state, text, onPayload, onError, isFinal = fals
     }
 }
 
-function forwardClaudeApiKeyMessagesRequest({
+function forwardDirectClaudeMessagesRequest({
     req,
     res,
     config,
@@ -465,9 +500,9 @@ function forwardClaudeApiKeyMessagesRequest({
     releaseConfig = null,
     error
 }) {
-    const upstreamHeaders = buildClaudeApiKeyUpstreamHeaders(req.headers, config, rawBody.length, isClientStream);
+    const upstreamHeaders = buildDirectClaudeUpstreamHeaders(req.headers, config, rawBody.length, isClientStream);
     const targetUrlObject = new URL(incomingUrl, config.baseUrl);
-    if (!targetUrlObject.searchParams.has('client_version')) {
+    if (config.type === 'apikey' && !targetUrlObject.searchParams.has('client_version')) {
         targetUrlObject.searchParams.set('client_version', '1');
     }
     const targetUrl = targetUrlObject.toString();
@@ -937,7 +972,7 @@ function createClaudeMessagesHandler({
             }
 
             if (configSupportsClaudeMessages(activeConfig)) {
-                forwardClaudeApiKeyMessagesRequest({
+                forwardDirectClaudeMessagesRequest({
                     req,
                     res,
                     config: activeConfig,

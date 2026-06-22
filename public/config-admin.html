@@ -1323,7 +1323,11 @@
         return '覆盖中';
       }
 
-      return item.item && item.item.type === 'apikey' ? '全量切换' : '设为锚点';
+      if (item.item && item.item.type === 'apikey') {
+        return '全量切换';
+      }
+
+      return item.item && item.item.type === 'claude_token' ? '切换' : '设为锚点';
     }
 
     function renderRuntimeTags(runtime) {

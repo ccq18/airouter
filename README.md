@@ -71,6 +71,29 @@ npm run logs
 
 新增配置项只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
 
+### Claude OAuth 登录态
+
+适合让 Claude Code 以本地 OAuth token 形态访问 Airouter，再由 Airouter 替换为真实 Claude OAuth token 转发到 Anthropic。
+
+运行登录脚本：
+
+```bash
+npm run claude:login
+```
+
+脚本会启动一个本地 OAuth 回调服务，打印 Claude 授权链接。浏览器授权成功后，它会把一个 `type: "claude_token"` 配置追加到 `openai.json`，并生成一个本地 fake auth token 写入顶层 `apikeys`。如果本机 Claude Code Keychain 里存在同一登录态的交互式 OAuth token，脚本只会把它的 SHA-256 写入 `request_auth_token_sha256s`，不额外保存这枚 token 明文。
+
+Claude Code 使用示例：
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:3009
+export CLAUDE_CODE_OAUTH_TOKEN=<脚本输出的本地 fake auth token>
+unset ANTHROPIC_API_KEY
+unset ANTHROPIC_AUTH_TOKEN
+```
+
+`claude_token` 只用于 `/v1/messages` Claude Messages 原样转发链路。Airouter 不改写 Claude Code 请求体，只替换上游 `Authorization`，并保留 Claude Code 发来的 `anthropic-version`、`anthropic-beta`、`x-claude-code-session-id` 等请求头。请求里的本地 fake auth token 命中某个 `local_auth_token` 时会严格绑定到该登录态，不会透明切到其它 Claude 登录态；交互式 Claude Code 主请求如果改用本机 Keychain 中同一登录态的真实 Claude OAuth access token，Airouter 会通过 `request_auth_token_sha256s` 做入站匹配并绑定到这条 `claude_token` 配置。`airouter-oauth-` 前缀的本地 fake token 如果没有绑定到可用 `claude_token`，也不会 fallback 到 OpenAI/GPT 上游。
+
 ## 给客户端使用
 
 管理页面会显示代理地址，通常是：
@@ -191,6 +214,7 @@ npm start        # 启动
 npm run stop     # 停止
 npm run restart  # 重启
 npm run logs     # 查看日志
+npm run claude:login # 追加 Claude OAuth 登录态
 ```
 
 服务会使用项目目录下的 `openai.json`。

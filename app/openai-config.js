@@ -1,9 +1,11 @@
 const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
+const CLAUDE_API_BASE_URL = 'https://api.anthropic.com';
 const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.5';
 const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
 const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const SUPPORTED_APIKEY_CAPABILITIES = new Set(['gpt', 'claude']);
+const SUPPORTED_CONFIG_TYPES = new Set(['token', 'apikey', 'claude_token']);
 
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -44,6 +46,24 @@ function createDefaultApiKeyRuntime() {
     };
 }
 
+function createDefaultClaudeTokenRuntime(isEnabled) {
+    return {
+        enabled: isEnabled,
+        available: isEnabled,
+        lastCheckedAt: null,
+        remainingPercent: null,
+        primaryRemainingPercent: null,
+        primaryResetAt: null,
+        primaryResetAfterSeconds: null,
+        secondaryRemainingPercent: null,
+        secondaryResetAt: null,
+        secondaryResetAfterSeconds: null,
+        reason: isEnabled ? 'claude_token' : 'missing_credentials',
+        lastError: null,
+        unavailableUntil: null
+    };
+}
+
 function normalizeString(value) {
     if (typeof value === 'string') {
         return value.trim();
@@ -54,6 +74,17 @@ function normalizeString(value) {
     }
 
     return String(value).trim();
+}
+
+function normalizeSha256HexArray(values) {
+    if (!Array.isArray(values)) {
+        return [];
+    }
+
+    return values
+        .map(normalizeString)
+        .map(value => value.toLowerCase())
+        .filter(value => /^[0-9a-f]{64}$/.test(value));
 }
 
 function getConfigItemType(config) {
@@ -225,8 +256,8 @@ function validateConfigItemArray(configs, fieldName) {
         }
 
         const configType = getConfigItemType(config);
-        if (configType !== 'token' && configType !== 'apikey') {
-            throw new Error(`配置文件 ${fieldName}[${index}] type 仅支持 token 或 apikey`);
+        if (!SUPPORTED_CONFIG_TYPES.has(configType)) {
+            throw new Error(`配置文件 ${fieldName}[${index}] type 仅支持 token、apikey 或 claude_token`);
         }
 
         if (configType === 'apikey') {
@@ -310,12 +341,50 @@ function createApiKeyRuntimeConfig(config, index) {
     };
 }
 
+function createClaudeTokenRuntimeConfig(config, index) {
+    const accessToken = normalizeString(config && config.access_token);
+    const refreshToken = normalizeString(config && config.refresh_token);
+    const baseUrl = (normalizeString(config && config.base_url) || CLAUDE_API_BASE_URL).replace(/\/+$/, '');
+    const localAuthToken = normalizeString(config && config.local_auth_token);
+    const requestAuthTokenSha256s = normalizeSha256HexArray(config && config.request_auth_token_sha256s);
+    const accountUuid = normalizeString(config && config.account_uuid);
+    const organizationUuid = normalizeString(config && config.organization_uuid);
+    const expiresAtText = normalizeString(config && config.expires_at);
+    const expiresAt = expiresAtText && /^\d+$/.test(expiresAtText)
+        ? Number.parseInt(expiresAtText, 10)
+        : null;
+
+    if (!accessToken) {
+        throw new Error('claude_token 配置至少需要 access_token');
+    }
+
+    return {
+        type: 'claude_token',
+        index,
+        baseUrl,
+        apiBasePath: '',
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        local_auth_token: localAuthToken,
+        request_auth_token_sha256s: requestAuthTokenSha256s,
+        account_uuid: accountUuid,
+        organization_uuid: organizationUuid,
+        expires_at: expiresAt,
+        description: config.description || `Claude OAuth 配置 #${index + 1}`,
+        runtime: createDefaultClaudeTokenRuntime(Boolean(accessToken))
+    };
+}
+
 function createRuntimeConfigs(parsed) {
     return parsed.configs.map((config, index) => {
         const configType = getConfigItemType(config);
 
         if (configType === 'apikey') {
             return createApiKeyRuntimeConfig(config, index);
+        }
+
+        if (configType === 'claude_token') {
+            return createClaudeTokenRuntimeConfig(config, index);
         }
 
         return createTokenRuntimeConfig(config, index);
@@ -326,6 +395,12 @@ function buildAuthHeadersForConfig(config) {
     if (config.type === 'apikey') {
         return {
             authorization: `Bearer ${config.apiKey}`
+        };
+    }
+
+    if (config.type === 'claude_token') {
+        return {
+            authorization: `Bearer ${config.access_token}`
         };
     }
 
@@ -342,6 +417,7 @@ function shouldUseQuotaMonitoring(type) {
 module.exports = {
     CHATGPT_BASE_URL,
     CODEX_API_BASE_PATH,
+    CLAUDE_API_BASE_URL,
     DEFAULT_CLAUDE_CODE_MODEL,
     DEFAULT_CLAUDE_CODE_REASONING_EFFORT,
     parseOpenAiConfigFile,
@@ -350,6 +426,7 @@ module.exports = {
     createRuntimeConfigs,
     createTokenRuntimeConfig,
     createApiKeyRuntimeConfig,
+    createClaudeTokenRuntimeConfig,
     getConfigItemType,
     normalizeApiKeySupport,
     normalizeApiKeyHealth,

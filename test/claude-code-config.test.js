@@ -386,6 +386,35 @@ test('createRuntimeConfigs supports apikey configs that only support Claude mess
   assert.equal(runtimeConfigs[0].runtime.reason, 'apikey');
 });
 
+test('createRuntimeConfigs supports claude_token configs for Claude OAuth passthrough', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        type: 'claude_token',
+        access_token: 'claude-access-token',
+        refresh_token: 'claude-refresh-token',
+        request_auth_token_sha256s: ['A'.repeat(64), 'invalid-hash'],
+        expires_at: 1893456000000,
+        account_uuid: 'account-uuid-example',
+        description: 'Claude OAuth account',
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.equal(runtimeConfigs.length, 1);
+  assert.equal(runtimeConfigs[0].type, 'claude_token');
+  assert.equal(runtimeConfigs[0].baseUrl, 'https://api.anthropic.com');
+  assert.equal(runtimeConfigs[0].access_token, 'claude-access-token');
+  assert.equal(runtimeConfigs[0].refresh_token, 'claude-refresh-token');
+  assert.deepEqual(runtimeConfigs[0].request_auth_token_sha256s, ['a'.repeat(64)]);
+  assert.equal(runtimeConfigs[0].expires_at, 1893456000000);
+  assert.equal(runtimeConfigs[0].account_uuid, 'account-uuid-example');
+  assert.equal(runtimeConfigs[0].description, 'Claude OAuth account');
+  assert.equal(runtimeConfigs[0].runtime.reason, 'claude_token');
+});
+
 test('parseOpenAiConfigFile rejects unsupported apikey support values', () => {
   assert.throws(() => {
     parseOpenAiConfigFile(JSON.stringify({
