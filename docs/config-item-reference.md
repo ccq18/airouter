@@ -194,6 +194,7 @@
 字段说明：
 
 - 推荐通过 `npm run claude:login` 生成，不要手工复制真实 Claude OAuth token
+- 如果在远程服务器运行登录脚本、本地浏览器授权，浏览器跳到 `localhost` 回调失败时，可以把地址栏里的完整回调 URL 或 `/callback?...` 路径粘贴回脚本终端并回车
 - `access_token` 是 Airouter 转发到 Anthropic 时使用的真实 OAuth Bearer token
 - `refresh_token` 和 `expires_at` 由登录脚本保存，供后续 token 刷新能力复用
 - `local_auth_token` 是 Airouter 分配给 Claude Code 使用的本地 fake auth token；脚本会同步写入顶层 `apikeys`

@@ -132,6 +132,54 @@ function requestJson(url, options = {}) {
     });
 }
 
+function parseClaudeOAuthCallbackUrlInput(input) {
+    const value = normalizeString(input);
+    if (!value) {
+        throw new Error('OAuth callback URL 不能为空');
+    }
+
+    let candidate = value;
+    if (candidate.startsWith('?')) {
+        candidate = `/callback${candidate}`;
+    } else if (/^(?:localhost|127\.0\.0\.1):\d+\//i.test(candidate)) {
+        candidate = `http://${candidate}`;
+    } else if (!/^[a-z][a-z0-9+.-]*:/i.test(candidate) && !candidate.startsWith('/') && candidate.includes('=')) {
+        candidate = `/callback?${candidate}`;
+    }
+
+    try {
+        return new URL(candidate, 'http://localhost');
+    } catch (err) {
+        throw new Error(`OAuth callback URL 无效: ${err.message}`);
+    }
+}
+
+function readClaudeOAuthCallbackCode(url, { state }) {
+    if (url.pathname !== '/callback') {
+        throw new Error('OAuth callback path must be /callback');
+    }
+
+    const error = normalizeString(url.searchParams.get('error'));
+    if (error) {
+        throw new Error(`Claude OAuth failed: ${error}`);
+    }
+
+    if (url.searchParams.get('state') !== state) {
+        throw new Error('OAuth state mismatch');
+    }
+
+    const code = normalizeString(url.searchParams.get('code'));
+    if (!code) {
+        throw new Error('Missing OAuth code');
+    }
+
+    return code;
+}
+
+function parseClaudeOAuthCallbackCode(input, { state }) {
+    return readClaudeOAuthCallbackCode(parseClaudeOAuthCallbackUrlInput(input), { state });
+}
+
 function exchangeCodeForTokens({ code, state, codeVerifier, port, requestJsonFn = requestJson }) {
     return requestJsonFn(CLAUDE_TOKEN_URL, {
         method: 'POST',
@@ -268,26 +316,13 @@ function startOAuthCallbackServer({ state }) {
                 return;
             }
 
-            const error = url.searchParams.get('error');
-            if (error) {
+            let code;
+            try {
+                code = readClaudeOAuthCallbackCode(url, { state });
+            } catch (err) {
                 res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-                res.end(`Claude OAuth failed: ${error}`);
-                reject(new Error(`Claude OAuth failed: ${error}`));
-                return;
-            }
-
-            if (url.searchParams.get('state') !== state) {
-                res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-                res.end('OAuth state mismatch');
-                reject(new Error('OAuth state mismatch'));
-                return;
-            }
-
-            const code = url.searchParams.get('code');
-            if (!code) {
-                res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
-                res.end('Missing OAuth code');
-                reject(new Error('Missing OAuth code'));
+                res.end(err.message);
+                reject(err);
                 return;
             }
 
@@ -327,7 +362,9 @@ module.exports = {
     generateCodeVerifier,
     generateLocalClaudeAuthToken,
     generateState,
+    parseClaudeOAuthCallbackCode,
     requestJson,
+    readClaudeOAuthCallbackCode,
     sha256Hex,
     startOAuthCallbackServer,
 };

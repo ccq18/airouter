@@ -6,6 +6,7 @@ const {
   buildClaudeAuthorizeUrl,
   buildClaudeTokenConfig,
   appendClaudeTokenConfig,
+  parseClaudeOAuthCallbackCode,
 } = require('../app/claude-oauth');
 
 test('buildClaudeAuthorizeUrl creates a Claude Code OAuth PKCE authorization URL', () => {
@@ -25,6 +26,46 @@ test('buildClaudeAuthorizeUrl creates a Claude Code OAuth PKCE authorization URL
   assert.equal(url.searchParams.get('state'), 'state-example');
   assert.match(url.searchParams.get('scope'), /user:inference/);
   assert.match(url.searchParams.get('scope'), /user:profile/);
+});
+
+test('parseClaudeOAuthCallbackCode accepts pasted callback URL variants', () => {
+  const state = 'state-example';
+
+  assert.equal(
+    parseClaudeOAuthCallbackCode('http://localhost:48321/callback?code=code-example&state=state-example', { state }),
+    'code-example',
+  );
+  assert.equal(
+    parseClaudeOAuthCallbackCode('/callback?code=code-example&state=state-example', { state }),
+    'code-example',
+  );
+  assert.equal(
+    parseClaudeOAuthCallbackCode('?code=code-example&state=state-example', { state }),
+    'code-example',
+  );
+  assert.equal(
+    parseClaudeOAuthCallbackCode('code=code-example&state=state-example', { state }),
+    'code-example',
+  );
+  assert.equal(
+    parseClaudeOAuthCallbackCode('localhost:48321/callback?code=code-example&state=state-example', { state }),
+    'code-example',
+  );
+});
+
+test('parseClaudeOAuthCallbackCode rejects invalid pasted callback input', () => {
+  assert.throws(
+    () => parseClaudeOAuthCallbackCode('/callback?code=code-example&state=wrong-state', { state: 'state-example' }),
+    /OAuth state mismatch/,
+  );
+  assert.throws(
+    () => parseClaudeOAuthCallbackCode('/callback?state=state-example', { state: 'state-example' }),
+    /Missing OAuth code/,
+  );
+  assert.throws(
+    () => parseClaudeOAuthCallbackCode('/not-callback?code=code-example&state=state-example', { state: 'state-example' }),
+    /OAuth callback path must be \/callback/,
+  );
 });
 
 test('buildClaudeTokenConfig converts OAuth tokens into a claude_token config item', () => {

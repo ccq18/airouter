@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const readline = require('node:readline');
 const {
   appendClaudeTokenConfig,
   buildClaudeAuthorizeUrl,
@@ -12,6 +13,7 @@ const {
   generateCodeVerifier,
   generateLocalClaudeAuthToken,
   generateState,
+  parseClaudeOAuthCallbackCode,
   sha256Hex,
   startOAuthCallbackServer,
 } = require('../app/claude-oauth');
@@ -137,6 +139,50 @@ function readClaudeCodeKeychainOAuthAccessToken() {
   }
 }
 
+function waitForPastedOAuthCallbackCode({ state }) {
+  if (!process.stdin.isTTY) {
+    return null;
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const promise = new Promise((resolve, reject) => {
+    rl.on('line', line => {
+      try {
+        resolve(parseClaudeOAuthCallbackCode(line, { state }));
+      } catch (err) {
+        console.warn(`无法解析回调地址: ${err.message}`);
+        console.log('请重新粘贴浏览器地址栏里的 /callback?... 或完整 http://localhost:端口/callback?... 后回车。');
+      }
+    });
+    rl.on('error', reject);
+  });
+
+  return {
+    promise,
+    close: () => rl.close(),
+  };
+}
+
+async function waitForOAuthCode({ callbackServer, state }) {
+  const pastedCallback = waitForPastedOAuthCallbackCode({ state });
+  const waiters = [callbackServer.waitForCode()];
+  if (pastedCallback) {
+    waiters.push(pastedCallback.promise);
+  }
+
+  try {
+    return await Promise.race(waiters);
+  } finally {
+    if (pastedCallback) {
+      pastedCallback.close();
+    }
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -162,9 +208,10 @@ async function main() {
     console.log('已尝试自动打开浏览器。');
   }
   console.log('等待授权回调...');
+  console.log('如果脚本运行在远程服务器，本地浏览器打开 localhost 回调失败时，直接把地址栏里的 /callback?... 或完整回调 URL 粘贴到这里并回车。');
 
   try {
-    const code = await callbackServer.waitForCode();
+    const code = await waitForOAuthCode({ callbackServer, state });
     console.log('已收到授权码，正在换取 Claude OAuth token...');
     const tokenResponse = await exchangeCodeForTokens({
       code,
