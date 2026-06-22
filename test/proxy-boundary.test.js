@@ -1014,6 +1014,183 @@ test('createClaudeMessagesHandler handles Claude Code quota check locally', asyn
   assert.equal(res.payload.usage.output_tokens, 1);
 });
 
+test('createClaudeMessagesHandler handles Claude Code quota check without session header', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'claude_token',
+      index: 0,
+      description: 'Claude OAuth config',
+      access_token: 'real-claude-oauth-token',
+      baseUrl: 'https://api.anthropic.com/v1',
+      runtime: { enabled: true, available: true },
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(500, {
+          'content-type': 'application/json',
+        }, '{}')),
+        abort() {},
+      };
+    },
+  });
+
+  const req = createClaudeRequest({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 1,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'quota',
+          },
+        ],
+      },
+    ],
+  });
+  req.headers.authorization = 'Bearer local-airouter-oauth-token';
+  req.headers['x-app'] = 'cli';
+  req.headers['user-agent'] = 'claude-code/2.1.185';
+  req.headers['anthropic-version'] = '2023-06-01';
+
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 0);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.type, 'message');
+  assert.equal(res.payload.content[0].text, 'ok');
+});
+
+test('createClaudeMessagesHandler forwards quota-shaped requests from non-Claude clients', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'claude_token',
+      index: 0,
+      description: 'Claude OAuth config',
+      access_token: 'real-claude-oauth-token',
+      baseUrl: 'https://api.anthropic.com/v1',
+      runtime: { enabled: true, available: true },
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'application/json',
+        }, JSON.stringify({
+          id: 'msg_upstream',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-haiku-4-5-20251001',
+          content: [
+            {
+              type: 'text',
+              text: 'upstream',
+            },
+          ],
+          stop_reason: 'end_turn',
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+          },
+        }))),
+        abort() {},
+      };
+    },
+  });
+
+  const req = createClaudeRequest({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 1,
+    messages: [
+      {
+        role: 'user',
+        content: 'quota',
+      },
+    ],
+  });
+  req.headers.authorization = 'Bearer local-airouter-oauth-token';
+  req.headers['anthropic-version'] = '2023-06-01';
+
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 1);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.content[0].text, 'upstream');
+});
+
+test('createClaudeMessagesHandler forwards normal Claude Code quota text requests', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'claude_token',
+      index: 0,
+      description: 'Claude OAuth config',
+      access_token: 'real-claude-oauth-token',
+      baseUrl: 'https://api.anthropic.com/v1',
+      runtime: { enabled: true, available: true },
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'application/json',
+        }, JSON.stringify({
+          id: 'msg_upstream',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-haiku-4-5-20251001',
+          content: [
+            {
+              type: 'text',
+              text: 'upstream',
+            },
+          ],
+          stop_reason: 'end_turn',
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+          },
+        }))),
+        abort() {},
+      };
+    },
+  });
+
+  const req = createClaudeRequest({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 2,
+    messages: [
+      {
+        role: 'user',
+        content: 'quota',
+      },
+    ],
+  });
+  req.headers.authorization = 'Bearer local-airouter-oauth-token';
+  req.headers['x-app'] = 'cli';
+  req.headers['user-agent'] = 'claude-code/2.1.185';
+  req.headers['anthropic-version'] = '2023-06-01';
+
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 1);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.content[0].text, 'upstream');
+});
+
 test('createClaudeMessagesHandler forwards Claude count_tokens subpath with claude_token auth', async () => {
   const upstreamRequests = [];
   const handler = createClaudeMessagesHandler({

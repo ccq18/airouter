@@ -269,11 +269,8 @@ function isClaudeCodeQuotaCheckRequest(req, body) {
 
     const userAgent = String(req.headers['user-agent'] || '').toLowerCase();
     const appName = String(req.headers['x-app'] || '').toLowerCase();
-    if (
-        appName !== 'cli' ||
-        !userAgent.includes('claude-code') ||
-        !req.headers['x-claude-code-session-id']
-    ) {
+    const isClaudeCodeClient = appName === 'cli' || userAgent.includes('claude-code');
+    if (!isClaudeCodeClient) {
         return false;
     }
 
@@ -290,7 +287,22 @@ function isClaudeCodeQuotaCheckRequest(req, body) {
 
     return message &&
         message.role === 'user' &&
-        content === 'quota';
+        isClaudeCodeQuotaContent(content);
+}
+
+function isClaudeCodeQuotaContent(content) {
+    if (content === 'quota') {
+        return true;
+    }
+
+    if (!Array.isArray(content) || content.length !== 1) {
+        return false;
+    }
+
+    const [block] = content;
+    return block &&
+        block.type === 'text' &&
+        block.text === 'quota';
 }
 
 function sendClaudeCodeQuotaCheckResponse(res, body) {
