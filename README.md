@@ -44,11 +44,11 @@ npm run logs
 
 适合使用 ChatGPT/Codex 账号额度。
 
-打开 `https://chatgpt.com/api/auth/session` 获取 AuthSession JSON，复制完整 JSON，粘贴到 `AuthSession JSON` 文本框，然后点击 `新增配置项`。
+在管理页打开 `OpenAI token` 页面。打开 `https://chatgpt.com/api/auth/session` 获取 AuthSession JSON，复制完整 JSON，粘贴到 `AuthSession JSON` 文本框，然后点击 `新增 OpenAI token`。
 
 如果你手里的是 OAuth 导出数组，也可以直接粘贴进同一个文本框；系统会自动从每个条目里提取 `access_token`、`chatgpt_account_id`、`refresh_token` 和邮箱备注。
 
-新增配置项只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
+新增 OpenAI token 只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
 
 注意：
 
@@ -57,9 +57,9 @@ npm run logs
 
 ### 第三方 API Key
 
-适合接入 OpenAI 兼容接口或 Claude Messages 兼容接口。
+适合接入 OpenAI 兼容接口或 Claude Messages 兼容接口，作为对应 token 主链路不可用后的 fallback。
 
-选择 `API Key 模式`，填写：
+在管理页打开 `Fallback apikey` 页面，填写：
 
 - `Base URL`：上游地址，通常写到 `/v1`，例如 `https://api.example.com/v1`。
 - `API Key`：上游服务提供的 key。
@@ -67,9 +67,9 @@ npm run logs
   - `GPT`：支持 OpenAI 兼容接口，也可作为 `/v1/messages` 的 Responses 转换上游。
   - `Claude`：支持 Claude Messages 原样转发接口。
 
-填完后点击 `新增配置项`。
+填完后点击 `新增 fallback apikey`。
 
-新增配置项只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
+新增 fallback apikey 只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
 
 ### Claude OAuth 登录态
 
@@ -159,8 +159,9 @@ Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `sessio
 你可以：
 
 - 用 `置顶`、`上移`、`下移` 调整优先级。
-- 在 token 行用 `设为锚点` 指定 token 并发池的调度焦点。
-- 在 apikey 行用 `全量切换` 进入 API Key 覆盖模式。
+- 在 OpenAI token 行用 `设为 OpenAI 焦点` 调整 Responses 主链路的调度焦点。
+- 在 Claude token 行用 `设为 Claude 焦点` 调整 `/v1/messages` 原样转发主链路的调度焦点。
+- 在 apikey 行用 `设为兜底焦点` 调整 fallback 优先级；apikey 仍只在对应 token 链路不可用时兜底。
 - 用 `停用` 将账号移入停用列表。停用账号对服务不可见，后续请求、额度刷新和 fallback 都不会读取它，但可以在管理页重新启用；管理页也支持勾选多项后批量停用已启用配置、批量启用停用配置。
 - 用 `删除` 永久移除不再需要的账号；管理页也支持勾选多项后批量删除启用配置、停用配置和入口 apikey。
 
@@ -170,7 +171,7 @@ token 账号不可用时，同一会话会自动漂移到其他可用 token 账�
 
 管理页也会在账号摘要中显示最近一次 `/v1/responses` 或 `/v1/messages` 转换链路的模型观测，例如 `响应模型 gpt-5.4-mini-2026-03-17 · 请求 gpt-5.4-mini`，同名日期版本会视为一致，方便判断上游实际返回的模型是否符合预期。
 
-`/v1/messages` 会优先使用支持 `Claude` 的 API Key 原样转发；没有可用 Claude 上游时，先使用 token 做兼容转换，token 不可用时可使用支持 `GPT` 的 API Key 做同样的 Responses 转换。
+`/v1/messages` 会优先使用 `claude_token` 原样转发；没有可用 Claude token 时，使用支持 `Claude` 的 API Key 原样转发。Claude 直转链路都不可用时，才转换到 Responses：优先使用 OpenAI token，OpenAI token 不可用时再使用支持 `GPT` 的 API Key。
 
 `/cpa/v1/*` 提供 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路。走 Codex/Responses 转换时，Airouter 会把原始 `instructions` 或 Claude `system` 转成 `developer` input，并保留空字符串 `instructions` 字段，避免把系统提示直接作为 system/instructions 发给上游。
 
@@ -204,7 +205,7 @@ npm run logs
 
 ### API Key 有两种，怎么区分
 
-- 上游 API Key：填在 `API Key 模式`里，Airouter 用它访问上游。
+- 上游 API Key：填在 `Fallback apikey` 页面里，Airouter 用它访问上游。
 - 入口 apikey：填在客户端里，客户端用它访问 Airouter。
 
 ## 常用命令
@@ -218,3 +219,9 @@ npm run claude:login # 追加 Claude OAuth 登录态
 ```
 
 服务会使用项目目录下的 `openai.json`。
+
+npm run claude:login
+export ANTHROPIC_BASE_URL=http://localhost:3009
+export CLAUDE_CODE_OAUTH_TOKEN=<local-fake-auth-token>
+unset ANTHROPIC_API_KEY
+unset ANTHROPIC_AUTH_TOKEN

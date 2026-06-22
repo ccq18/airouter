@@ -161,13 +161,14 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 
 ## 5. 活动账号选择逻辑
 
-活动账号仍然存在，主要用于管理页展示、手动切换、无可用账号时的兜底，以及额度刷新后的状态校正。活动账号选择由 `ensureActiveConfig(reason)` 负责，规则如下：
+活动账号仍然存在，主要用于管理页展示、手动切换、静态配置 fallback 顺序，以及额度刷新后的状态校正。活动账号选择由 `ensureActiveConfig(reason)` 负责，规则如下：
 
 管理页手动切换的语义是：
 
-- 切换到 token：回到 token 并发池，并把该 token 设为调度锚点
-- 切换到 apikey：进入 API Key 覆盖模式，该 apikey 支持的流量优先全量走它
-- apikey 覆盖中的账号失败后，会被临时摘除，再回到 token 并发池或其他可用 fallback
+- 切换到 OpenAI token：把该 token 设为 Responses 主链路的调度焦点
+- 切换到 Claude token：把该 token 设为 `/v1/messages` 原样转发主链路的焦点
+- 切换到 apikey：只调整 fallback 焦点；token 主链路可用时仍优先走 token
+- fallback apikey 失败后，会被临时摘除，再尝试同链路下一个 token 或 fallback 配置
 
 1. 如果当前活动配置符合当前路由能力且 `runtime.available = true`，继续保持当前配置。
 2. 如果当前活动配置不可用或不支持当前路由，按 `configs[]` 顺序从前到后扫描。

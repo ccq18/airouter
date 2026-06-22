@@ -34,31 +34,47 @@ const {
   buildRuntimeSyncText,
   formatConfigItemCopyText,
   moveConfigSnapshotItem,
+  getConfigRole,
+  getRouteLanes,
+  getConfigType,
+  configSupports,
 } = require('../public/config-admin.js');
 
-test('config admin hides the responses settings module', () => {
+test('config admin exposes role pages and keeps Responses settings on the OpenAI page', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
-  const start = html.indexOf('<div id="responsesSettingsSection" class="hidden-settings" hidden>');
-  const end = html.indexOf('</main>', start);
-  const section = start >= 0 && end > start ? html.slice(start, end) : '';
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const openAiPageStart = html.indexOf('data-page="openai"');
+  const claudePageStart = html.indexOf('data-page="claude"');
+  const openAiPage = openAiPageStart >= 0 && claudePageStart > openAiPageStart
+    ? html.slice(openAiPageStart, claudePageStart)
+    : '';
 
-  assert.ok(section, 'responses settings section should be wrapped in a hidden container');
-  assert.match(section, /Responses 设置/);
-  assert.match(section, /这里可以配置 `\/v1\/responses` 的模型别名映射/);
-  assert.match(section, /saveResponsesSettingsButton/);
+  assert.match(html, /data-page-link="routes"/);
+  assert.match(html, /data-page-link="openai"/);
+  assert.match(html, /data-page-link="claude"/);
+  assert.match(html, /data-page-link="fallbacks"/);
+  assert.match(html, /data-page-link="access"/);
+  assert.match(serverSource, /\/admin\/configs\/:page\(routes\|openai\|claude\|fallbacks\|access\)/);
+  assert.ok(openAiPage, 'OpenAI token page should be present');
+  assert.match(openAiPage, /Responses 设置/);
+  assert.match(openAiPage, /saveResponsesSettingsButton/);
+  assert.match(openAiPage, /responsesModelAliasesInput/);
+  assert.match(html, /id="responsesSettingsSection" class="hidden-settings" hidden><\/div>/);
 });
 
-test('config admin shows upstream config before edit controls', () => {
+test('config admin shows route overview before role-specific edit pages', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const messageIndex = html.indexOf('<div id="message"');
-  const upstreamIndex = html.indexOf('<section class="panel list-panel">');
-  const consoleGridIndex = html.indexOf('<section class="console-grid">');
-  const addConfigIndex = html.indexOf('<h2 class="panel-title">新增配置项</h2>');
+  const routeOverviewIndex = html.indexOf('id="routeLanes"');
+  const upstreamIndex = html.indexOf('<h2 class="panel-title">上游配置</h2>');
+  const openAiPageIndex = html.indexOf('data-page="openai"');
+  const addConfigIndex = html.indexOf('<h2 class="panel-title">新增 OpenAI token</h2>');
 
   assert.ok(messageIndex >= 0, 'message area should be present');
-  assert.ok(upstreamIndex > messageIndex, 'upstream config should follow the message area');
-  assert.ok(consoleGridIndex > upstreamIndex, 'edit controls should appear after upstream config');
-  assert.ok(addConfigIndex > upstreamIndex, 'add config panel should appear after upstream config');
+  assert.ok(routeOverviewIndex > messageIndex, 'route overview should follow the message area');
+  assert.ok(upstreamIndex > routeOverviewIndex, 'upstream config should follow route overview');
+  assert.ok(openAiPageIndex > upstreamIndex, 'role-specific edit pages should appear after route overview');
+  assert.ok(addConfigIndex > upstreamIndex, 'OpenAI token add panel should appear after route overview');
 });
 
 test('config admin exposes manual runtime config activation controls', () => {
@@ -66,8 +82,9 @@ test('config admin exposes manual runtime config activation controls', () => {
 
   assert.match(html, /data-action="activate"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
-  assert.match(html, /已进入 API Key 覆盖模式/);
-  assert.match(html, /已设置 token 调度锚点/);
+  assert.match(html, /已设为 fallback apikey 焦点/);
+  assert.match(html, /已设为 Claude token 焦点/);
+  assert.match(html, /已设为 OpenAI token 焦点/);
 });
 
 test('config admin exposes enable and disable controls for soft-deleted configs', () => {
@@ -150,7 +167,7 @@ test('config admin keeps all console controls after UI refresh', () => {
 
   assert.match(html, /class="topbar"/);
   assert.doesNotMatch(html, /id="statusSummary"/);
-  assert.match(html, /class="console-grid"/);
+  assert.match(html, /class="console-grid admin-page"/);
   assert.match(html, /id="addApiKeyButton"/);
   assert.match(html, /id="proxySettingsPanel"/);
   assert.match(html, /id="servicePortInput"/);
@@ -406,9 +423,9 @@ test('getConfigGuideContent explains token JSON and apikey form entry separately
   assert.match(guide.rawJsonPlaceholder, /"accessToken": "\.\.\."/);
   assert.match(guide.rawJsonPlaceholder, /"refresh_token": "\.\.\."/);
   assert.doesNotMatch(guide.rawJsonPlaceholder, /"type": "apikey"/);
-  assert.equal(guide.steps.some(step => /apikey 模式/.test(step.description)), true);
+  assert.equal(guide.steps.some(step => /兜底上游/.test(step.description)), true);
 
-  const tokenStep = guide.steps.find(step => step.title === 'Token 模式');
+  const tokenStep = guide.steps.find(step => step.title === 'OpenAI token');
   assert.match(tokenStep.description, /AuthSession JSON/);
   assert.match(tokenStep.description, /隐私模式/);
   assert.match(tokenStep.description, /不要退出该登录态/);
@@ -418,12 +435,82 @@ test('getConfigGuideContent explains token JSON and apikey form entry separately
   assert.equal(tokenStep.actionCopyText, 'https://chatgpt.com/api/auth/session');
   assert.equal(tokenStep.actionHref, undefined);
 
-  const apiKeyStep = guide.steps.find(step => step.title === 'API Key 模式');
+  const apiKeyStep = guide.steps.find(step => step.title === 'Fallback apikey');
   assert.match(apiKeyStep.description, /输入框/);
   assert.match(apiKeyStep.description, /Claude/);
   assert.match(apiKeyStep.description, /GPT/);
   assert.equal(apiKeyStep.example, undefined);
   assert.equal(apiKeyStep.actionHref, undefined);
+});
+
+test('getRouteLanes separates token primary chains from apikey fallbacks', () => {
+  const snapshot = {
+    configs: [
+      {
+        index: 0,
+        item: {
+          description: 'openai main',
+        },
+      },
+      {
+        index: 1,
+        item: {
+          type: 'claude_token',
+          description: 'claude main',
+        },
+      },
+      {
+        index: 2,
+        item: {
+          type: 'apikey',
+          support: ['gpt'],
+          description: 'gpt fallback',
+        },
+      },
+      {
+        index: 3,
+        item: {
+          type: 'apikey',
+          support: ['claude'],
+          description: 'claude fallback',
+        },
+      },
+    ],
+  };
+  const lanes = getRouteLanes(snapshot);
+
+  assert.equal(getConfigType(snapshot.configs[0]), 'token');
+  assert.equal(getConfigType(snapshot.configs[1]), 'claude_token');
+  assert.equal(configSupports(snapshot.configs[2], 'gpt'), true);
+  assert.equal(configSupports(snapshot.configs[2], 'claude'), false);
+  assert.deepEqual(getConfigRole(snapshot.configs[0]), {
+    key: 'openai-token',
+    label: 'OpenAI token',
+    lane: 'Responses',
+    priority: '主链路',
+    tone: 'ok',
+  });
+  assert.deepEqual(lanes.map(lane => ({
+    key: lane.key,
+    primary: lane.primary.map(item => item.index),
+    fallback: lane.fallback.map(item => item.index),
+  })), [
+    {
+      key: 'responses',
+      primary: [0],
+      fallback: [2],
+    },
+    {
+      key: 'messages',
+      primary: [1],
+      fallback: [3],
+    },
+    {
+      key: 'converted-messages',
+      primary: [0],
+      fallback: [2],
+    },
+  ]);
 });
 
 test('hasRefreshTokenConfig detects token configs that can be refreshed', () => {
@@ -701,8 +788,8 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
       apikeys: ['sk-airouter-one', 'sk-airouter-two'],
       dispatch: {
         mode: 'token_pool',
-        label: 'Token 并发池: 锚点配置 #2',
-        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        label: 'OpenAI token 池: 焦点配置 #2',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
       },
       configs: [
         {
@@ -736,9 +823,9 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
       },
       {
         label: '调度模式',
-        value: 'Token 并发池: 锚点配置 #2',
+        value: 'OpenAI token 池: 焦点配置 #2',
         tone: 'active',
-        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
       },
       {
         label: '健康状态',
@@ -755,8 +842,8 @@ test('getDispatchModeSummary shows the observed token session target when presen
     getDispatchModeSummary({
       dispatch: {
         mode: 'token_pool',
-        label: 'Token 并发池: 锚点配置 #1',
-        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        label: 'OpenAI token 池: 焦点配置 #1',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
         observed_session: {
           config_index: 2,
           session_hash: 'abc123def456',
@@ -768,7 +855,7 @@ test('getDispatchModeSummary shows the observed token session target when presen
       },
     }),
     {
-      value: 'Token 并发池: 锚点配置 #1',
+      value: 'OpenAI token 池: 焦点配置 #1',
       tone: 'active',
       detail: '当前会话 #abc123def456 -> 配置 #3',
     },

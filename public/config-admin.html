@@ -86,6 +86,39 @@
       max-width: 100%;
     }
 
+    .admin-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 16px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: 0 10px 28px rgba(22, 33, 43, 0.05);
+    }
+
+    .admin-nav a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 36px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .admin-nav a.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .admin-page[hidden] {
+      display: none;
+    }
+
     .panel,
     .table-wrap {
       background: var(--surface);
@@ -415,6 +448,116 @@
       color: var(--muted);
       font-size: 12px;
       line-height: 1.5;
+    }
+
+    .route-lanes {
+      display: grid;
+      gap: 12px;
+    }
+
+    .route-lane {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.78fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: stretch;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-muted);
+    }
+
+    .route-lane-head {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .route-lane-title {
+      font-weight: 900;
+      line-height: 1.25;
+    }
+
+    .route-lane-endpoint {
+      color: var(--accent);
+      word-break: break-all;
+    }
+
+    .route-lane-note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .route-slot {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .route-slot-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .route-slot-items {
+      display: grid;
+      gap: 6px;
+    }
+
+    .route-chip {
+      display: grid;
+      gap: 4px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: var(--surface-muted);
+      border: 1px solid var(--line);
+    }
+
+    .route-chip-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .route-chip-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .role-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--surface-strong);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .role-badge.primary {
+      background: var(--active-soft);
+      color: var(--active);
+    }
+
+    .role-badge.fallback {
+      background: var(--warning-soft);
+      color: var(--warning);
     }
 
     .mode-switch {
@@ -758,6 +901,7 @@
       }
 
       .console-grid,
+      .route-lane,
       .form-grid,
       .port-grid,
       .mode-switch {
@@ -812,18 +956,36 @@
       </div>
     </header>
 
+    <nav class="admin-nav" aria-label="管理页面">
+      <a href="/admin/configs/routes" data-page-link="routes">链路总览</a>
+      <a href="/admin/configs/openai" data-page-link="openai">OpenAI token</a>
+      <a href="/admin/configs/claude" data-page-link="claude">Claude token</a>
+      <a href="/admin/configs/fallbacks" data-page-link="fallbacks">Fallback apikey</a>
+      <a href="/admin/configs/access" data-page-link="access">访问控制</a>
+    </nav>
+
     <div id="message" class="message" role="status" aria-live="polite"></div>
 
-    <section class="panel list-panel">
+    <section class="panel list-panel admin-page" data-page="routes">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">上游配置</h2>
-            <p class="panel-note">查看运行态、手动切换当前配置，或删除不再使用的上游。</p>
+            <h2 class="panel-title">链路总览</h2>
+            <p class="panel-note">OpenAI token 负责 Responses，Claude token 负责 Messages，apikey 仅作为对应链路的兜底。</p>
           </div>
           <div class="panel-tools">
             <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
           </div>
         </div>
+      <div id="routeLanes" class="route-lanes"></div>
+    </section>
+
+    <section class="panel list-panel admin-page" data-page="routes">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">上游配置</h2>
+          <p class="panel-note">查看运行态、调整优先级，或删除不再使用的上游。</p>
+        </div>
+      </div>
       <div id="batchToolbar" class="batch-toolbar" hidden>
         <div class="batch-toolbar-left">
           <span id="batchSelectionSummary" class="count">已选择 0 项</span>
@@ -838,28 +1000,28 @@
       <section id="cards"></section>
     </section>
 
-    <section class="console-grid">
+    <section class="console-grid admin-page" data-page="openai">
       <div class="panel">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">新增配置项</h2>
-            <p class="panel-note">Token 适合 ChatGPT Codex 登录态；API Key 适合兼容上游或 Claude Messages。</p>
+            <h2 class="panel-title">新增 OpenAI token</h2>
+            <p class="panel-note">OpenAI token 只负责 Responses / Codex 兼容链路，是 GPT 主链路。</p>
           </div>
         </div>
 
-        <div class="mode-switch" role="radiogroup" aria-label="配置模式">
+        <div class="mode-switch" role="radiogroup" aria-label="配置模式" hidden>
           <label class="mode-option">
             <input type="radio" name="configMode" value="token" checked>
             <span>
-              <span class="mode-name">Token 模式</span>
+              <span class="mode-name">OpenAI token</span>
               <span class="mode-note">粘贴 ChatGPT AuthSession JSON，适合 Codex 登录态账号。</span>
             </span>
           </label>
           <label class="mode-option">
             <input type="radio" name="configMode" value="apikey">
             <span>
-              <span class="mode-name">API Key 模式</span>
-              <span class="mode-note">填写第三方上游地址和 API Key，再选择 GPT 或 Claude。</span>
+              <span class="mode-name">Fallback apikey</span>
+              <span class="mode-note">填写第三方上游地址和 API Key，作为 token 不可用后的兜底。</span>
             </span>
           </label>
         </div>
@@ -910,63 +1072,15 @@
         </div>
 
         <div class="actions">
-          <button class="primary" type="button" id="addButton">新增配置项</button>
+          <button class="primary" type="button" id="addButton">新增 OpenAI token</button>
         </div>
       </div>
 
-      <div class="side-stack">
-        <aside class="panel">
-          <div class="panel-head">
-            <div>
-              <h2 class="panel-title">访问控制</h2>
-              <p class="panel-note">入口 apikey 为空时，请求不会校验 apikey。</p>
-            </div>
-            <div class="panel-tools">
-              <span id="apiKeyStatusBadge" class="badge note">未读取</span>
-            </div>
-          </div>
-          <div class="key-toolbar">
-            <button class="primary" type="button" id="addApiKeyButton">新增随机 apikey</button>
-          </div>
-          <div id="apiKeysList" class="key-list"></div>
-        </aside>
-
-        <aside class="panel" id="proxySettingsPanel">
-          <div class="panel-head">
-            <div>
-              <h2 class="panel-title">代理入口</h2>
-              <p class="panel-note">配置本地服务端口和访问上游时使用的本地代理端口。</p>
-            </div>
-          </div>
-          <div class="port-grid">
-            <div class="field">
-              <label class="field-label" for="servicePortInput">服务端口</label>
-              <input id="servicePortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="3009">
-            </div>
-            <div class="field">
-              <label class="field-label" for="proxyPortInput">代理端口</label>
-              <input id="proxyPortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="留空不用代理">
-            </div>
-          </div>
-          <div class="endpoint-card">
-            <div class="endpoint-label">代理访问地址</div>
-            <code class="mono endpoint-value" id="proxyV1Url">http://localhost:3009/v1</code>
-            <div class="endpoint-meta" id="proxyEndpointMeta">Responses: http://localhost:3009/v1/responses</div>
-          </div>
-          <div class="actions">
-            <button class="primary" type="button" id="saveProxySettingsButton">保存端口配置</button>
-          </div>
-          <p class="field-hint">保存后立即生效；服务端口变化时页面会自动跳转到新地址。</p>
-        </aside>
-      </div>
-    </section>
-
-    <div id="responsesSettingsSection" class="hidden-settings" hidden>
       <div class="panel">
         <div class="panel-head">
           <div>
             <h2 class="panel-title">Responses 设置</h2>
-            <p class="panel-note">这里可以配置 `/v1/responses` 的模型别名映射。键匹配时忽略大小写，保存后会立即热重载。</p>
+            <p class="panel-note">模型别名和测试请求只作用于 OpenAI token 主链路。</p>
           </div>
         </div>
         <div class="field">
@@ -979,12 +1093,124 @@
           <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
         </div>
       </div>
-    </div>
+    </section>
+
+    <section class="admin-page panel list-panel" data-page="claude">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">Claude token</h2>
+          <p class="panel-note">Claude token 只负责 `/v1/messages` 原样转发。请使用命令行登录脚本追加配置。</p>
+        </div>
+      </div>
+      <div class="endpoint-card">
+        <div class="endpoint-label">登录命令</div>
+        <code class="mono endpoint-value">npm run claude:login</code>
+        <div class="endpoint-meta">脚本会生成本地 fake auth token，并尽量写入 Keychain token SHA-256 以兼容 Claude Code 交互式主请求。</div>
+      </div>
+      <div id="claudeConfigs"></div>
+    </section>
+
+    <section class="admin-page panel list-panel" data-page="fallbacks">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">Fallback apikey</h2>
+          <p class="panel-note">apikey 只在对应 token 链路不可用时兜底；不会作为主链路抢占 token。</p>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label class="field-label" for="fallbackBaseUrlInput">Base URL</label>
+          <input id="fallbackBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
+          <p class="field-hint">GPT 兜底通常填写 OpenAI 兼容 `/v1`；Claude 兜底填写 Claude Messages API 的 `/v1`。</p>
+        </div>
+        <div class="field">
+          <label class="field-label" for="fallbackApiKeyInput">API Key</label>
+          <input id="fallbackApiKeyInput" type="password" autocomplete="off" placeholder="sk-...">
+        </div>
+        <div class="field">
+          <label class="field-label" for="fallbackDescriptionInput">备注</label>
+          <input id="fallbackDescriptionInput" type="text" placeholder="例如：GPT 备用上游">
+        </div>
+        <div class="field">
+          <span class="field-label">兜底能力</span>
+          <div class="support-options">
+            <label class="support-option">
+              <input type="checkbox" name="fallbackSupport" value="gpt" checked>
+              <span>GPT fallback</span>
+            </label>
+            <label class="support-option">
+              <input type="checkbox" name="fallbackSupport" value="claude">
+              <span>Claude fallback</span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" type="button" id="addFallbackButton">新增 fallback apikey</button>
+      </div>
+      <div class="panel-head compact">
+        <div>
+          <h3 class="panel-title">已配置 fallback</h3>
+        </div>
+      </div>
+      <div id="fallbackConfigs"></div>
+    </section>
+
+    <section class="admin-page side-stack" data-page="access">
+      <aside class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">访问控制</h2>
+            <p class="panel-note">入口 apikey 为空时，请求不会校验 apikey。</p>
+          </div>
+          <div class="panel-tools">
+            <span id="apiKeyStatusBadge" class="badge note">未读取</span>
+          </div>
+        </div>
+        <div class="key-toolbar">
+          <button class="primary" type="button" id="addApiKeyButton">新增随机 apikey</button>
+        </div>
+        <div id="apiKeysList" class="key-list"></div>
+      </aside>
+
+      <aside class="panel" id="proxySettingsPanel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">代理入口</h2>
+            <p class="panel-note">配置本地服务端口和访问上游时使用的本地代理端口。</p>
+          </div>
+        </div>
+        <div class="port-grid">
+          <div class="field">
+            <label class="field-label" for="servicePortInput">服务端口</label>
+            <input id="servicePortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="3009">
+          </div>
+          <div class="field">
+            <label class="field-label" for="proxyPortInput">代理端口</label>
+            <input id="proxyPortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="留空不用代理">
+          </div>
+        </div>
+        <div class="endpoint-card">
+          <div class="endpoint-label">代理访问地址</div>
+          <code class="mono endpoint-value" id="proxyV1Url">http://localhost:3009/v1</code>
+          <div class="endpoint-meta" id="proxyEndpointMeta">Responses: http://localhost:3009/v1/responses</div>
+        </div>
+        <div class="actions">
+          <button class="primary" type="button" id="saveProxySettingsButton">保存端口配置</button>
+        </div>
+        <p class="field-hint">保存后立即生效；服务端口变化时页面会自动跳转到新地址。</p>
+      </aside>
+    </section>
+
+    <div id="responsesSettingsSection" class="hidden-settings" hidden></div>
   </main>
 
   <script src="/config-admin.js"></script>
   <script>
     const cardsEl = document.getElementById('cards');
+    const routeLanesEl = document.getElementById('routeLanes');
+    const claudeConfigsEl = document.getElementById('claudeConfigs');
+    const fallbackConfigsEl = document.getElementById('fallbackConfigs');
     const messageEl = document.getElementById('message');
     const batchToolbarEl = document.getElementById('batchToolbar');
     const batchSelectionSummaryEl = document.getElementById('batchSelectionSummary');
@@ -994,7 +1220,11 @@
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
     const apiKeyInput = document.getElementById('apiKeyInput');
     const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
+    const fallbackBaseUrlInput = document.getElementById('fallbackBaseUrlInput');
+    const fallbackApiKeyInput = document.getElementById('fallbackApiKeyInput');
+    const fallbackDescriptionInput = document.getElementById('fallbackDescriptionInput');
     const addButton = document.getElementById('addButton');
+    const addFallbackButton = document.getElementById('addFallbackButton');
     const refreshButton = document.getElementById('refreshButton');
     const testResponseButton = document.getElementById('testResponseButton');
     const addApiKeyButton = document.getElementById('addApiKeyButton');
@@ -1031,6 +1261,10 @@
       getConfigIdentityValue,
       formatConfigItemCopyText,
       buildConfigItemFromForm,
+      getConfigRole,
+      getRouteLanes,
+      getConfigType,
+      configSupports,
       extractRuntimeStatusTags,
       formatDispatchSessionStatus,
       formatResponseModelStatus,
@@ -1051,6 +1285,31 @@
       disabled_configs: new Set(),
       apikeys: new Set(),
     };
+    const pageMap = {
+      '/admin/configs': 'routes',
+      '/admin/configs/': 'routes',
+      '/admin/configs/routes': 'routes',
+      '/admin/configs/openai': 'openai',
+      '/admin/configs/claude': 'claude',
+      '/admin/configs/fallbacks': 'fallbacks',
+      '/admin/configs/access': 'access',
+    };
+
+    function getCurrentAdminPage() {
+      return pageMap[window.location.pathname] || 'routes';
+    }
+
+    function setupPageNavigation() {
+      const currentPage = getCurrentAdminPage();
+      document.querySelectorAll('[data-page]').forEach(section => {
+        section.hidden = section.dataset.page !== currentPage;
+      });
+      document.querySelectorAll('[data-page-link]').forEach(link => {
+        const targetPage = link.dataset.pageLink;
+        link.classList.toggle('active', targetPage === currentPage);
+        link.href = withAuthToken(link.getAttribute('href'));
+      });
+    }
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -1227,7 +1486,9 @@
       if (options.refreshStatic !== false) {
         renderHeader(data);
       }
+      renderRolePages(data);
       renderCards(data);
+      setupPageNavigation();
     }
 
     function getSelectedConfigMode() {
@@ -1246,6 +1507,11 @@
         .map(input => input.value);
     }
 
+    function getSelectedFallbackSupport() {
+      return [...document.querySelectorAll('input[name="fallbackSupport"]:checked')]
+        .map(input => input.value);
+    }
+
     function buildConfigItemFromInputs() {
       return buildConfigItemFromForm({
         mode: getSelectedConfigMode(),
@@ -1257,12 +1523,31 @@
       });
     }
 
+    function buildFallbackConfigItemFromInputs() {
+      return buildConfigItemFromForm({
+        mode: 'apikey',
+        apiKey: fallbackApiKeyInput.value,
+        baseUrl: fallbackBaseUrlInput.value,
+        description: fallbackDescriptionInput.value,
+        support: getSelectedFallbackSupport(),
+      });
+    }
+
     function clearConfigForm() {
       rawJsonInput.value = '';
       apiKeyInput.value = '';
       apiKeyBaseUrlInput.value = '';
       apiKeyDescriptionInput.value = '';
       document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
+        input.checked = input.value === 'gpt';
+      });
+    }
+
+    function clearFallbackForm() {
+      fallbackApiKeyInput.value = '';
+      fallbackBaseUrlInput.value = '';
+      fallbackDescriptionInput.value = '';
+      document.querySelectorAll('input[name="fallbackSupport"]').forEach(input => {
         input.checked = input.value === 'gpt';
       });
     }
@@ -1295,14 +1580,18 @@
     function runtimeBadges(item) {
       const tags = [];
 
-      if (item.dispatch_role === 'token_anchor') {
-        tags.push('<span class="badge active">锚点</span>');
-      } else if (item.dispatch_role === 'token_dispatch') {
-        tags.push('<span class="badge ok">池中</span>');
-      } else if (item.dispatch_role === 'apikey_override') {
-        tags.push('<span class="badge active">覆盖中</span>');
+      if (item.dispatch_role === 'openai_token_focus') {
+        tags.push('<span class="badge active">OpenAI 焦点</span>');
+      } else if (item.dispatch_role === 'openai_token') {
+        tags.push('<span class="badge ok">OpenAI 主链路</span>');
+      } else if (item.dispatch_role === 'claude_token_focus') {
+        tags.push('<span class="badge active">Claude 焦点</span>');
+      } else if (item.dispatch_role === 'claude_token') {
+        tags.push('<span class="badge ok">Claude 主链路</span>');
+      } else if (item.dispatch_role === 'apikey_fallback_focus') {
+        tags.push('<span class="badge active">兜底焦点</span>');
       } else if (item.dispatch_role === 'apikey_fallback') {
-        tags.push('<span class="badge muted">fallback</span>');
+        tags.push('<span class="badge muted">兜底</span>');
       } else if (item.is_active) {
         tags.push('<span class="badge active">当前</span>');
       }
@@ -1315,19 +1604,23 @@
     }
 
     function getActivateButtonText(item) {
-      if (item.dispatch_role === 'token_anchor') {
-        return '当前锚点';
+      if (item.dispatch_role === 'openai_token_focus') {
+        return '当前焦点';
       }
 
-      if (item.dispatch_role === 'apikey_override') {
-        return '覆盖中';
+      if (item.dispatch_role === 'claude_token_focus') {
+        return '当前焦点';
+      }
+
+      if (item.dispatch_role === 'apikey_fallback_focus') {
+        return '兜底焦点';
       }
 
       if (item.item && item.item.type === 'apikey') {
-        return '全量切换';
+        return '设为兜底焦点';
       }
 
-      return item.item && item.item.type === 'claude_token' ? '切换' : '设为锚点';
+      return item.item && item.item.type === 'claude_token' ? '设为 Claude 焦点' : '设为 OpenAI 焦点';
     }
 
     function renderRuntimeTags(runtime) {
@@ -1397,6 +1690,56 @@
           <div class="summary-raw">${escapeHtml(summaryText)}</div>
         </div>
       `;
+    }
+
+    function renderRouteChip(item) {
+      const role = getConfigRole(item);
+      const description = item.item && item.item.description ? item.item.description : `配置 #${item.index + 1}`;
+      const runtimeTags = extractRuntimeStatusTags(item.runtime || {});
+
+      return `
+        <div class="route-chip">
+          <div class="route-chip-title">
+            <span>${escapeHtml(description)}</span>
+            <span class="role-badge ${role.priority === '主链路' ? 'primary' : 'fallback'}">${escapeHtml(role.priority)}</span>
+          </div>
+          <div class="route-chip-meta mono">${escapeHtml(getConfigIdentityValue(snapshot || {}, item))}</div>
+          <div class="runtime-tags">
+            ${runtimeTags.slice(0, 3).map(tag => `
+              <span class="tag ${escapeHtml(tag.tone)}">${escapeHtml(tag.label)}</span>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRouteSlot(label, items, emptyText) {
+      return `
+        <div class="route-slot">
+          <div class="route-slot-label">
+            <span>${escapeHtml(label)}</span>
+            <span>${items.length} 个</span>
+          </div>
+          <div class="route-slot-items">
+            ${items.length ? items.map(renderRouteChip).join('') : `<div class="empty">${escapeHtml(emptyText)}</div>`}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRouteLanes(data) {
+      const lanes = getRouteLanes(data || {});
+      routeLanesEl.innerHTML = lanes.map(lane => `
+        <div class="route-lane">
+          <div class="route-lane-head">
+            <div class="route-lane-title">${escapeHtml(lane.title)}</div>
+            <div class="mono route-lane-endpoint">${escapeHtml(lane.endpoint)}</div>
+            <div class="route-lane-note">${escapeHtml(lane.description)}</div>
+          </div>
+          ${renderRouteSlot(lane.primaryLabel, lane.primary, `没有可用 ${lane.primaryLabel}`)}
+          ${renderRouteSlot(lane.fallbackLabel, lane.fallback, `没有配置 ${lane.fallbackLabel} 兜底`)}
+        </div>
+      `).join('');
     }
 
     function renderEnabledConfigs(data) {
@@ -1530,6 +1873,78 @@
         ${renderDisabledConfigs(data)}
       `;
       updateBatchToolbar();
+    }
+
+    function renderFilteredConfigs(targetEl, data, predicate, emptyText) {
+      const allConfigs = Array.isArray(data && data.configs) ? data.configs : [];
+      const configs = allConfigs.filter(item => predicate(item && item.item ? item.item : item));
+      if (!configs.length) {
+        targetEl.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
+        return;
+      }
+
+      targetEl.innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="config-col">配置</th>
+                <th class="account-id-col">身份</th>
+                <th>description</th>
+                <th>摘要</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${configs.map(item => {
+                const role = getConfigRole(item);
+                return `
+                  <tr>
+                    <td>
+                      <div class="config-name">
+                        <div>配置 #${item.index + 1}</div>
+                        <div><span class="badge ${role.priority === '主链路' ? 'ok' : 'muted'}">${escapeHtml(role.lane)}</span></div>
+                      </div>
+                    </td>
+                    <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
+                    <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
+                    <td>${renderSummary(item.runtime)}</td>
+                    <td class="action-cell">
+                      <div class="action-stack">
+                        <div class="action-row action-row-sort">
+                          <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
+                          <button class="secondary" type="button" data-action="move-previous" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>上移</button>
+                          <button class="secondary" type="button" data-action="move-next" data-index="${item.index}" ${item.index >= allConfigs.length - 1 ? 'disabled' : ''}>下移</button>
+                        </div>
+                        <div class="action-row action-row-state">
+                          <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
+                          <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderRolePages(data) {
+      renderRouteLanes(data);
+      renderFilteredConfigs(
+        claudeConfigsEl,
+        data,
+        item => getConfigType(item) === 'claude_token',
+        '当前没有 Claude token。请运行 npm run claude:login 追加登录态。'
+      );
+      renderFilteredConfigs(
+        fallbackConfigsEl,
+        data,
+        item => getConfigType(item) === 'apikey',
+        '当前没有 fallback apikey。'
+      );
     }
 
     function withAuthToken(url) {
@@ -1697,6 +2112,25 @@
         syncedAt: new Date(),
       });
       setMessage('info', configCount > 1 ? `已写入 ${configCount} 个配置项。` : '配置项已写入配置文件。');
+    }
+
+    async function addFallbackConfig() {
+      const configItem = buildFallbackConfigItemFromInputs();
+      const result = await requestJson('/admin/api/configs', {
+        method: 'POST',
+        body: JSON.stringify({
+          config_type: 'apikey',
+          raw_json: JSON.stringify(configItem),
+        }),
+      });
+
+      snapshot = result;
+      clearFallbackForm();
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', 'fallback apikey 已写入配置文件。');
     }
 
     async function addApiKey() {
@@ -1920,6 +2354,7 @@
     }
 
     async function activateConfig(index) {
+      const numericIndex = Number(index);
       const result = await requestJson(`/admin/api/configs/${index}/activate`, {
         method: 'POST',
       });
@@ -1929,10 +2364,13 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      const activated = Array.isArray(result.configs) ? result.configs.find(item => item && item.index === index) : null;
-      setMessage('info', activated && activated.item && activated.item.type === 'apikey'
-        ? '已进入 API Key 覆盖模式。'
-        : '已设置 token 调度锚点。');
+      const activated = Array.isArray(result.configs) ? result.configs.find(item => item && item.index === numericIndex) : null;
+      const activatedType = activated && activated.item ? activated.item.type : '';
+      setMessage('info', activatedType === 'apikey'
+        ? '已设为 fallback apikey 焦点；token 可用时仍优先走 token。'
+        : activatedType === 'claude_token'
+          ? '已设为 Claude token 焦点；/v1/messages 会优先使用 Claude token。'
+          : '已设为 OpenAI token 焦点；/v1/responses 会优先使用 OpenAI token。');
     }
 
     async function moveConfigUp(index) {
@@ -2069,6 +2507,19 @@
         setMessage('error', error.message);
       } finally {
         addButton.disabled = false;
+      }
+    });
+
+    addFallbackButton.addEventListener('click', async () => {
+      addFallbackButton.disabled = true;
+      try {
+        setMessage('info', '正在写入 fallback apikey...');
+        await new Promise(resolve => window.requestAnimationFrame(resolve));
+        await addFallbackConfig();
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        addFallbackButton.disabled = false;
       }
     });
 
@@ -2390,6 +2841,7 @@
       }
     });
 
+    setupPageNavigation();
     updateConfigMode();
     loadSnapshot();
     startRuntimeSyncPolling();

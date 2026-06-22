@@ -506,6 +506,14 @@ function isGptApiKeyProxyConfig(item) {
     return configSupportsCapability(item, 'gpt');
 }
 
+function isClaudeTokenProxyConfig(item) {
+    return Boolean(item && item.type === 'claude_token');
+}
+
+function isClaudeApiKeyProxyConfig(item) {
+    return Boolean(item && item.type === 'apikey' && configSupportsCapability(item, 'claude'));
+}
+
 function isDirectClaudeProxyConfig(item) {
     return Boolean(item && (item.type === 'claude_token' || configSupportsCapability(item, 'claude')));
 }
@@ -568,6 +576,48 @@ function createStaticConfigLease(config, sessionKey = '') {
         fallback: false,
         release() {}
     };
+}
+
+function acquireAvailableStaticConfigLease(manager, reason, predicate, sessionKey = '', excludedConfigs = []) {
+    const isCandidate = item => predicate(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+    const currentConfig = manager.getActiveConfig(isCandidate);
+    if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
+        return createStaticConfigLease(currentConfig, sessionKey);
+    }
+
+    const nextConfig = manager.ensureActiveConfig(reason, isCandidate);
+    if (nextConfig && isRuntimeConfigAvailable(nextConfig)) {
+        return createStaticConfigLease(nextConfig, sessionKey);
+    }
+
+    return null;
+}
+
+function acquireTokenThenGptApiKeyLease(manager, reason, sessionKey, excludedConfigs = []) {
+    const tokenLease = manager.acquireConfig(reason, isTokenProxyConfig, {
+        sessionKey,
+        exclude: excludedConfigs,
+        allowFallback: false,
+    });
+    if (tokenLease) {
+        return tokenLease;
+    }
+
+    const apiKeyLease = acquireAvailableStaticConfigLease(
+        manager,
+        reason,
+        isGptApiKeyProxyConfig,
+        sessionKey,
+        excludedConfigs
+    );
+    if (apiKeyLease) {
+        return apiKeyLease;
+    }
+
+    return manager.acquireConfig(reason, isTokenProxyConfig, {
+        sessionKey,
+        exclude: excludedConfigs,
+    });
 }
 
 function canAttemptResponsesFailover(config, requestUrl) {
@@ -875,7 +925,8 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
 function createClaudeMessagesRequestHandler(options = {}) {
     const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     function acquireClaudeMessagesConfig(sessionKey, excludedConfigs = [], reason = 'claude_request', localAuthToken = '') {
-        const isDirectClaudeConfig = item => isDirectClaudeProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+        const isClaudeTokenConfig = item => isClaudeTokenProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+        const isClaudeApiKeyConfig = item => isClaudeApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
         const matchesClaudeTokenRequestAuth = item => item &&
             item.type === 'claude_token' &&
             localAuthToken &&
@@ -890,7 +941,6 @@ function createClaudeMessagesRequestHandler(options = {}) {
         const boundClaudeTokenConfig = localAuthToken && typeof accountManager.findConfig === 'function'
             ? accountManager.findConfig(matchesClaudeTokenRequestAuth)
             : null;
-        const isGptApiKeyConfig = item => configSupportsCapability(item, 'gpt') && !isExcludedRuntimeConfig(item, excludedConfigs);
 
         if (boundClaudeTokenConfig) {
             const matchedClaudeTokenConfig = accountManager.ensureActiveConfig(reason, isMatchingClaudeTokenConfig);
@@ -907,47 +957,24 @@ function createClaudeMessagesRequestHandler(options = {}) {
             return null;
         }
 
-        const matchedClaudeTokenConfig = localAuthToken
-            ? accountManager.ensureActiveConfig(reason, isMatchingClaudeTokenConfig)
+        const matchedClaudeTokenLease = localAuthToken
+            ? acquireAvailableStaticConfigLease(accountManager, reason, isMatchingClaudeTokenConfig, sessionKey, excludedConfigs)
             : null;
-        if (matchedClaudeTokenConfig && isRuntimeConfigAvailable(matchedClaudeTokenConfig)) {
-            return createStaticConfigLease(matchedClaudeTokenConfig, sessionKey);
+        if (matchedClaudeTokenLease) {
+            return matchedClaudeTokenLease;
         }
 
-        const currentDirectClaudeConfig = accountManager.getActiveConfig(isDirectClaudeConfig);
-        if (currentDirectClaudeConfig && isRuntimeConfigAvailable(currentDirectClaudeConfig)) {
-            return createStaticConfigLease(currentDirectClaudeConfig, sessionKey);
+        const claudeTokenLease = acquireAvailableStaticConfigLease(accountManager, reason, isClaudeTokenConfig, sessionKey, excludedConfigs);
+        if (claudeTokenLease) {
+            return claudeTokenLease;
         }
 
-        const nextDirectClaudeConfig = accountManager.ensureActiveConfig(reason, isDirectClaudeConfig);
-        if (nextDirectClaudeConfig && isRuntimeConfigAvailable(nextDirectClaudeConfig)) {
-            return createStaticConfigLease(nextDirectClaudeConfig, sessionKey);
+        const claudeApiKeyLease = acquireAvailableStaticConfigLease(accountManager, reason, isClaudeApiKeyConfig, sessionKey, excludedConfigs);
+        if (claudeApiKeyLease) {
+            return claudeApiKeyLease;
         }
 
-        const tokenLease = accountManager.acquireConfig(reason, item => item.type === 'token', {
-            sessionKey,
-            exclude: excludedConfigs,
-            allowFallback: false,
-        });
-
-        if (tokenLease) {
-            return tokenLease;
-        }
-
-        const currentGptApiKeyConfig = accountManager.getActiveConfig(isGptApiKeyConfig);
-        if (currentGptApiKeyConfig && isRuntimeConfigAvailable(currentGptApiKeyConfig)) {
-            return createStaticConfigLease(currentGptApiKeyConfig, sessionKey);
-        }
-
-        const nextGptApiKeyConfig = accountManager.ensureActiveConfig(reason, isGptApiKeyConfig);
-        if (nextGptApiKeyConfig && isRuntimeConfigAvailable(nextGptApiKeyConfig)) {
-            return createStaticConfigLease(nextGptApiKeyConfig, sessionKey);
-        }
-
-        return accountManager.acquireConfig(reason, item => item.type === 'token', {
-            sessionKey,
-            exclude: excludedConfigs,
-        });
+        return acquireTokenThenGptApiKeyLease(accountManager, reason, sessionKey, excludedConfigs);
     }
 
     return createClaudeMessagesHandler({
@@ -1522,22 +1549,30 @@ function buildDispatchStatus(activeConfig) {
         return {
             mode: 'empty',
             label: '无可用配置',
-            detail: '请先添加 token 或 apikey 配置'
+            detail: '请先添加 OpenAI token、Claude token 或 fallback apikey'
         };
     }
 
     if (activeConfig.type === 'apikey') {
         return {
-            mode: 'apikey_override',
-            label: `API Key 覆盖: 配置 #${activeConfig.index + 1}`,
-            detail: '支持的流量会优先走当前 apikey'
+            mode: 'apikey_fallback_focus',
+            label: `Fallback apikey 焦点: 配置 #${activeConfig.index + 1}`,
+            detail: 'apikey 只在对应 token 链路不可用时兜底'
+        };
+    }
+
+    if (activeConfig.type === 'claude_token') {
+        return {
+            mode: 'claude_token_focus',
+            label: `Claude token 焦点: 配置 #${activeConfig.index + 1}`,
+            detail: 'Claude token 负责 /v1/messages 主链路'
         };
     }
 
     return {
         mode: 'token_pool',
-        label: `Token 并发池: 锚点配置 #${activeConfig.index + 1}`,
-        detail: 'token 请求按会话调度，apikey 仅作 fallback'
+        label: `OpenAI token 池: 焦点配置 #${activeConfig.index + 1}`,
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback'
     };
 }
 
@@ -1582,10 +1617,14 @@ function getDispatchRole(config, activeConfig) {
     }
 
     if (config.type === 'apikey') {
-        return activeConfig === config ? 'apikey_override' : 'apikey_fallback';
+        return activeConfig === config ? 'apikey_fallback_focus' : 'apikey_fallback';
     }
 
-    return activeConfig === config ? 'token_anchor' : 'token_dispatch';
+    if (config.type === 'claude_token') {
+        return activeConfig === config ? 'claude_token_focus' : 'claude_token';
+    }
+
+    return activeConfig === config ? 'openai_token_focus' : 'openai_token';
 }
 
 function buildConfigAdminResponse() {
@@ -2629,30 +2668,7 @@ function createHandler(proxyPath = '', options = {}) {
         const incomingUrl = buildIncomingUrl(req, proxyPath);
 
         function acquireProxyLease(sessionKey, excludedConfigs = []) {
-            const activeApiKeyConfig = accountManager.getActiveConfig(item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs));
-            if (activeApiKeyConfig && isRuntimeConfigAvailable(activeApiKeyConfig)) {
-                return createStaticConfigLease(activeApiKeyConfig, sessionKey);
-            }
-
-            const tokenLease = accountManager.acquireConfig('proxy_request', isTokenProxyConfig, {
-                sessionKey,
-                exclude: excludedConfigs,
-                allowFallback: false,
-            });
-            if (tokenLease) {
-                return tokenLease;
-            }
-
-            const isAllowedGptApiKeyProxyConfig = item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
-            const nextApiKeyConfig = accountManager.ensureActiveConfig('proxy_request', isAllowedGptApiKeyProxyConfig);
-            if (nextApiKeyConfig && isRuntimeConfigAvailable(nextApiKeyConfig)) {
-                return createStaticConfigLease(nextApiKeyConfig, sessionKey);
-            }
-
-            return accountManager.acquireConfig('proxy_request', isTokenProxyConfig, {
-                sessionKey,
-                exclude: excludedConfigs,
-            });
+            return acquireTokenThenGptApiKeyLease(accountManager, 'proxy_request', sessionKey, excludedConfigs);
         }
 
         function forwardWithConfig(lease, body, jsonBody = null) {
@@ -2768,32 +2784,7 @@ function readBufferedRequestBody(req, limitBytes = 1024 * 1024) {
 }
 
 function acquireImageBusinessLease(manager, sessionKey, excludedConfigs = []) {
-    const activeApiKeyConfig = manager.getActiveConfig(item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs));
-    if (activeApiKeyConfig && isRuntimeConfigAvailable(activeApiKeyConfig)) {
-        return createStaticConfigLease(activeApiKeyConfig, sessionKey);
-    }
-
-    const tokenLease = manager.acquireConfig('image_request', isTokenProxyConfig, {
-        sessionKey,
-        exclude: excludedConfigs,
-        allowFallback: false,
-    });
-    if (tokenLease) {
-        return tokenLease;
-    }
-
-    const nextApiKeyConfig = manager.ensureActiveConfig(
-        'image_request',
-        item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs)
-    );
-    if (nextApiKeyConfig && isRuntimeConfigAvailable(nextApiKeyConfig)) {
-        return createStaticConfigLease(nextApiKeyConfig, sessionKey);
-    }
-
-    return manager.acquireConfig('image_request', isTokenProxyConfig, {
-        sessionKey,
-        exclude: excludedConfigs,
-    });
+    return acquireTokenThenGptApiKeyLease(manager, 'image_request', sessionKey, excludedConfigs);
 }
 
 function buildTokenImageUpstreamRequest(req, config, responsesPayload) {
@@ -3231,6 +3222,10 @@ app.use('/admin', requireAdminAuthToken);
 app.use('/admin/api', express.json({ limit: '1mb' }));
 
 app.get('/admin/configs', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
+});
+
+app.get('/admin/configs/:page(routes|openai|claude|fallbacks|access)', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
 });
 
@@ -3828,10 +3823,10 @@ async function startServer() {
             }
             log('');
             log('路由规则:');
-            log('  - token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
-            log('  - /v1/messages -> 本地 fake token 命中 claude_token 时严格绑定该 Claude 登录态；否则优先使用 claude_token 或 support 包含 claude 的 apikey 原样转发；无可用 Claude 直转配置时使用 token 或 support 包含 gpt 的 apikey 走 Responses 转换');
-            log('  - /v1/images/generations 与 /v1/images/edits -> token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON');
-            log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
+            log('  - OpenAI token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
+            log('  - /v1/messages -> 本地 fake token 命中 claude_token 时严格绑定该 Claude 登录态；否则优先使用 claude_token，随后使用 support 包含 claude 的 apikey 原样转发；无可用 Claude 直转配置时使用 OpenAI token 或 support 包含 gpt 的 apikey 走 Responses 转换');
+            log('  - /v1/images/generations 与 /v1/images/edits -> OpenAI token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON；token 不可用时才使用 support 包含 gpt 的 apikey 兜底');
+            log('  - /v1/* -> OpenAI token 配置项会重写到 /backend-api/codex/*；token 不可用时才使用 support 包含 gpt 的 apikey 直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');
         })().catch(err => {
             error('初始化账号信息失败:', err.message);

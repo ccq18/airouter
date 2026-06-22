@@ -369,12 +369,12 @@
       steps: [
         {
           title: '选择模式',
-          description: 'token 模式适合 ChatGPT Codex 登录态；apikey 模式适合 OpenAI 兼容或 Claude Messages 上游。先在右侧选一种模式。',
+          description: 'OpenAI token 是 Responses 主链路，Claude token 是 Messages 主链路，apikey 只作为对应链路的兜底上游。',
           actionText: '打开 ChatGPT',
           actionHref: 'https://chatgpt.com/',
         },
         {
-          title: 'Token 模式',
+          title: 'OpenAI token',
           description: '建议使用浏览器隐私模式登录 ChatGPT 后打开 AuthSession 页面，把返回的 AuthSession JSON 粘贴到文本框里。粘贴后不要退出该登录态，否则 token 会失效。',
           example: JSON.stringify({
             user: {
@@ -390,8 +390,8 @@
           actionCopyText: 'https://chatgpt.com/api/auth/session',
         },
         {
-          title: 'API Key 模式',
-          description: '直接用输入框填写 Base URL、API Key 和备注，再勾选这个上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务通常选 GPT；需要原样转发 Claude Messages API 时再选 Claude。',
+          title: 'Fallback apikey',
+          description: '直接用输入框填写 Base URL、API Key 和备注，再选择这个兜底上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务选 GPT；Claude Messages 原样转发选 Claude。',
         },
       ],
       rawJsonPlaceholder: JSON.stringify({
@@ -414,6 +414,133 @@
       const configItem = item && item.item ? item.item : item;
       return configItem && (configItem.type === 'apikey' || configItem.type === 'claude_token');
     });
+  }
+
+  function getConfigItem(item) {
+    return item && item.item ? item.item : item;
+  }
+
+  function getConfigType(item) {
+    const configItem = getConfigItem(item);
+    const type = normalizeText(configItem && configItem.type).toLowerCase();
+    return type || 'token';
+  }
+
+  function getApiKeySupport(item) {
+    const configItem = getConfigItem(item);
+    return normalizeSupport(configItem && configItem.support);
+  }
+
+  function configSupports(item, capability) {
+    return getApiKeySupport(item).includes(capability);
+  }
+
+  function getConfigRole(item) {
+    const type = getConfigType(item);
+    if (type === 'claude_token') {
+      return {
+        key: 'claude-token',
+        label: 'Claude token',
+        lane: 'Claude Messages',
+        priority: '主链路',
+        tone: 'active',
+      };
+    }
+
+    if (type === 'apikey') {
+      const support = getApiKeySupport(item);
+      if (support.includes('gpt') && support.includes('claude')) {
+        return {
+          key: 'fallback-both',
+          label: 'API key',
+          lane: '双链路 fallback',
+          priority: '兜底',
+          tone: 'muted',
+        };
+      }
+
+      if (support.includes('claude')) {
+        return {
+          key: 'fallback-claude',
+          label: 'API key',
+          lane: 'Claude fallback',
+          priority: '兜底',
+          tone: 'muted',
+        };
+      }
+
+      return {
+        key: 'fallback-gpt',
+        label: 'API key',
+        lane: 'Responses fallback',
+        priority: '兜底',
+        tone: 'muted',
+      };
+    }
+
+    return {
+      key: 'openai-token',
+      label: 'OpenAI token',
+      lane: 'Responses',
+      priority: '主链路',
+      tone: 'ok',
+    };
+  }
+
+  function getConfigCollection(snapshot, key) {
+    return Array.isArray(snapshot && snapshot[key]) ? snapshot[key] : [];
+  }
+
+  function getEnabledConfigsByRole(snapshot, predicate) {
+    return getConfigCollection(snapshot, 'configs').filter(item => predicate(item && item.item ? item.item : item));
+  }
+
+  function getFallbackConfigs(snapshot, capability) {
+    return getEnabledConfigsByRole(snapshot, item => getConfigType(item) === 'apikey' && configSupports(item, capability));
+  }
+
+  function getPrimaryConfigs(snapshot, type) {
+    return getEnabledConfigsByRole(snapshot, item => getConfigType(item) === type);
+  }
+
+  function getRouteLanes(snapshot) {
+    const openAiTokens = getPrimaryConfigs(snapshot, 'token');
+    const claudeTokens = getPrimaryConfigs(snapshot, 'claude_token');
+    const gptFallbacks = getFallbackConfigs(snapshot, 'gpt');
+    const claudeFallbacks = getFallbackConfigs(snapshot, 'claude');
+
+    return [
+      {
+        key: 'responses',
+        title: 'Responses 链路',
+        endpoint: '/v1/responses',
+        primaryLabel: 'OpenAI token',
+        fallbackLabel: 'GPT apikey',
+        primary: openAiTokens,
+        fallback: gptFallbacks,
+        description: 'OpenAI token 负责主请求；全部不可用时才使用 GPT apikey。',
+      },
+      {
+        key: 'messages',
+        title: 'Claude Messages 链路',
+        endpoint: '/v1/messages',
+        primaryLabel: 'Claude token',
+        fallbackLabel: 'Claude apikey',
+        primary: claudeTokens,
+        fallback: claudeFallbacks,
+        description: 'Claude token 负责原样转发；全部不可用时才使用 Claude apikey。',
+      },
+      {
+        key: 'converted-messages',
+        title: 'Messages 转换兜底',
+        endpoint: '/v1/messages -> /v1/responses',
+        primaryLabel: 'OpenAI token',
+        fallbackLabel: 'GPT apikey',
+        primary: openAiTokens,
+        fallback: gptFallbacks,
+        description: 'Claude 直转链路不可用时，才把 Messages 转成 Responses。',
+      },
+    ];
   }
 
   function getConfigIdentityColumnLabel(snapshot) {
@@ -507,20 +634,28 @@
     const dispatch = snapshot && snapshot.dispatch && typeof snapshot.dispatch === 'object'
       ? snapshot.dispatch
       : null;
-    if (dispatch && dispatch.mode === 'apikey_override') {
+    if (dispatch && dispatch.mode === 'apikey_fallback_focus') {
       return {
-        value: dispatch.label || 'API Key 覆盖',
+        value: dispatch.label || 'Fallback apikey 焦点',
         tone: 'active',
-        detail: dispatch.detail || '支持的流量会优先走当前 apikey',
+        detail: dispatch.detail || 'apikey 只在对应 token 链路不可用时兜底',
+      };
+    }
+
+    if (dispatch && dispatch.mode === 'claude_token_focus') {
+      return {
+        value: dispatch.label || 'Claude token 焦点',
+        tone: 'active',
+        detail: dispatch.detail || 'Claude token 负责 /v1/messages 主链路',
       };
     }
 
     if (dispatch && dispatch.mode === 'token_pool') {
       const observedDetail = formatObservedDispatchSession(dispatch.observed_session);
       return {
-        value: dispatch.label || 'Token 并发池',
+        value: dispatch.label || 'OpenAI token 池',
         tone: 'active',
-        detail: observedDetail || dispatch.detail || 'token 请求按会话调度',
+        detail: observedDetail || dispatch.detail || 'OpenAI token 负责 Responses 主链路',
       };
     }
 
@@ -528,24 +663,32 @@
     const active = configs.find(item => item && item.is_active);
     if (active && active.item && active.item.type === 'apikey') {
       return {
-        value: `API Key 覆盖: 配置 #${active.index + 1}`,
+        value: `Fallback apikey 焦点: 配置 #${active.index + 1}`,
         tone: 'active',
-        detail: '支持的流量会优先走当前 apikey',
+        detail: 'apikey 只在对应 token 链路不可用时兜底',
+      };
+    }
+
+    if (active && active.item && active.item.type === 'claude_token') {
+      return {
+        value: `Claude token 焦点: 配置 #${active.index + 1}`,
+        tone: 'active',
+        detail: 'Claude token 负责 /v1/messages 主链路',
       };
     }
 
     if (active) {
       return {
-        value: `Token 并发池: 锚点配置 #${active.index + 1}`,
+        value: `OpenAI token 池: 焦点配置 #${active.index + 1}`,
         tone: 'active',
-        detail: 'token 请求按会话调度',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
       };
     }
 
     return {
       value: '无可用配置',
       tone: 'muted',
-      detail: '请先添加 token 或 apikey 配置',
+      detail: '请先添加 OpenAI token、Claude token 或 fallback apikey',
     };
   }
 
@@ -1121,6 +1264,10 @@
     getPreferredApiKey,
     buildHelloTestHeaders,
     getConfigGuideContent,
+    getConfigRole,
+    getRouteLanes,
+    getConfigType,
+    configSupports,
     getConfigIdentityColumnLabel,
     getConfigIdentityValue,
     formatConfigItemCopyText,

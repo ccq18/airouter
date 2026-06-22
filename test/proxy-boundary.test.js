@@ -523,12 +523,15 @@ test('image generations apikey business request keeps native Images forwarding',
   };
   const requests = [];
   const observations = [];
+  const acquiredReasons = [];
   const accountManager = {
     getActiveConfig(predicate) {
       return predicate(config) ? config : null;
     },
-    acquireConfig() {
-      throw new Error('token dispatch should not be used for active apikey image requests');
+    acquireConfig(reason, predicate, options) {
+      acquiredReasons.push({ reason, allowFallback: options && options.allowFallback });
+      assert.equal(predicate({ type: 'token' }), true);
+      return null;
     },
     ensureActiveConfig() {
       return null;
@@ -566,6 +569,12 @@ test('image generations apikey business request keeps native Images forwarding',
   }), res);
   await new Promise(resolve => setImmediate(resolve));
 
+  assert.deepEqual(acquiredReasons, [
+    {
+      reason: 'image_request',
+      allowFallback: false,
+    },
+  ]);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].targetUrl, 'https://images.example.com/v1/images/generations?client_version=1');
   assert.equal(requests[0].headers.authorization, 'Bearer native-image-key');
@@ -607,6 +616,19 @@ test('generic apikey proxy records success after committing the upstream respons
   assert.ok(successRecordIndex < responseEndIndex);
   assert.match(responseErrorBlock, /if \(!res\.headersSent\) \{\n\s+recordCurrentApiKeyRequestResult\(\{\n\s+ok: false/);
   assert.equal(source.includes('accountManager.recordApiKeyRequestResult(config, { ok: true })'), false);
+});
+
+test('generic OpenAI proxy tries token configs before GPT apikey fallback', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const createHandlerIndex = source.indexOf("function createHandler(proxyPath = '', options = {})");
+  const acquireProxyLeaseIndex = source.indexOf('function acquireProxyLease(sessionKey, excludedConfigs = [])', createHandlerIndex);
+  const acquireProxyLeaseEnd = source.indexOf('function forwardWithConfig', acquireProxyLeaseIndex);
+  const acquireProxyLeaseBody = source.slice(acquireProxyLeaseIndex, acquireProxyLeaseEnd);
+
+  assert.notEqual(createHandlerIndex, -1);
+  assert.notEqual(acquireProxyLeaseIndex, -1);
+  assert.match(acquireProxyLeaseBody, /return acquireTokenThenGptApiKeyLease\(accountManager, 'proxy_request', sessionKey, excludedConfigs\)/);
+  assert.doesNotMatch(acquireProxyLeaseBody, /getActiveConfig\(item => isGptApiKeyProxyConfig/);
 });
 
 test('createClaudeMessagesHandler converts apikey configs without claude support through responses compatibility', async () => {
@@ -956,7 +978,7 @@ test('server does not fallback to OpenAI configs for unbound local claude auth t
 
   const boundGuardIndex = source.indexOf('if (boundClaudeTokenConfig)');
   const localTokenGuardIndex = source.indexOf('if (isLocalClaudeAuthToken(localAuthToken))');
-  const tokenFallbackIndex = source.indexOf('const tokenLease = accountManager.acquireConfig');
+  const tokenFallbackIndex = source.indexOf('return acquireTokenThenGptApiKeyLease(accountManager, reason, sessionKey, excludedConfigs)');
 
   assert.ok(boundGuardIndex >= 0, 'bound claude token guard should exist');
   assert.ok(localTokenGuardIndex > boundGuardIndex, 'unbound local token guard should run after bound token lookup');
