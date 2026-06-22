@@ -557,7 +557,10 @@ function isClaudeMessagesProxyPath(req) {
     const originalUrl = String(req && req.originalUrl ? req.originalUrl : req && req.url ? req.url : '');
     const requestPath = `${baseUrl}${pathName}` || originalUrl.split('?')[0];
 
-    return requestPath === '/v1/messages' || requestPath === '/cpa/v1/messages';
+    return requestPath === '/v1/messages' ||
+        requestPath.startsWith('/v1/messages/') ||
+        requestPath === '/cpa/v1/messages' ||
+        requestPath.startsWith('/cpa/v1/messages/');
 }
 
 function isExcludedRuntimeConfig(item, excludedConfigs = []) {
@@ -3748,11 +3751,27 @@ app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
     });
 });
 
+app.post('/v1/messages/count_tokens', requireConfiguredApiKeys, (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
+    void handleClaudeMessagesRequest(req, res).catch(err => {
+        reportBusinessRequestError(res, err, 'Claude Messages token 统计请求处理失败');
+    });
+});
+
 app.post('/v1/images/generations', requireConfiguredApiKeys, createImageGenerationsHandler());
 app.post('/v1/images/edits', requireConfiguredApiKeys, createImageEditsHandler());
 
 // CLIProxyAPI 风格前缀入口
 app.post('/cpa/v1/messages', requireConfiguredApiKeys, (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
+    return forwardCpaClaudeMessagesRequest(req, res);
+});
+
+app.post('/cpa/v1/messages/count_tokens', requireConfiguredApiKeys, (req, res) => {
     if (!accountManager.getActiveConfig()) {
         return createMissingConfigResponse(res);
     }

@@ -383,7 +383,8 @@ test('server accepts configured Claude OAuth tokens only on Claude messages rout
   assert.match(source, /function getClaudeMessagesConfiguredRequestAuthTokens\(parsedConfig\)/);
   assert.match(source, /if \(configuredApiKeys\.length === 0\)\s*{\s*return \[\];\s*}/);
   assert.match(source, /getConfiguredClaudeTokenRequestAuthTokens\(parsedConfig\)/);
-  assert.match(source, /requestPath === '\/v1\/messages' \|\| requestPath === '\/cpa\/v1\/messages'/);
+  assert.match(source, /requestPath\.startsWith\('\/v1\/messages\/'\)/);
+  assert.match(source, /requestPath\.startsWith\('\/cpa\/v1\/messages\/'\)/);
   assert.match(source, /isClaudeMessagesProxyPath\(req\)\s*\?\s*getClaudeMessagesConfiguredRequestAuthTokens\(currentParsedConfig\)\s*:\s*getConfiguredApiKeys\(currentParsedConfig\)/);
 });
 
@@ -955,6 +956,66 @@ test('createClaudeMessagesHandler forwards claude_token configs by replacing aut
   });
   assert.equal(res.statusCode, 200);
   assert.equal(res.payload.content[0].text, 'hello from oauth');
+});
+
+test('createClaudeMessagesHandler forwards Claude count_tokens subpath with claude_token auth', async () => {
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      type: 'claude_token',
+      index: 0,
+      description: 'Claude OAuth config',
+      access_token: 'real-claude-oauth-token',
+      baseUrl: 'https://api.anthropic.com/v1',
+      runtime: { enabled: true, available: true },
+    }),
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'application/json',
+        }, JSON.stringify({
+          input_tokens: 8,
+        }))),
+        abort() {},
+      };
+    },
+  });
+
+  const req = createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  });
+  req.url = '/v1/messages/count_tokens';
+  req.headers.authorization = 'Bearer local-airouter-oauth-token';
+  req.headers['anthropic-version'] = '2023-06-01';
+  req.headers['anthropic-beta'] = 'oauth-2025-04-20,claude-code-20250219';
+
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(upstreamRequests.length, 1);
+  assert.equal(upstreamRequests[0].targetUrl, 'https://api.anthropic.com/v1/messages/count_tokens');
+  assert.equal(upstreamRequests[0].headers.authorization, 'Bearer real-claude-oauth-token');
+  assert.equal(upstreamRequests[0].headers['anthropic-beta'], 'oauth-2025-04-20,claude-code-20250219');
+  assert.deepEqual(JSON.parse(upstreamRequests[0].body.toString('utf8')), {
+    model: 'claude-sonnet-4-5',
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.input_tokens, 8);
 });
 
 test('server does not mark claude_token unavailable after upstream failures', () => {
