@@ -91,7 +91,8 @@ function printUsage() {
     '用法: npm run claude:login -- [--config openai.json] [--open]',
     '',
     '完成 Claude OAuth 授权后，脚本会把 claude_token 配置追加到 openai.json，',
-    '并生成一个本地 fake auth token 写入 apikeys，用于 CLAUDE_CODE_OAUTH_TOKEN。',
+    '并生成一个本地 fake auth token 写入 apikeys。',
+    '共享 Claude Code 登录态时，在客户端运行 npm run claude:install-login 安装这枚 token。',
   ].join('\n'));
 }
 
@@ -254,6 +255,9 @@ async function main() {
     console.log(`export CLAUDE_CODE_OAUTH_TOKEN=${localAuthToken}`);
     console.log('unset ANTHROPIC_API_KEY');
     console.log('unset ANTHROPIC_AUTH_TOKEN');
+    console.log('');
+    console.log('共享登录态安装示例（写入 Claude Code 本地凭证，交互模式无需再运行 /login）：');
+    console.log(`npm run claude:install-login -- --token ${localAuthToken} --base-url http://localhost:${nextParsed.port || 3009}`);
     if (requestAuthTokenSha256s.length > 0) {
       console.log('');
       console.log('已记录本机 Claude Code Keychain OAuth token 的 SHA256，用于兼容交互式主请求。');

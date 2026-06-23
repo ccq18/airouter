@@ -1105,7 +1105,12 @@
       <div class="endpoint-card">
         <div class="endpoint-label">登录命令</div>
         <code class="mono endpoint-value">npm run claude:login</code>
-        <div class="endpoint-meta">脚本会生成本地 fake auth token，并尽量写入 Keychain token SHA-256 以兼容 Claude Code 交互式主请求。</div>
+        <div class="endpoint-meta">服务端脚本会生成可共享的本地 fake auth token，并写入 Airouter 配置。</div>
+      </div>
+      <div class="endpoint-card">
+        <div class="endpoint-label">客户端安装共享登录态</div>
+        <code class="mono endpoint-value">npm run claude:install-login -- --token airouter-oauth-xxx --base-url http://localhost:3009</code>
+        <div class="endpoint-meta">把本地 fake token 写入 Claude Code 本地凭证；交互模式无需再运行 /login，安装前会自动备份原登录态。</div>
       </div>
       <div id="claudeConfigs"></div>
     </section>
