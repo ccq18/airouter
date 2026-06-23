@@ -100,6 +100,16 @@ function getSettingsPath({ env = process.env, homeDir = os.homedir() } = {}) {
   return path.join(getClaudeConfigHomeDir({ env, homeDir }), 'settings.json');
 }
 
+function getGlobalClaudeConfigPath({ env = process.env, homeDir = os.homedir() } = {}) {
+  const configDir = getClaudeConfigHomeDir({ env, homeDir });
+  const legacyPath = path.join(configDir, '.config.json');
+  if (fs.existsSync(legacyPath)) {
+    return legacyPath;
+  }
+
+  return path.join(env.CLAUDE_CONFIG_DIR || homeDir, `.claude${getOauthFileSuffix(env)}.json`);
+}
+
 function getCredentialsStorageInfo({
   env = process.env,
   homeDir = os.homedir(),
@@ -380,11 +390,26 @@ function updateSettingsForSharedClaudeCodeLogin(settings, baseUrl) {
   return next;
 }
 
+function updateGlobalConfigForSharedClaudeCodeLogin(globalConfig) {
+  const next = globalConfig && typeof globalConfig === 'object' && !Array.isArray(globalConfig)
+    ? { ...globalConfig }
+    : {};
+
+  next.hasCompletedOnboarding = true;
+  if (!normalizeString(next.theme)) {
+    next.theme = 'dark';
+  }
+
+  return next;
+}
+
 function createBackupPayload({
   storageInfo,
   credentialsData,
   settingsPath,
   settingsData,
+  globalConfigPath,
+  globalConfigData,
   createdAt = new Date(),
 }) {
   return {
@@ -399,6 +424,12 @@ function createBackupPayload({
       ? {
           path: settingsPath,
           data: settingsData,
+        }
+      : null,
+    global_config: globalConfigPath
+      ? {
+          path: globalConfigPath,
+          data: globalConfigData,
         }
       : null,
   };
@@ -430,11 +461,15 @@ function installSharedClaudeCodeLogin({
   const configDir = getClaudeConfigHomeDir({ env, homeDir });
   const settingsPath = baseUrl ? getSettingsPath({ env, homeDir }) : '';
   const currentSettings = settingsPath ? readJsonFileOrNull(settingsPath) : null;
+  const globalConfigPath = getGlobalClaudeConfigPath({ env, homeDir });
+  const currentGlobalConfig = readJsonFileOrNull(globalConfigPath);
   const backupPayload = createBackupPayload({
     storageInfo,
     credentialsData: currentCredentials,
     settingsPath,
     settingsData: currentSettings,
+    globalConfigPath,
+    globalConfigData: currentGlobalConfig,
     createdAt: now(),
   });
   const resolvedBackupDir = backupDir || path.join(configDir, 'airouter-backups');
@@ -456,6 +491,9 @@ function installSharedClaudeCodeLogin({
     };
   }
 
+  const nextGlobalConfig = updateGlobalConfigForSharedClaudeCodeLogin(currentGlobalConfig);
+  writeJsonFile(globalConfigPath, nextGlobalConfig);
+
   return {
     backupPath,
     credentials: {
@@ -463,6 +501,9 @@ function installSharedClaudeCodeLogin({
       warning: credentialsWrite.warning || '',
     },
     settings: settingsWrite,
+    globalConfig: {
+      path: globalConfigPath,
+    },
   };
 }
 
@@ -499,12 +540,31 @@ function restoreClaudeCodeLogin({
     };
   }
 
+  let globalConfigRestore = null;
+  if (backup.global_config && backup.global_config.path) {
+    if (backup.global_config.data === null) {
+      try {
+        fs.unlinkSync(backup.global_config.path);
+      } catch (err) {
+        if (!err || err.code !== 'ENOENT') {
+          throw err;
+        }
+      }
+    } else {
+      writeJsonFile(backup.global_config.path, backup.global_config.data);
+    }
+    globalConfigRestore = {
+      path: backup.global_config.path,
+    };
+  }
+
   return {
     credentials: {
       storage: backup.credentials.storage,
       warning: credentialsRestore.warning || '',
     },
     settings: settingsRestore,
+    globalConfig: globalConfigRestore,
   };
 }
 
@@ -532,6 +592,7 @@ module.exports = {
   buildSharedClaudeCodeOAuthCredentials,
   createBackupPayload,
   getClaudeCodeKeychainServiceName,
+  getGlobalClaudeConfigPath,
   getClaudeConfigHomeDir,
   getCredentialsStorageInfo,
   getPlaintextCredentialsPath,
@@ -539,6 +600,7 @@ module.exports = {
   installSharedClaudeCodeLogin,
   readBackupPayload,
   restoreClaudeCodeLogin,
+  updateGlobalConfigForSharedClaudeCodeLogin,
   updateSettingsForSharedClaudeCodeLogin,
   updateSettingsEnv,
   validateLocalClaudeAuthToken,

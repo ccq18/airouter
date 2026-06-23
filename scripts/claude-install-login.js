@@ -106,6 +106,9 @@ async function main() {
     if (restored.settings) {
       console.log(`已恢复设置: ${restored.settings.path}`);
     }
+    if (restored.globalConfig) {
+      console.log(`已恢复全局配置: ${restored.globalConfig.path}`);
+    }
     if (restored.credentials.warning) {
       console.warn(restored.credentials.warning);
     }
@@ -127,6 +130,9 @@ async function main() {
     console.log(`设置文件: ${installed.settings.path}`);
   } else {
     console.log('未写入 ANTHROPIC_BASE_URL；请通过环境变量或 Claude Code settings.json 指向 Airouter。');
+  }
+  if (installed.globalConfig) {
+    console.log(`全局配置: ${installed.globalConfig.path}`);
   }
   if (installed.credentials.warning) {
     console.warn(installed.credentials.warning);

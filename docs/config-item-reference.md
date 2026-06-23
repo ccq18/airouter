@@ -198,7 +198,7 @@
 - `access_token` 是 Airouter 转发到 Anthropic 时使用的真实 OAuth Bearer token
 - `refresh_token` 和 `expires_at` 由登录脚本保存，供后续 token 刷新能力复用
 - `local_auth_token` 是 Airouter 分配给 Claude Code 使用的本地 fake auth token；脚本会同步写入顶层 `apikeys`
-- 推荐共享登录态路径：服务端运行 `npm run claude:login` 生成 `local_auth_token` 后，在每台客户端运行 `npm run claude:install-login -- --token <local_auth_token> --base-url http://localhost:<port>`，把这枚本地 token 写入 Claude Code 本地凭证；安装前会自动备份原登录态，可用 `npm run claude:install-login -- --restore <backup-file>` 恢复
+- 推荐共享登录态路径：服务端运行 `npm run claude:login` 生成 `local_auth_token` 后，在每台客户端运行 `npm run claude:install-login -- --token <local_auth_token> --base-url http://localhost:<port>`，把这枚本地 token 写入 Claude Code 本地凭证，并同步补齐 Claude 交互模式依赖的全局 onboarding 状态；安装前会自动备份原登录态，可用 `npm run claude:install-login -- --restore <backup-file>` 恢复
 - 也可以临时使用环境变量：`CLAUDE_CODE_OAUTH_TOKEN=<local_auth_token>`，并设置 `ANTHROPIC_BASE_URL=http://localhost:<port>`；但部分 Claude Code 交互式主请求可能优先读取本机登录态，因此共享登录态建议使用 `claude:install-login`
 - `request_auth_token_sha256s` 是可选入站鉴权哈希列表，仅用于兼容 Claude Code 交互式主请求从本机 Keychain 读取另一枚同登录态 OAuth token 的情况；共享登录态主路径不依赖它
 - 使用该模式时不要同时设置 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，否则 Claude Code 可能切回外部 API key/auth token 分支

@@ -7,8 +7,10 @@ const path = require('node:path');
 const {
   buildSharedClaudeCodeOAuthCredentials,
   getClaudeCodeKeychainServiceName,
+  getGlobalClaudeConfigPath,
   installSharedClaudeCodeLogin,
   restoreClaudeCodeLogin,
+  updateGlobalConfigForSharedClaudeCodeLogin,
   updateSettingsForSharedClaudeCodeLogin,
   validateLocalClaudeAuthToken,
 } = require('../app/claude-code-credentials');
@@ -80,6 +82,10 @@ test('installSharedClaudeCodeLogin writes plaintext fallback credentials and res
   };
   const credentialsPath = path.join(tempDir, '.credentials.json');
   const settingsPath = path.join(tempDir, 'settings.json');
+  const globalConfigPath = getGlobalClaudeConfigPath({
+    env,
+    homeDir: '/Users/example',
+  });
   const existingCredentials = {
     mcpOAuth: {
       example: {
@@ -106,8 +112,16 @@ test('installSharedClaudeCodeLogin writes plaintext fallback credentials and res
       CLAUDE_CODE_USE_FOUNDRY: 'yes',
     },
   };
+  const existingGlobalConfig = {
+    oauthAccount: {
+      emailAddress: 'user@example.com',
+    },
+    hasCompletedOnboarding: false,
+    theme: 'light',
+  };
   fs.writeFileSync(credentialsPath, JSON.stringify(existingCredentials));
   fs.writeFileSync(settingsPath, JSON.stringify(existingSettings));
+  fs.writeFileSync(globalConfigPath, JSON.stringify(existingGlobalConfig));
 
   const installed = installSharedClaudeCodeLogin({
     localAuthToken: 'airouter-oauth-shared-token',
@@ -119,6 +133,7 @@ test('installSharedClaudeCodeLogin writes plaintext fallback credentials and res
 
   assert.equal(installed.credentials.storage.type, 'plaintext');
   assert.equal(installed.settings.path, settingsPath);
+  assert.equal(installed.globalConfig.path, globalConfigPath);
   assert.ok(fs.existsSync(installed.backupPath));
 
   const nextCredentials = readJson(credentialsPath);
@@ -139,10 +154,20 @@ test('installSharedClaudeCodeLogin writes plaintext fallback credentials and res
     ANTHROPIC_BASE_URL: 'http://router.example:3009',
   });
 
+  const nextGlobalConfig = readJson(globalConfigPath);
+  assert.deepEqual(nextGlobalConfig, {
+    oauthAccount: {
+      emailAddress: 'user@example.com',
+    },
+    hasCompletedOnboarding: true,
+    theme: 'light',
+  });
+
   const backup = readJson(installed.backupPath);
   assert.equal(backup.type, 'airouter-claude-code-credentials-backup');
   assert.deepEqual(backup.credentials.data, existingCredentials);
   assert.deepEqual(backup.settings.data, existingSettings);
+  assert.deepEqual(backup.global_config.data, existingGlobalConfig);
 
   restoreClaudeCodeLogin({
     backupPath: installed.backupPath,
@@ -150,6 +175,7 @@ test('installSharedClaudeCodeLogin writes plaintext fallback credentials and res
 
   assert.deepEqual(readJson(credentialsPath), existingCredentials);
   assert.deepEqual(readJson(settingsPath), existingSettings);
+  assert.deepEqual(readJson(globalConfigPath), existingGlobalConfig);
 }));
 
 test('updateSettingsForSharedClaudeCodeLogin removes settings that disable Claude OAuth', () => {
@@ -173,7 +199,19 @@ test('updateSettingsForSharedClaudeCodeLogin removes settings that disable Claud
   });
 });
 
-test('installSharedClaudeCodeLogin can write macOS Keychain payloads through security', () => {
+test('updateGlobalConfigForSharedClaudeCodeLogin marks onboarding complete and fills a default theme', () => {
+  assert.deepEqual(updateGlobalConfigForSharedClaudeCodeLogin({
+    autoUpdates: false,
+    hasCompletedOnboarding: false,
+    theme: '',
+  }), {
+    autoUpdates: false,
+    hasCompletedOnboarding: true,
+    theme: 'dark',
+  });
+});
+
+test('installSharedClaudeCodeLogin can write macOS Keychain payloads through security', () => withTempDir(tempDir => {
   const calls = [];
   const spawnSyncImpl = (command, args, options = {}) => {
     calls.push({ command, args, options });
@@ -200,7 +238,7 @@ test('installSharedClaudeCodeLogin can write macOS Keychain payloads through sec
     env: {
       USER: 'alice',
     },
-    homeDir: '/Users/alice',
+    homeDir: tempDir,
     platform: 'darwin',
     now: () => new Date('2026-06-22T00:00:00.000Z'),
     backupDir: fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-keychain-backup-')),
@@ -231,7 +269,7 @@ test('installSharedClaudeCodeLogin can write macOS Keychain payloads through sec
   } finally {
     fs.rmSync(path.dirname(installed.backupPath), { recursive: true, force: true });
   }
-});
+}));
 
 test('installSharedClaudeCodeLogin falls back to plaintext when macOS Keychain write fails', () => withTempDir(tempDir => {
   const env = {
