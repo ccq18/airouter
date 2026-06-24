@@ -3228,7 +3228,7 @@ app.get('/admin/configs', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
 });
 
-app.get('/admin/configs/:page(routes|openai|claude|fallbacks|access)', (req, res) => {
+app.get('/admin/configs/:page(upstreams|openai|claude|fallbacks|settings|routes|access)', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
 });
 

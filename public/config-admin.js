@@ -590,14 +590,8 @@
   }
 
   function hasRuntimeProblem(runtime) {
-    const text = getRuntimeSummaryText(runtime).toLowerCase();
-
-    return text.includes('可用=否')
-      || text.includes('timeout')
-      || text.includes('401')
-      || text.includes('quota')
-      || text.includes('失败')
-      || text.includes('错误=');
+    return extractRuntimeStatusTags(runtime)
+      .some(tag => tag.label === '异常');
   }
 
   function getActiveConfigLabel(snapshot) {

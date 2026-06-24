@@ -32,6 +32,10 @@
 
     * { box-sizing: border-box; }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
@@ -43,10 +47,32 @@
     }
 
     .page {
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 28px 24px 48px;
+      display: grid;
+      grid-template-columns: 248px minmax(0, 1fr);
+      min-height: 100vh;
+      margin: 0;
       overflow-x: hidden;
+    }
+
+    .admin-sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 22px 16px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.92);
+      overflow-y: auto;
+    }
+
+    .sidebar-brand {
+      margin-bottom: 16px;
+      padding: 0 8px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .admin-workspace {
+      min-width: 0;
+      padding: 24px;
     }
 
     .mono {
@@ -59,7 +85,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 18px;
-      margin-bottom: 16px;
+      margin-bottom: 18px;
     }
 
     .page-title {
@@ -87,22 +113,19 @@
     }
 
     .admin-nav {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 0 0 16px;
-      padding: 8px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: rgba(255, 255, 255, 0.72);
-      box-shadow: 0 10px 28px rgba(22, 33, 43, 0.05);
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      padding: 0;
     }
 
     .admin-nav a {
-      display: inline-flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      min-height: 36px;
-      padding: 8px 12px;
+      gap: 8px;
+      min-height: 42px;
+      padding: 9px 10px;
       border-radius: 8px;
       color: var(--muted);
       font-size: 13px;
@@ -139,6 +162,19 @@
       display: grid;
       gap: 12px;
       min-width: 0;
+    }
+
+    .section-stack {
+      display: grid;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
     }
 
     .panel {
@@ -181,6 +217,46 @@
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 10px;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .metric-card {
+      min-height: 104px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 10px 28px rgba(22, 33, 43, 0.05);
+    }
+
+    .metric-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .metric-value {
+      margin-top: 12px;
+      font-size: 24px;
+      line-height: 1.1;
+      font-weight: 900;
+    }
+
+    .metric-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
     }
 
     .batch-toolbar {
@@ -331,8 +407,8 @@
     button {
       appearance: none;
       border: none;
-      border-radius: 999px;
-      padding: 11px 16px;
+      border-radius: 8px;
+      padding: 10px 14px;
       font: inherit;
       font-weight: 700;
       cursor: pointer;
@@ -695,6 +771,16 @@
       border-bottom: none;
     }
 
+    .group-row td {
+      padding: 9px 16px;
+      background: var(--surface-strong);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
     .config-col,
     .config-name {
       width: 120px;
@@ -859,6 +945,110 @@
       margin: 0;
     }
 
+    .config-group-list,
+    .config-card-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .config-group {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-muted);
+    }
+
+    .config-group-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .config-card {
+      display: grid;
+      grid-template-columns: minmax(160px, 0.72fr) minmax(180px, 1fr) minmax(260px, 1.35fr) minmax(250px, auto);
+      gap: 14px;
+      align-items: start;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .config-card.with-selection {
+      grid-template-columns: 28px minmax(160px, 0.72fr) minmax(180px, 1fr) minmax(260px, 1.35fr) minmax(250px, auto);
+    }
+
+    .config-card-select {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding-top: 4px;
+    }
+
+    .config-card-main {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .config-card-title {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      font-weight: 900;
+      line-height: 1.35;
+    }
+
+    .config-card-meta,
+    .config-card-field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .config-card-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .config-card-value {
+      font-size: 13px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .config-card-summary {
+      min-width: 0;
+    }
+
+    .config-card-actions {
+      display: grid;
+      gap: 8px;
+      justify-items: end;
+      min-width: 0;
+    }
+
+    .config-card-actions .action-row {
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .config-card-actions button {
+      padding: 8px 10px;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
     .selection-chip {
       display: inline-flex;
       align-items: center;
@@ -890,6 +1080,21 @@
     }
 
     @media (max-width: 980px) {
+      .page {
+        display: block;
+      }
+
+      .admin-sidebar {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .admin-workspace {
+        padding: 18px;
+      }
+
       .topbar,
       .panel-head {
         align-items: stretch;
@@ -901,6 +1106,10 @@
       }
 
       .console-grid,
+      .settings-grid,
+      .metrics-grid,
+      .config-card,
+      .config-card.with-selection,
       .route-lane,
       .form-grid,
       .port-grid,
@@ -910,7 +1119,8 @@
     }
 
     @media (max-width: 520px) {
-      .page {
+      .admin-sidebar,
+      .admin-workspace {
         padding: 18px 12px 36px;
       }
 
@@ -935,9 +1145,14 @@
       .toolbar button,
       .panel-tools button,
       .key-toolbar button,
-      .actions button {
+      .actions button,
+      .config-card-actions button {
         min-width: 0;
         width: 100%;
+      }
+
+      .config-card-actions {
+        justify-items: stretch;
       }
     }
 
@@ -945,48 +1160,48 @@
 </head>
   <body>
   <main class="page">
-    <header class="topbar">
-      <div>
+    <aside class="admin-sidebar">
+      <div class="sidebar-brand">
         <h1 class="page-title">Airouter 管理控制台</h1>
-        <p class="page-subtitle">管理入口 apikey、上游账号和当前运行态。</p>
+        <p class="page-subtitle">token 默认主链路，apikey 仅兜底。按页面管理对应配置。</p>
       </div>
-      <div class="toolbar">
-        <button class="secondary" type="button" id="refreshButton">刷新</button>
-        <button class="secondary" type="button" id="testResponseButton">测试请求</button>
-      </div>
-    </header>
 
-    <nav class="admin-nav" aria-label="管理页面">
-      <a href="/admin/configs/routes" data-page-link="routes">链路总览</a>
-      <a href="/admin/configs/openai" data-page-link="openai">OpenAI token</a>
-      <a href="/admin/configs/claude" data-page-link="claude">Claude token</a>
-      <a href="/admin/configs/fallbacks" data-page-link="fallbacks">Fallback apikey</a>
-      <a href="/admin/configs/access" data-page-link="access">访问控制</a>
-    </nav>
+      <nav class="admin-nav" aria-label="管理页面">
+        <a href="/admin/configs/upstreams" data-page-link="upstreams">上游配置</a>
+        <a href="/admin/configs/openai" data-page-link="openai">OpenAI token</a>
+        <a href="/admin/configs/claude" data-page-link="claude">Claude token</a>
+        <a href="/admin/configs/fallbacks" data-page-link="fallbacks">Fallback apikey</a>
+        <a href="/admin/configs/settings" data-page-link="settings">系统设置</a>
+      </nav>
+    </aside>
+
+    <section class="admin-workspace">
+      <header class="topbar">
+        <div>
+          <h1 class="page-title" id="currentPageTitle">上游配置</h1>
+          <p class="page-subtitle" id="currentPageSubtitle">默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。</p>
+        </div>
+        <div class="toolbar">
+          <button class="secondary" type="button" id="refreshButton">刷新</button>
+          <button class="secondary" type="button" id="testResponseButton">测试请求</button>
+        </div>
+      </header>
 
     <div id="message" class="message" role="status" aria-live="polite"></div>
 
-    <section class="panel list-panel admin-page" data-page="routes">
-        <div class="panel-head">
-          <div>
-            <h2 class="panel-title">链路总览</h2>
-            <p class="panel-note">OpenAI token 负责 Responses，Claude token 负责 Messages，apikey 仅作为对应链路的兜底。</p>
-          </div>
-          <div class="panel-tools">
-            <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
-          </div>
-        </div>
-      <div id="routeLanes" class="route-lanes"></div>
-    </section>
-
-    <section class="panel list-panel admin-page" data-page="routes">
+    <section class="admin-page" data-page="upstreams">
+      <div id="upstreamMetrics" class="metrics-grid"></div>
+      <div class="panel list-panel">
       <div class="panel-head">
         <div>
           <h2 class="panel-title">上游配置</h2>
-          <p class="panel-note">查看运行态、调整优先级，或删除不再使用的上游。</p>
+          <p class="panel-note">按 OpenAI token、Claude token、Fallback apikey 分组展示；组内顺序就是调度优先级。</p>
+        </div>
+        <div class="panel-tools">
+          <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
         </div>
       </div>
-      <div id="batchToolbar" class="batch-toolbar" hidden>
+      <div id="batchToolbar" class="batch-toolbar">
         <div class="batch-toolbar-left">
           <span id="batchSelectionSummary" class="count">已选择 0 项</span>
           <button class="secondary" type="button" id="batchSelectProblemConfigsButton" data-action="batch-select-problem-configs">选择异常配置</button>
@@ -998,14 +1213,15 @@
         </div>
       </div>
       <section id="cards"></section>
+      </div>
     </section>
 
-    <section class="console-grid admin-page" data-page="openai">
+    <section class="section-stack admin-page" data-page="openai">
       <div class="panel">
         <div class="panel-head">
           <div>
             <h2 class="panel-title">新增 OpenAI token</h2>
-            <p class="panel-note">OpenAI token 只负责 Responses / Codex 兼容链路，是 GPT 主链路。</p>
+            <p class="panel-note">OpenAI token 默认参与 Responses / Codex 兼容主链路；列表顺序影响调度优先级。</p>
           </div>
         </div>
 
@@ -1076,22 +1292,14 @@
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel list-panel">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">Responses 设置</h2>
-            <p class="panel-note">模型别名和测试请求只作用于 OpenAI token 主链路。</p>
+            <h2 class="panel-title">当前 OpenAI token 配置</h2>
+            <p class="panel-note">token 默认启用，不需要手动切换；使用排序按钮调整组内优先级。</p>
           </div>
         </div>
-        <div class="field">
-          <label class="field-label" for="responsesModelAliasesInput">responses.model_aliases</label>
-          <textarea id="responsesModelAliasesInput" spellcheck="false" placeholder='{
-  "gpt-5.2": "gpt-5.5"
-}'></textarea>
-        </div>
-        <div class="actions">
-          <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
-        </div>
+        <div id="openAiConfigs"></div>
       </div>
     </section>
 
@@ -1099,7 +1307,7 @@
       <div class="panel-head">
         <div>
           <h2 class="panel-title">Claude token</h2>
-          <p class="panel-note">Claude token 只负责 `/v1/messages` 原样转发。请使用命令行登录脚本追加配置。</p>
+          <p class="panel-note">Claude token 默认参与 `/v1/messages` 主链路。上方是登录命令，下方是当前配置列表。</p>
         </div>
       </div>
       <div class="endpoint-card">
@@ -1112,6 +1320,12 @@
         <code class="mono endpoint-value">npm run claude:install-login -- --token airouter-oauth-xxx --base-url http://localhost:3009</code>
         <div class="endpoint-meta">把本地 fake token 写入 Claude Code 本地凭证，并补齐交互模式需要的全局 onboarding 状态；安装前会自动备份原登录态。</div>
       </div>
+      <div class="panel-head compact">
+        <div>
+          <h3 class="panel-title">当前 Claude token 配置</h3>
+          <p class="panel-note">token 默认启用，不需要手动切换；使用排序按钮调整组内优先级。</p>
+        </div>
+      </div>
       <div id="claudeConfigs"></div>
     </section>
 
@@ -1119,7 +1333,7 @@
       <div class="panel-head">
         <div>
           <h2 class="panel-title">Fallback apikey</h2>
-          <p class="panel-note">apikey 只在对应 token 链路不可用时兜底；不会作为主链路抢占 token。</p>
+          <p class="panel-note">上方新增 fallback apikey，下方查看当前 fallback。apikey 只在对应 token 链路不可用时兜底。</p>
         </div>
       </div>
       <div class="form-grid">
@@ -1155,17 +1369,19 @@
       </div>
       <div class="panel-head compact">
         <div>
-          <h3 class="panel-title">已配置 fallback</h3>
+          <h3 class="panel-title">当前 fallback apikey 配置</h3>
+          <p class="panel-note">apikey 可以设为兜底焦点；使用排序按钮调整组内优先级。</p>
         </div>
       </div>
       <div id="fallbackConfigs"></div>
     </section>
 
-    <section class="admin-page side-stack" data-page="access">
+    <section class="admin-page settings-grid" data-page="settings">
+      <div class="side-stack">
       <aside class="panel">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">访问控制</h2>
+            <h2 class="panel-title">入口 apikey</h2>
             <p class="panel-note">入口 apikey 为空时，请求不会校验 apikey。</p>
           </div>
           <div class="panel-tools">
@@ -1178,10 +1394,29 @@
         <div id="apiKeysList" class="key-list"></div>
       </aside>
 
+      <aside class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">Responses 高级设置</h2>
+            <p class="panel-note">模型别名和测试请求只作用于 OpenAI token 主链路。</p>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label" for="responsesModelAliasesInput">responses.model_aliases</label>
+          <textarea id="responsesModelAliasesInput" spellcheck="false" placeholder='{
+  "gpt-5.2": "gpt-5.5"
+}'></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
+        </div>
+      </aside>
+      </div>
+
       <aside class="panel" id="proxySettingsPanel">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">代理入口</h2>
+            <h2 class="panel-title">服务端口 / 代理端口</h2>
             <p class="panel-note">配置本地服务端口和访问上游时使用的本地代理端口。</p>
           </div>
         </div>
@@ -1208,11 +1443,14 @@
     </section>
 
     <div id="responsesSettingsSection" class="hidden-settings" hidden></div>
+    </section>
   </main>
 
   <script src="/config-admin.js"></script>
   <script>
     const cardsEl = document.getElementById('cards');
+    const upstreamMetricsEl = document.getElementById('upstreamMetrics');
+    const openAiConfigsEl = document.getElementById('openAiConfigs');
     const routeLanesEl = document.getElementById('routeLanes');
     const claudeConfigsEl = document.getElementById('claudeConfigs');
     const fallbackConfigsEl = document.getElementById('fallbackConfigs');
@@ -1245,6 +1483,8 @@
     const proxyPortInput = document.getElementById('proxyPortInput');
     const proxyV1Url = document.getElementById('proxyV1Url');
     const proxyEndpointMeta = document.getElementById('proxyEndpointMeta');
+    const currentPageTitle = document.getElementById('currentPageTitle');
+    const currentPageSubtitle = document.getElementById('currentPageSubtitle');
     const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
     const RUNTIME_SYNC_INTERVAL_MS = 10000;
@@ -1291,21 +1531,48 @@
       apikeys: new Set(),
     };
     const pageMap = {
-      '/admin/configs': 'routes',
-      '/admin/configs/': 'routes',
-      '/admin/configs/routes': 'routes',
+      '/admin/configs': 'upstreams',
+      '/admin/configs/': 'upstreams',
+      '/admin/configs/upstreams': 'upstreams',
+      '/admin/configs/routes': 'upstreams',
       '/admin/configs/openai': 'openai',
       '/admin/configs/claude': 'claude',
       '/admin/configs/fallbacks': 'fallbacks',
-      '/admin/configs/access': 'access',
+      '/admin/configs/settings': 'settings',
+      '/admin/configs/access': 'settings',
+    };
+    const pageTitles = {
+      upstreams: {
+        title: '上游配置',
+        subtitle: '默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。',
+      },
+      openai: {
+        title: 'OpenAI token',
+        subtitle: '上面新增 OpenAI token；下面查看当前 token 配置。',
+      },
+      claude: {
+        title: 'Claude token',
+        subtitle: '上面查看登录命令；下面查看当前 Claude token 配置。',
+      },
+      fallbacks: {
+        title: 'Fallback apikey',
+        subtitle: '上面新增 fallback apikey；下面查看当前 fallback 配置。',
+      },
+      settings: {
+        title: '系统设置',
+        subtitle: '管理入口 apikey、Responses 高级设置、服务端口和代理端口。',
+      },
     };
 
     function getCurrentAdminPage() {
-      return pageMap[window.location.pathname] || 'routes';
+      return pageMap[window.location.pathname] || 'upstreams';
     }
 
     function setupPageNavigation() {
       const currentPage = getCurrentAdminPage();
+      const pageTitle = pageTitles[currentPage] || pageTitles.upstreams;
+      currentPageTitle.textContent = pageTitle.title;
+      currentPageSubtitle.textContent = pageTitle.subtitle;
       document.querySelectorAll('[data-page]').forEach(section => {
         section.hidden = section.dataset.page !== currentPage;
       });
@@ -1409,7 +1676,7 @@
         parts.push(`apikey ${counts.apikeys}`);
       }
 
-      batchToolbarEl.hidden = total === 0 && problemIndexes.length === 0;
+      batchToolbarEl.hidden = false;
       batchSelectionSummaryEl.textContent = total > 0 ? `已选择 ${parts.join('、')}` : '已选择 0 项';
       batchSelectProblemConfigsButton.disabled = problemIndexes.length === 0;
       batchEnableSelectedButton.disabled = counts.disabled_configs === 0;
@@ -1491,6 +1758,7 @@
       if (options.refreshStatic !== false) {
         renderHeader(data);
       }
+      renderUpstreamMetrics(data);
       renderRolePages(data);
       renderCards(data);
       setupPageNavigation();
@@ -1586,11 +1854,11 @@
       const tags = [];
 
       if (item.dispatch_role === 'openai_token_focus') {
-        tags.push('<span class="badge active">OpenAI 焦点</span>');
+        tags.push('<span class="badge ok">OpenAI 主链路</span>');
       } else if (item.dispatch_role === 'openai_token') {
         tags.push('<span class="badge ok">OpenAI 主链路</span>');
       } else if (item.dispatch_role === 'claude_token_focus') {
-        tags.push('<span class="badge active">Claude 焦点</span>');
+        tags.push('<span class="badge ok">Claude 主链路</span>');
       } else if (item.dispatch_role === 'claude_token') {
         tags.push('<span class="badge ok">Claude 主链路</span>');
       } else if (item.dispatch_role === 'apikey_fallback_focus') {
@@ -1609,14 +1877,6 @@
     }
 
     function getActivateButtonText(item) {
-      if (item.dispatch_role === 'openai_token_focus') {
-        return '当前焦点';
-      }
-
-      if (item.dispatch_role === 'claude_token_focus') {
-        return '当前焦点';
-      }
-
       if (item.dispatch_role === 'apikey_fallback_focus') {
         return '兜底焦点';
       }
@@ -1625,7 +1885,7 @@
         return '设为兜底焦点';
       }
 
-      return item.item && item.item.type === 'claude_token' ? '设为 Claude 焦点' : '设为 OpenAI 焦点';
+      return '默认主链路';
     }
 
     function renderRuntimeTags(runtime) {
@@ -1733,6 +1993,10 @@
     }
 
     function renderRouteLanes(data) {
+      if (!routeLanesEl) {
+        return;
+      }
+
       const lanes = getRouteLanes(data || {});
       routeLanesEl.innerHTML = lanes.map(lane => `
         <div class="route-lane">
@@ -1747,6 +2011,166 @@
       `).join('');
     }
 
+    function getConfigDisplayGroup(item) {
+      const type = getConfigType(item);
+      if (type === 'token') {
+        return {
+          key: 'openai-token',
+          order: 0,
+          label: 'OpenAI token（默认启用，优先走 token）',
+        };
+      }
+
+      if (type === 'claude_token') {
+        return {
+          key: 'claude-token',
+          order: 1,
+          label: 'Claude token（默认启用，负责 /v1/messages 主链路）',
+        };
+      }
+
+      if (type === 'apikey') {
+        return {
+          key: 'fallback-apikey',
+          order: 2,
+          label: 'Fallback apikey（token 不可用时兜底，可设置兜底焦点）',
+        };
+      }
+
+      return {
+        key: 'other',
+        order: 3,
+        label: '其他配置',
+      };
+    }
+
+    function sortConfigsByTypeThenOrder(configs) {
+      return [...configs].sort((left, right) => {
+        const leftGroup = getConfigDisplayGroup(left);
+        const rightGroup = getConfigDisplayGroup(right);
+        if (leftGroup.order !== rightGroup.order) {
+          return leftGroup.order - rightGroup.order;
+        }
+
+        return left.index - right.index;
+      });
+    }
+
+    function renderGroupedConfigRows(configs, renderRow) {
+      let currentGroupKey = '';
+      return sortConfigsByTypeThenOrder(configs).map(item => {
+        const group = getConfigDisplayGroup(item);
+        const groupHeader = group.key === currentGroupKey
+          ? ''
+          : `<tr class="group-row"><td colspan="6">${escapeHtml(group.label)}</td></tr>`;
+        currentGroupKey = group.key;
+        return `${groupHeader}${renderRow(item)}`;
+      }).join('');
+    }
+
+    function renderGroupedConfigCards(data, configs, renderCard) {
+      let currentGroupKey = '';
+      return `<div class="config-group-list">${sortConfigsByTypeThenOrder(configs).map(item => {
+        const group = getConfigDisplayGroup(item);
+        const groupHeader = group.key === currentGroupKey
+          ? ''
+          : `${currentGroupKey ? '</div></section>' : ''}<section class="config-group"><div class="config-group-title">${escapeHtml(group.label)}</div><div class="config-card-list">`;
+        currentGroupKey = group.key;
+        return `${groupHeader}${renderCard(item, data)}`;
+      }).join('')}${currentGroupKey ? '</div></section>' : ''}</div>`;
+    }
+
+    function renderConfigActions(item, allConfigs, options = {}) {
+      const includeActivate = options.includeActivate !== false && getConfigType(item) === 'apikey';
+      const canMovePrevious = item.index > 0;
+      const canMoveNext = item.index < allConfigs.length - 1;
+
+      return `
+        <div class="config-card-actions">
+          <div class="action-row action-row-sort">
+            <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
+            <button class="secondary" type="button" data-action="move-previous" data-index="${item.index}" ${canMovePrevious ? '' : 'disabled'}>上移</button>
+            <button class="secondary" type="button" data-action="move-next" data-index="${item.index}" ${canMoveNext ? '' : 'disabled'}>下移</button>
+            <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${canMovePrevious ? '' : 'disabled'}>置顶</button>
+          </div>
+          <div class="action-row action-row-state">
+            ${includeActivate
+              ? `<button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.dispatch_role === 'apikey_fallback_focus' ? 'disabled' : ''}>${getActivateButtonText(item)}</button>`
+              : ''}
+            <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
+            <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderConfigCard(data, item, allConfigs, options = {}) {
+      const role = getConfigRole(item);
+      const selectionHtml = options.selectionAction
+        ? `<div class="config-card-select"><input type="checkbox" data-action="${options.selectionAction}" data-index="${item.index}" ${options.selected ? 'checked' : ''}></div>`
+        : '';
+      const description = item.item && item.item.description ? item.item.description : '-';
+
+      return `
+        <article class="config-card${selectionHtml ? ' with-selection' : ''}">
+          ${selectionHtml}
+          <div class="config-card-main">
+            <div class="config-card-title">
+              <span>配置 #${item.index + 1}</span>
+              <span class="badge ${role.tone === 'ok' || role.tone === 'active' ? 'ok' : 'muted'}">${escapeHtml(role.lane)}</span>
+            </div>
+            <div>${runtimeBadges(item)}</div>
+          </div>
+          <div class="config-card-meta">
+            <div class="config-card-label">${escapeHtml(getConfigIdentityColumnLabel(data))}</div>
+            <div class="config-card-value mono">${escapeHtml(getConfigIdentityValue(data, item))}</div>
+            <div class="config-card-label">description</div>
+            <div class="config-card-value">${escapeHtml(description)}</div>
+          </div>
+          <div class="config-card-summary">
+            <div class="config-card-label">运行态</div>
+            ${renderSummary(item.runtime)}
+          </div>
+          ${renderConfigActions(item, allConfigs, options)}
+        </article>
+      `;
+    }
+
+    function renderUpstreamMetrics(data) {
+      if (!upstreamMetricsEl) {
+        return;
+      }
+
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      const openAiCount = configs.filter(item => getConfigType(item) === 'token').length;
+      const claudeCount = configs.filter(item => getConfigType(item) === 'claude_token').length;
+      const fallbackCount = configs.filter(item => getConfigType(item) === 'apikey').length;
+      const problemCount = configs.filter(item => hasRuntimeProblem(item && item.runtime)).length;
+
+      upstreamMetricsEl.innerHTML = `
+        <div class="metric-card">
+          <div class="metric-label"><span>OpenAI token</span><span>MAIN</span></div>
+          <div class="metric-value">${openAiCount}</div>
+          <div class="metric-note">默认启用，优先走 token。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label"><span>Claude token</span><span>MAIN</span></div>
+          <div class="metric-value">${claudeCount}</div>
+          <div class="metric-note">负责 /v1/messages 主链路。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label"><span>Fallback apikey</span><span>FALLBACK</span></div>
+          <div class="metric-value">${fallbackCount}</div>
+          <div class="metric-note">只在 token 不可用时兜底。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label"><span>运行态异常</span><span>SYNC</span></div>
+          <div class="metric-value">${problemCount}</div>
+          <div class="metric-note">可选择异常配置后批量处理。</div>
+        </div>
+      `;
+    }
+
     function renderEnabledConfigs(data) {
       const configs = Array.isArray(data && data.configs) ? data.configs : [];
       if (!configs.length) {
@@ -1754,57 +2178,10 @@
         return '<div class="empty">当前没有启用配置项。</div>';
       }
 
-      return `
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th class="selection-col">
-                  选择
-                </th>
-                <th class="config-col">配置</th>
-                <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
-                <th>description</th>
-                <th>摘要</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${configs.map(item => `
-                <tr>
-                  <td class="selection-cell">
-                    <input type="checkbox" data-action="toggle-select-config" data-index="${item.index}" ${selectedState.configs.has(item.index) ? 'checked' : ''}>
-                  </td>
-                  <td>
-                    <div class="config-name">
-                      <div>配置 #${item.index + 1}</div>
-                      <div>${runtimeBadges(item)}</div>
-                    </div>
-                  </td>
-                  <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
-                  <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
-                  <td>${renderSummary(item.runtime)}</td>
-                  <td class="action-cell">
-                    <div class="action-stack">
-                      <div class="action-row action-row-sort">
-                        <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
-                        <button class="secondary" type="button" data-action="move-previous" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>上移</button>
-                        <button class="secondary" type="button" data-action="move-next" data-index="${item.index}" ${item.index >= configs.length - 1 ? 'disabled' : ''}>下移</button>
-                        <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
-                      </div>
-                      <div class="action-row action-row-state">
-                        <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${getActivateButtonText(item)}</button>
-                        <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
-                        <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
-                      </div>
-                    </div>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      `;
+      return renderGroupedConfigCards(data, configs, item => renderConfigCard(data, item, configs, {
+        selectionAction: 'toggle-select-config',
+        selected: selectedState.configs.has(item.index),
+      }));
     }
 
     function renderDisabledConfigs(data) {
@@ -1822,43 +2199,36 @@
               <p class="panel-note">停用配置不会参与请求调度、额度刷新或 fallback，只保留在配置文件里。</p>
             </div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th class="selection-col">
-                    选择
-                  </th>
-                  <th class="config-col">配置</th>
-                  <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
-                  <th>description</th>
-                  <th>状态</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${disabledConfigs.map(item => `
-                  <tr>
-                    <td class="selection-cell">
-                      <input type="checkbox" data-action="toggle-select-disabled-config" data-index="${item.index}" ${selectedState.disabled_configs.has(item.index) ? 'checked' : ''}>
-                    </td>
-                    <td>
-                      <div class="config-name">
-                        <div>停用 #${item.index + 1}</div>
-                        <div><span class="badge note">已停用</span></div>
-                      </div>
-                    </td>
-                    <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
-                    <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
-                    <td class="cell-text">${escapeHtml(item.item.disabled_status || '服务不可见')}</td>
-                    <td class="action-cell">
-                      <button class="secondary" type="button" data-action="enable" data-index="${item.index}">启用</button>
-                      <button class="danger" type="button" data-action="delete-disabled" data-index="${item.index}">删除</button>
-                    </td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
+          <div class="config-card-list">
+            ${disabledConfigs.map(item => `
+              <article class="config-card with-selection">
+                <div class="config-card-select">
+                  <input type="checkbox" data-action="toggle-select-disabled-config" data-index="${item.index}" ${selectedState.disabled_configs.has(item.index) ? 'checked' : ''}>
+                </div>
+                <div class="config-card-main">
+                  <div class="config-card-title">
+                    <span>停用 #${item.index + 1}</span>
+                    <span class="badge note">已停用</span>
+                  </div>
+                </div>
+                <div class="config-card-meta">
+                  <div class="config-card-label">${escapeHtml(getConfigIdentityColumnLabel(data))}</div>
+                  <div class="config-card-value mono">${escapeHtml(getConfigIdentityValue(data, item))}</div>
+                  <div class="config-card-label">description</div>
+                  <div class="config-card-value">${escapeHtml(item.item.description || '-')}</div>
+                </div>
+                <div class="config-card-field">
+                  <div class="config-card-label">状态</div>
+                  <div class="config-card-value">${escapeHtml(item.item.disabled_status || '服务不可见')}</div>
+                </div>
+                <div class="config-card-actions">
+                  <div class="action-row action-row-state">
+                    <button class="secondary" type="button" data-action="enable" data-index="${item.index}">启用</button>
+                    <button class="danger" type="button" data-action="delete-disabled" data-index="${item.index}">删除</button>
+                  </div>
+                </div>
+              </article>
+            `).join('')}
           </div>
         </div>
       `;
@@ -1881,6 +2251,10 @@
     }
 
     function renderFilteredConfigs(targetEl, data, predicate, emptyText) {
+      if (!targetEl) {
+        return;
+      }
+
       const allConfigs = Array.isArray(data && data.configs) ? data.configs : [];
       const configs = allConfigs.filter(item => predicate(item && item.item ? item.item : item));
       if (!configs.length) {
@@ -1889,55 +2263,20 @@
       }
 
       targetEl.innerHTML = `
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th class="config-col">配置</th>
-                <th class="account-id-col">身份</th>
-                <th>description</th>
-                <th>摘要</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${configs.map(item => {
-                const role = getConfigRole(item);
-                return `
-                  <tr>
-                    <td>
-                      <div class="config-name">
-                        <div>配置 #${item.index + 1}</div>
-                        <div><span class="badge ${role.priority === '主链路' ? 'ok' : 'muted'}">${escapeHtml(role.lane)}</span></div>
-                      </div>
-                    </td>
-                    <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
-                    <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
-                    <td>${renderSummary(item.runtime)}</td>
-                    <td class="action-cell">
-                      <div class="action-stack">
-                        <div class="action-row action-row-sort">
-                          <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
-                          <button class="secondary" type="button" data-action="move-previous" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>上移</button>
-                          <button class="secondary" type="button" data-action="move-next" data-index="${item.index}" ${item.index >= allConfigs.length - 1 ? 'disabled' : ''}>下移</button>
-                        </div>
-                        <div class="action-row action-row-state">
-                          <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
-                          <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
-                `;
-              }).join('')}
-            </tbody>
-          </table>
+        <div class="config-card-list">
+          ${configs.map(item => renderConfigCard(data, item, allConfigs)).join('')}
         </div>
       `;
     }
 
     function renderRolePages(data) {
       renderRouteLanes(data);
+      renderFilteredConfigs(
+        openAiConfigsEl,
+        data,
+        item => getConfigType(item) === 'token',
+        '当前没有 OpenAI token。请先粘贴 AuthSession JSON 新增配置。'
+      );
       renderFilteredConfigs(
         claudeConfigsEl,
         data,
@@ -2373,9 +2712,7 @@
       const activatedType = activated && activated.item ? activated.item.type : '';
       setMessage('info', activatedType === 'apikey'
         ? '已设为 fallback apikey 焦点；token 可用时仍优先走 token。'
-        : activatedType === 'claude_token'
-          ? '已设为 Claude token 焦点；/v1/messages 会优先使用 Claude token。'
-          : '已设为 OpenAI token 焦点；/v1/responses 会优先使用 OpenAI token。');
+        : 'token 主链路默认启用，无需手动切换。');
     }
 
     async function moveConfigUp(index) {

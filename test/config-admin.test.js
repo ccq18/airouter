@@ -40,39 +40,39 @@ const {
   configSupports,
 } = require('../public/config-admin.js');
 
-test('config admin exposes role pages and keeps Responses settings on the OpenAI page', () => {
+test('config admin exposes role pages and keeps Responses settings on the settings page', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
-  const openAiPageStart = html.indexOf('data-page="openai"');
-  const claudePageStart = html.indexOf('data-page="claude"');
-  const openAiPage = openAiPageStart >= 0 && claudePageStart > openAiPageStart
-    ? html.slice(openAiPageStart, claudePageStart)
+  const settingsPageStart = html.indexOf('data-page="settings"');
+  const hiddenSettingsStart = html.indexOf('<div id="responsesSettingsSection"', settingsPageStart);
+  const settingsPage = settingsPageStart >= 0 && hiddenSettingsStart > settingsPageStart
+    ? html.slice(settingsPageStart, hiddenSettingsStart)
     : '';
 
-  assert.match(html, /data-page-link="routes"/);
+  assert.match(html, /data-page-link="upstreams"/);
   assert.match(html, /data-page-link="openai"/);
   assert.match(html, /data-page-link="claude"/);
   assert.match(html, /data-page-link="fallbacks"/);
-  assert.match(html, /data-page-link="access"/);
-  assert.match(serverSource, /\/admin\/configs\/:page\(routes\|openai\|claude\|fallbacks\|access\)/);
-  assert.ok(openAiPage, 'OpenAI token page should be present');
-  assert.match(openAiPage, /Responses 设置/);
-  assert.match(openAiPage, /saveResponsesSettingsButton/);
-  assert.match(openAiPage, /responsesModelAliasesInput/);
+  assert.match(html, /data-page-link="settings"/);
+  assert.match(serverSource, /\/admin\/configs\/:page\(upstreams\|openai\|claude\|fallbacks\|settings\|routes\|access\)/);
+  assert.ok(settingsPage, 'settings page should be present');
+  assert.match(settingsPage, /Responses 高级设置/);
+  assert.match(settingsPage, /saveResponsesSettingsButton/);
+  assert.match(settingsPage, /responsesModelAliasesInput/);
   assert.match(html, /id="responsesSettingsSection" class="hidden-settings" hidden><\/div>/);
 });
 
-test('config admin shows route overview before role-specific edit pages', () => {
+test('config admin uses upstreams as the default page before role-specific edit pages', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const messageIndex = html.indexOf('<div id="message"');
-  const routeOverviewIndex = html.indexOf('id="routeLanes"');
+  const upstreamsPageIndex = html.indexOf('data-page="upstreams"');
   const upstreamIndex = html.indexOf('<h2 class="panel-title">上游配置</h2>');
   const openAiPageIndex = html.indexOf('data-page="openai"');
   const addConfigIndex = html.indexOf('<h2 class="panel-title">新增 OpenAI token</h2>');
 
   assert.ok(messageIndex >= 0, 'message area should be present');
-  assert.ok(routeOverviewIndex > messageIndex, 'route overview should follow the message area');
-  assert.ok(upstreamIndex > routeOverviewIndex, 'upstream config should follow route overview');
+  assert.ok(upstreamsPageIndex > messageIndex, 'upstreams page should follow the message area');
+  assert.ok(upstreamIndex > upstreamsPageIndex, 'upstream config should be inside the upstreams page');
   assert.ok(openAiPageIndex > upstreamIndex, 'role-specific edit pages should appear after route overview');
   assert.ok(addConfigIndex > upstreamIndex, 'OpenAI token add panel should appear after route overview');
 });
@@ -83,8 +83,8 @@ test('config admin exposes manual runtime config activation controls', () => {
   assert.match(html, /data-action="activate"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
   assert.match(html, /已设为 fallback apikey 焦点/);
-  assert.match(html, /已设为 Claude token 焦点/);
-  assert.match(html, /已设为 OpenAI token 焦点/);
+  assert.match(html, /token 主链路默认启用，无需手动切换/);
+  assert.match(html, /getConfigType\(item\) === 'apikey'/);
 });
 
 test('config admin exposes enable and disable controls for soft-deleted configs', () => {
@@ -108,6 +108,10 @@ test('config admin exposes batch delete controls for configs, disabled configs, 
   assert.match(html, /id="batchSelectProblemConfigsButton"/);
   assert.match(html, /data-action="batch-select-problem-configs"/);
   assert.match(html, /选择异常配置/);
+  assert.match(html, /id="batchToolbar" class="batch-toolbar"/);
+  assert.doesNotMatch(html, /id="batchToolbar" class="batch-toolbar" hidden/);
+  assert.match(html, /batchToolbarEl\.hidden = false/);
+  assert.doesNotMatch(html, /batchToolbarEl\.hidden = total === 0 && problemIndexes\.length === 0/);
   assert.match(html, /id="batchEnableSelectedButton"/);
   assert.match(html, /data-action="batch-enable-selected"/);
   assert.match(html, /批量启用所选/);
@@ -146,20 +150,22 @@ test('config admin exposes copy controls for config item JSON', () => {
   assert.doesNotMatch(copyFunction, /当前浏览器不支持剪贴板写入/);
 });
 
-test('config admin keeps the upstream config column compact after adding activation controls', () => {
+test('config admin renders upstream configs as grouped cards after adding activation controls', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
-  assert.match(html, /min-width:\s*1040px;/);
-  assert.match(html, /\.account-id-col,\s*\.account-id-cell\s*\{\s*width:\s*240px;\s*min-width:\s*240px;/);
-  assert.match(html, /\.account-id-cell\s*\{\s*white-space:\s*normal;\s*word-break:\s*break-word;\s*overflow-wrap:\s*anywhere;/);
-  assert.match(html, /\.action-cell\s*\{\s*width:\s*360px;\s*min-width:\s*360px;\s*white-space:\s*normal;/);
-  assert.match(html, /\.action-stack\s*\{\s*display:\s*grid;\s*gap:\s*6px;/);
+  assert.match(html, /class="config-group-list"/);
+  assert.match(html, /class="config-group-title"/);
+  assert.match(html, /class="config-card/);
+  assert.match(html, /\.config-card\s*\{\s*display:\s*grid;/);
+  assert.match(html, /\.config-card\.with-selection/);
+  assert.match(html, /\.config-card-actions\s*\{\s*display:\s*grid;\s*gap:\s*8px;/);
   assert.match(html, /\.action-row\s*\{\s*display:\s*flex;\s*flex-wrap:\s*nowrap;\s*gap:\s*6px;/);
+  assert.match(html, /renderGroupedConfigCards/);
 });
 
 test('config admin keeps all console controls after UI refresh', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
-  const accessControlStart = html.indexOf('<h2 class="panel-title">访问控制</h2>');
+  const accessControlStart = html.indexOf('<h2 class="panel-title">入口 apikey</h2>');
   const accessControlEnd = html.indexOf('<div id="responsesSettingsSection"', accessControlStart);
   const accessControlSection = accessControlStart >= 0 && accessControlEnd > accessControlStart
     ? html.slice(accessControlStart, accessControlEnd)
@@ -167,7 +173,8 @@ test('config admin keeps all console controls after UI refresh', () => {
 
   assert.match(html, /class="topbar"/);
   assert.doesNotMatch(html, /id="statusSummary"/);
-  assert.match(html, /class="console-grid admin-page"/);
+  assert.match(html, /class="section-stack admin-page"/);
+  assert.match(html, /class="admin-page settings-grid"/);
   assert.match(html, /id="addApiKeyButton"/);
   assert.match(html, /id="proxySettingsPanel"/);
   assert.match(html, /id="servicePortInput"/);
@@ -210,7 +217,6 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /data-action="move-up"/);
   assert.match(html, /data-action="move-previous"/);
   assert.match(html, /data-action="move-next"/);
-  assert.match(html, /class="action-stack"/);
   assert.match(html, /class="action-row action-row-sort"/);
   assert.match(html, /class="action-row action-row-state"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
@@ -527,10 +533,22 @@ test('hasRefreshTokenConfig detects token configs that can be refreshed', () => 
   }), false);
 });
 
-test('hasRuntimeProblem detects unavailable and failed runtime summaries', () => {
+test('hasRuntimeProblem detects explicit error markers but not unavailable state alone', () => {
   assert.equal(hasRuntimeProblem({
     runtime_summary: '可用=否 | 额度=unknown | 状态=额度检查失败 | 错误=request timeout',
+  }), false);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=额度检查失败 | 错误=quota check failed',
   }), true);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=认证失败',
+  }), true);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=401',
+  }), false);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=额度不可用',
+  }), false);
   assert.equal(hasRuntimeProblem({
     runtime_summary: '可用=是 | 额度=83%',
   }), false);
@@ -829,9 +847,9 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
       },
       {
         label: '健康状态',
-        value: '1 个异常',
-        tone: 'warn',
-        detail: '发现 timeout',
+        value: '未发现异常',
+        tone: 'ok',
+        detail: '基于当前运行态摘要',
       },
     ],
   );
