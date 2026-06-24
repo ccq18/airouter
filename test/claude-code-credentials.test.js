@@ -8,6 +8,7 @@ const {
   buildSharedClaudeCodeOAuthCredentials,
   getClaudeCodeKeychainServiceName,
   getGlobalClaudeConfigPath,
+  getSharedClaudeCodeLoginEnvConflicts,
   installSharedClaudeCodeLogin,
   restoreClaudeCodeLogin,
   updateGlobalConfigForSharedClaudeCodeLogin,
@@ -107,6 +108,10 @@ test('installSharedClaudeCodeLogin writes plaintext fallback credentials and res
       EXISTING: '1',
       ANTHROPIC_API_KEY: 'sk-old',
       ANTHROPIC_AUTH_TOKEN: 'auth-old',
+      CLAUDE_CODE_OAUTH_TOKEN: 'airouter-oauth-old',
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: 'refresh-old',
+      CLAUDE_CODE_OAUTH_SCOPES: 'user:inference',
+      CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '9',
       CLAUDE_CODE_USE_BEDROCK: '1',
       CLAUDE_CODE_USE_VERTEX: 'true',
       CLAUDE_CODE_USE_FOUNDRY: 'yes',
@@ -186,6 +191,10 @@ test('updateSettingsForSharedClaudeCodeLogin removes settings that disable Claud
       KEEP: 'yes',
       ANTHROPIC_API_KEY: 'sk-old',
       ANTHROPIC_AUTH_TOKEN: 'auth-old',
+      CLAUDE_CODE_OAUTH_TOKEN: 'airouter-oauth-old',
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: 'refresh-old',
+      CLAUDE_CODE_OAUTH_SCOPES: 'user:inference',
+      CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '9',
       CLAUDE_CODE_USE_BEDROCK: '1',
       CLAUDE_CODE_USE_VERTEX: '1',
       CLAUDE_CODE_USE_FOUNDRY: '1',
@@ -197,6 +206,22 @@ test('updateSettingsForSharedClaudeCodeLogin removes settings that disable Claud
       ANTHROPIC_BASE_URL: 'http://router.example:3009',
     },
   });
+});
+
+test('getSharedClaudeCodeLoginEnvConflicts detects shell vars that override shared login', () => {
+  assert.deepEqual(getSharedClaudeCodeLoginEnvConflicts({
+    ANTHROPIC_API_KEY: 'sk-old',
+    ANTHROPIC_AUTH_TOKEN: '',
+    CLAUDE_CODE_OAUTH_TOKEN: 'airouter-oauth-old',
+    CLAUDE_CODE_OAUTH_REFRESH_TOKEN: 'refresh-old',
+    CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: '10',
+    SAFE_TO_KEEP: 'yes',
+  }), [
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
+    'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  ]);
 });
 
 test('updateGlobalConfigForSharedClaudeCodeLogin marks onboarding complete and fills a default theme', () => {

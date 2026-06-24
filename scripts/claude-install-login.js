@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const {
+  getSharedClaudeCodeLoginEnvConflicts,
   installSharedClaudeCodeLogin,
   restoreClaudeCodeLogin,
   validateLocalClaudeAuthToken,
@@ -90,6 +91,18 @@ function describeStorage(storage) {
   return `${storage.serviceName} (${storage.accountName})`;
 }
 
+function printRuntimeEnvConflictWarning(conflicts) {
+  if (!Array.isArray(conflicts) || conflicts.length === 0) {
+    return;
+  }
+
+  console.warn('');
+  console.warn(`检测到当前 shell 仍设置了会覆盖 Claude Code 本地登录态的环境变量: ${conflicts.join(', ')}`);
+  console.warn('安装脚本已从 Claude Code settings.json 清理这些键，但无法修改当前 shell 环境。');
+  console.warn('启动 Claude Code 前请先执行:');
+  console.warn(`  unset ${conflicts.join(' ')}`);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -137,8 +150,9 @@ async function main() {
   if (installed.credentials.warning) {
     console.warn(installed.credentials.warning);
   }
+  printRuntimeEnvConflictWarning(getSharedClaudeCodeLoginEnvConflicts(process.env));
   console.log('');
-  console.log('验证建议: 重新打开终端，确保未设置 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 后运行 claude --debug-to-stderr。');
+  console.log('验证建议: 重新打开终端，确保未设置 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN 后运行 claude --debug-to-stderr。');
 }
 
 main().catch(err => {

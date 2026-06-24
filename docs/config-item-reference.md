@@ -201,7 +201,7 @@
 - 推荐共享登录态路径：服务端运行 `npm run claude:login` 生成 `local_auth_token` 后，在每台客户端运行 `npm run claude:install-login -- --token <local_auth_token> --base-url http://localhost:<port>`，把这枚本地 token 写入 Claude Code 本地凭证，并同步补齐 Claude 交互模式依赖的全局 onboarding 状态；安装前会自动备份原登录态，可用 `npm run claude:install-login -- --restore <backup-file>` 恢复
 - 也可以临时使用环境变量：`CLAUDE_CODE_OAUTH_TOKEN=<local_auth_token>`，并设置 `ANTHROPIC_BASE_URL=http://localhost:<port>`；但部分 Claude Code 交互式主请求可能优先读取本机登录态，因此共享登录态建议使用 `claude:install-login`
 - `request_auth_token_sha256s` 是可选入站鉴权哈希列表，仅用于兼容 Claude Code 交互式主请求从本机 Keychain 读取另一枚同登录态 OAuth token 的情况；共享登录态主路径不依赖它
-- 使用该模式时不要同时设置 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`，否则 Claude Code 可能切回外部 API key/auth token 分支
+- 使用该模式时不要同时设置 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，否则 Claude Code 可能切回外部 API key/auth token 分支，或让旧的 OAuth 环境变量覆盖已安装的共享登录态
 - 请求中的 `local_auth_token` 命中该配置时，Airouter 只会替换为这一条配置里的真实 `access_token`
 - 顶层 `apikeys` 开启本地入口校验时，`/v1/messages` 还会接受已配置 `claude_token.access_token` 或命中 `request_auth_token_sha256s` 的入站 token，用于兼容 Claude Code 交互式主请求从 Keychain 读取真实 OAuth token 的情况；普通 `/v1/*` OpenAI 兼容入口不接受该扩展鉴权
 - `airouter-oauth-` 前缀的本地 fake token 专用于 Claude OAuth；如果配置中没有对应可用 `claude_token`，请求会失败，不会进入 OpenAI/GPT 兼容转换链路

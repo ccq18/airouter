@@ -141,7 +141,7 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 
 Claude Messages 兼容入口。请求体使用 JSON。
 
-Airouter 会先使用可用的 `claude_token` 原样转发 Claude Messages 请求；没有可用 Claude token 时，才使用 `support` 包含 `claude` 的 `apikey` 原样转发。`claude_token` 用于 Claude Code OAuth 登录态：请求 Authorization 命中 `local_auth_token`、同一配置里的真实 `access_token`，或命中 `request_auth_token_sha256s` 哈希列表时，会绑定到该配置并替换为真实 Claude OAuth Bearer token 转发。共享 Claude Code 登录态时，客户端可用 `npm run claude:install-login -- --token <local_auth_token> --base-url <Airouter 地址>` 把 `local_auth_token` 写入 Claude Code 本地凭证，并补齐交互模式依赖的全局 onboarding 状态，使交互模式主请求也使用这枚本地 token。没有可用 Claude 直转上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 OpenAI token 配置项；OpenAI token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
+Airouter 会先使用可用的 `claude_token` 原样转发 Claude Messages 请求；没有可用 Claude token 时，才使用 `support` 包含 `claude` 的 `apikey` 原样转发。`claude_token` 用于 Claude Code OAuth 登录态：请求 Authorization 命中 `local_auth_token`、同一配置里的真实 `access_token`，或命中 `request_auth_token_sha256s` 哈希列表时，会绑定到该配置并替换为真实 Claude OAuth Bearer token 转发。共享 Claude Code 登录态时，客户端可用 `npm run claude:install-login -- --token <local_auth_token> --base-url <Airouter 地址>` 把 `local_auth_token` 写入 Claude Code 本地凭证，并补齐交互模式依赖的全局 onboarding 状态，使交互模式主请求也使用这枚本地 token；启动 Claude Code 的 shell 里不要残留 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，否则这些环境变量会覆盖本地登录态。没有可用 Claude 直转上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 OpenAI token 配置项；OpenAI token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
 
 `/cpa/v1/messages` 是同一入口的 CLIProxyAPI 风格前缀别名，调度行为与 `/v1/messages` 一致，但转换到 Responses 时会启用 CPA 风格请求体规范化。
 

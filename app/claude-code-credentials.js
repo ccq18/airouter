@@ -13,9 +13,20 @@ const SECURITY_STDIN_LINE_LIMIT = 4096 - 64;
 const SHARED_LOGIN_SETTINGS_ENV_REMOVALS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
+  'CLAUDE_CODE_OAUTH_SCOPES',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
+];
+const SHARED_LOGIN_RUNTIME_ENV_CONFLICTS = [
+  ...SHARED_LOGIN_SETTINGS_ENV_REMOVALS,
+  'ANTHROPIC_API_KEY_FILE_DESCRIPTOR',
+  'ANTHROPIC_AUTH_TOKEN_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CCR_OAUTH_TOKEN_FILE',
 ];
 const SHARED_LOGIN_SETTINGS_REMOVALS = [
   'apiKeyHelper',
@@ -403,6 +414,11 @@ function updateGlobalConfigForSharedClaudeCodeLogin(globalConfig) {
   return next;
 }
 
+function getSharedClaudeCodeLoginEnvConflicts(env = process.env) {
+  return SHARED_LOGIN_RUNTIME_ENV_CONFLICTS
+    .filter(key => normalizeString(env[key]));
+}
+
 function createBackupPayload({
   storageInfo,
   credentialsData,
@@ -587,6 +603,7 @@ module.exports = {
   SECURITY_STDIN_LINE_LIMIT,
   SHARED_LOGIN_SETTINGS_ENV_REMOVALS,
   SHARED_LOGIN_SETTINGS_REMOVALS,
+  SHARED_LOGIN_RUNTIME_ENV_CONFLICTS,
   SHARED_LOGIN_SCOPES,
   buildSharedClaudeCodeCredentialsData,
   buildSharedClaudeCodeOAuthCredentials,
@@ -597,6 +614,7 @@ module.exports = {
   getCredentialsStorageInfo,
   getPlaintextCredentialsPath,
   getSettingsPath,
+  getSharedClaudeCodeLoginEnvConflicts,
   installSharedClaudeCodeLogin,
   readBackupPayload,
   restoreClaudeCodeLogin,
