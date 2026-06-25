@@ -1267,7 +1267,8 @@ test('server does not mark claude_token unavailable after upstream failures', ()
 test('server does not fallback to OpenAI configs for unbound local claude auth tokens', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   assert.match(source, /LOCAL_CLAUDE_AUTH_TOKEN_PREFIX\s*=\s*'airouter-oauth-'/);
-  assert.match(source, /isRuntimeConfigEnabled\(boundClaudeTokenConfig\)/);
+  assert.match(source, /const matchedClaudeTokenConfig = accountManager\.findConfig\(item => isMatchingClaudeTokenConfig\(item\) && isRuntimeConfigAvailable\(item\)\)/);
+  assert.doesNotMatch(source, /isRuntimeConfigEnabled\(boundClaudeTokenConfig\)/);
   assert.match(source, /item\.access_token === localAuthToken/);
 
   const boundGuardIndex = source.indexOf('if (boundClaudeTokenConfig)');
@@ -1277,6 +1278,41 @@ test('server does not fallback to OpenAI configs for unbound local claude auth t
   assert.ok(boundGuardIndex >= 0, 'bound claude token guard should exist');
   assert.ok(localTokenGuardIndex > boundGuardIndex, 'unbound local token guard should run after bound token lookup');
   assert.ok(tokenFallbackIndex > localTokenGuardIndex, 'OpenAI/token fallback should run after local token guard');
+});
+
+test('server keeps OpenAI and Claude apikey fallback focus separate', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+
+  assert.match(source, /OPENAI_APIKEY_STATIC_POOL\s*=\s*'openai_apikey'/);
+  assert.match(source, /CLAUDE_APIKEY_STATIC_POOL\s*=\s*'claude_apikey'/);
+  assert.match(
+    source,
+    /acquireAvailableStaticConfigLease\(\s*manager,\s*reason,\s*isGptApiKeyProxyConfig,\s*sessionKey,\s*excludedConfigs,\s*OPENAI_APIKEY_STATIC_POOL\s*\)/,
+  );
+  assert.match(
+    source,
+    /acquireAvailableStaticConfigLease\(\s*accountManager,\s*reason,\s*isClaudeApiKeyConfig,\s*sessionKey,\s*excludedConfigs,\s*CLAUDE_APIKEY_STATIC_POOL\s*\)/,
+  );
+});
+
+test('server selects claude_token configs by availability without moving the shared active config', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const acquireStart = source.indexOf('function acquireClaudeMessagesConfig(');
+  const acquireEnd = source.indexOf('return createClaudeMessagesHandler({', acquireStart);
+  const acquireBody = source.slice(acquireStart, acquireEnd);
+
+  assert.match(
+    acquireBody,
+    /accountManager\.findConfig\(item => isMatchingClaudeTokenConfig\(item\) && isRuntimeConfigAvailable\(item\)\)/,
+  );
+  assert.match(
+    acquireBody,
+    /const claudeTokenLease = acquireFirstAvailableStaticConfigLease\(accountManager, isClaudeTokenConfig, sessionKey, excludedConfigs\)/,
+  );
+  assert.doesNotMatch(
+    acquireBody,
+    /acquireAvailableStaticConfigLease\(accountManager,\s*reason,\s*isClaudeTokenConfig/,
+  );
 });
 
 test('createClaudeMessagesHandler reports direct claude apikey retryable upstream failures', async () => {

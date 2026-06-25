@@ -112,6 +112,8 @@ const LOCAL_ONLY_HEADER_PREFIXES = [
     'x-admin-'
 ];
 const LOCAL_CLAUDE_AUTH_TOKEN_PREFIX = 'airouter-oauth-';
+const OPENAI_APIKEY_STATIC_POOL = 'openai_apikey';
+const CLAUDE_APIKEY_STATIC_POOL = 'claude_apikey';
 const SESSION_KEY_HEADERS = [
     'x-airouter-session-id',
     'session-id',
@@ -522,10 +524,6 @@ function isRuntimeConfigAvailable(item) {
     return Boolean(item && item.runtime && item.runtime.enabled && item.runtime.available);
 }
 
-function isRuntimeConfigEnabled(item) {
-    return Boolean(item && item.runtime && item.runtime.enabled);
-}
-
 function isLocalClaudeAuthToken(value) {
     return typeof value === 'string' && value.startsWith(LOCAL_CLAUDE_AUTH_TOKEN_PREFIX);
 }
@@ -581,8 +579,39 @@ function createStaticConfigLease(config, sessionKey = '') {
     };
 }
 
-function acquireAvailableStaticConfigLease(manager, reason, predicate, sessionKey = '', excludedConfigs = []) {
+function acquireFirstAvailableStaticConfigLease(manager, predicate, sessionKey = '', excludedConfigs = []) {
+    if (!manager || typeof manager.findConfig !== 'function') {
+        return null;
+    }
+
+    const config = manager.findConfig(item => (
+        predicate(item) &&
+        !isExcludedRuntimeConfig(item, excludedConfigs) &&
+        isRuntimeConfigAvailable(item)
+    ));
+
+    return config ? createStaticConfigLease(config, sessionKey) : null;
+}
+
+function acquireAvailableStaticConfigLease(manager, reason, predicate, sessionKey = '', excludedConfigs = [], poolKey = 'default') {
     const isCandidate = item => predicate(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+    if (
+        typeof manager.getActiveStaticConfig === 'function' &&
+        typeof manager.ensureActiveStaticConfig === 'function'
+    ) {
+        const currentConfig = manager.getActiveStaticConfig(poolKey, isCandidate);
+        if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
+            return createStaticConfigLease(currentConfig, sessionKey);
+        }
+
+        const nextConfig = manager.ensureActiveStaticConfig(poolKey, reason, isCandidate);
+        if (nextConfig && isRuntimeConfigAvailable(nextConfig)) {
+            return createStaticConfigLease(nextConfig, sessionKey);
+        }
+
+        return null;
+    }
+
     const currentConfig = manager.getActiveConfig(isCandidate);
     if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
         return createStaticConfigLease(currentConfig, sessionKey);
@@ -611,7 +640,8 @@ function acquireTokenThenGptApiKeyLease(manager, reason, sessionKey, excludedCon
         reason,
         isGptApiKeyProxyConfig,
         sessionKey,
-        excludedConfigs
+        excludedConfigs,
+        OPENAI_APIKEY_STATIC_POOL
     );
     if (apiKeyLease) {
         return apiKeyLease;
@@ -946,13 +976,9 @@ function createClaudeMessagesRequestHandler(options = {}) {
             : null;
 
         if (boundClaudeTokenConfig) {
-            const matchedClaudeTokenConfig = accountManager.ensureActiveConfig(reason, isMatchingClaudeTokenConfig);
-            if (matchedClaudeTokenConfig && isRuntimeConfigAvailable(matchedClaudeTokenConfig)) {
-                return createStaticConfigLease(matchedClaudeTokenConfig, sessionKey);
-            }
-
-            return isRuntimeConfigEnabled(boundClaudeTokenConfig)
-                ? createStaticConfigLease(boundClaudeTokenConfig, sessionKey)
+            const matchedClaudeTokenConfig = accountManager.findConfig(item => isMatchingClaudeTokenConfig(item) && isRuntimeConfigAvailable(item));
+            return matchedClaudeTokenConfig
+                ? createStaticConfigLease(matchedClaudeTokenConfig, sessionKey)
                 : null;
         }
 
@@ -961,18 +987,25 @@ function createClaudeMessagesRequestHandler(options = {}) {
         }
 
         const matchedClaudeTokenLease = localAuthToken
-            ? acquireAvailableStaticConfigLease(accountManager, reason, isMatchingClaudeTokenConfig, sessionKey, excludedConfigs)
+            ? acquireFirstAvailableStaticConfigLease(accountManager, isMatchingClaudeTokenConfig, sessionKey, excludedConfigs)
             : null;
         if (matchedClaudeTokenLease) {
             return matchedClaudeTokenLease;
         }
 
-        const claudeTokenLease = acquireAvailableStaticConfigLease(accountManager, reason, isClaudeTokenConfig, sessionKey, excludedConfigs);
+        const claudeTokenLease = acquireFirstAvailableStaticConfigLease(accountManager, isClaudeTokenConfig, sessionKey, excludedConfigs);
         if (claudeTokenLease) {
             return claudeTokenLease;
         }
 
-        const claudeApiKeyLease = acquireAvailableStaticConfigLease(accountManager, reason, isClaudeApiKeyConfig, sessionKey, excludedConfigs);
+        const claudeApiKeyLease = acquireAvailableStaticConfigLease(
+            accountManager,
+            reason,
+            isClaudeApiKeyConfig,
+            sessionKey,
+            excludedConfigs,
+            CLAUDE_APIKEY_STATIC_POOL
+        );
         if (claudeApiKeyLease) {
             return claudeApiKeyLease;
         }

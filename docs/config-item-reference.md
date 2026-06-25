@@ -91,11 +91,11 @@
 - 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
 - `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换；最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用
 - 每 3 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.4-mini`，可通过该配置项的 `health.model` 覆盖
-- token 请求调度：有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择
+- token 请求调度：OpenAI token 和 Claude token 不再依赖手动“切换”焦点，只按运行态可用/不可用参与对应链路选择。OpenAI token 有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择。Claude token 按配置顺序选择当前可用账号，绑定本地 fake token 的请求只会使用绑定且可用的 Claude token
 - 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
 - 没有会话 key 时，token 请求按当前内存 `inFlight` 数做轻量分摊
 - `apikey` 配置项不参与 token 并发调度、一致性哈希或 `inFlight` 计数
-- 管理页切换到 OpenAI token 时，会把该 token 设为 Responses 主链路焦点；切换到 Claude token 时，会把该 token 设为 `/v1/messages` 原样转发主链路焦点；切换到 `apikey` 时，只调整 fallback 焦点，token 主链路可用时仍优先走 token
+- `apikey` fallback 焦点按能力拆分：`support` 包含 `gpt` 的 OpenAI 兼容 fallback 与 `support` 包含 `claude` 的 Claude Messages 原样转发 fallback 各自维护焦点和 failover，不会互相抢占。手动切换到同时支持两种能力的 `apikey` 会同时更新两个 fallback 焦点；token 主链路可用时仍优先走 token
 - 管理页“调度模式”和 token 行会显示当前/最近命中的会话短 hash，用于观察实际调度账号；原始会话 ID 不会持久化或返回页面
 - 管理页账号行会显示最近一次响应模型观测，包括请求模型和上游响应模型
 - 手动切换到 `apikey` 配置项时，会把该 `apikey` 的运行态恢复为可用

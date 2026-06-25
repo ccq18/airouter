@@ -311,6 +311,65 @@ test('ensureActiveConfig can prefer configs matching a route-specific predicate'
   assert.equal(manager.getActiveConfig(), configs[1]);
 });
 
+test('ensureActiveStaticConfig keeps OpenAI and Claude apikey focus separate', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-primary.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude-primary.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude-1',
+      support: ['claude'],
+    }),
+    createConfig(2, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-backup.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-2',
+      support: ['gpt'],
+    }),
+    createConfig(3, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude-backup.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude-2',
+      support: ['claude'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+  const isClaudeApiKey = config => config.type === 'apikey' && config.support.includes('claude');
+
+  const openAiPrimary = manager.ensureActiveStaticConfig('openai_apikey', 'openai_request', isGptApiKey);
+  const claudePrimary = manager.ensureActiveStaticConfig('claude_apikey', 'claude_request', isClaudeApiKey);
+
+  assert.equal(openAiPrimary, configs[0]);
+  assert.equal(claudePrimary, configs[1]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+  assert.equal(manager.getActiveStaticConfig('claude_apikey', isClaudeApiKey), configs[1]);
+
+  for (let index = 0; index < 3; index += 1) {
+    manager.recordApiKeyRequestResult(configs[1], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  const claudeBackup = manager.ensureActiveStaticConfig('claude_apikey', 'claude_direct_failover', isClaudeApiKey);
+
+  assert.equal(claudeBackup, configs[3]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
 test('account manager does not expose internal helper methods', () => {
   const { manager } = createManager([createConfig(0)]);
 

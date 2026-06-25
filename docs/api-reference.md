@@ -40,9 +40,9 @@ x-api-key: sk-airouter-xxxx
 
 Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配置优先级越高；当前活动配置可用时会继续沿用。
 
-`token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和部分账号切换逻辑。
+`token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和运行态可用性选择；OpenAI token 和 Claude token 不依赖手动切换焦点，只区分可用/不可用。
 
-`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
+`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。OpenAI/GPT apikey fallback 与 Claude apikey fallback 分别维护活动焦点和 failover，不会互相覆盖。
 
 `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度和模型别名逻辑；仅该前缀会启用 CLIProxyAPI 风格的额外请求体规范化。
 

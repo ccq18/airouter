@@ -10,6 +10,8 @@ const APIKEY_REQUEST_SAMPLE_TTL_MS = 30 * 60 * 1000;
 const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
 const DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS = 60 * 60 * 1000;
 const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
+const OPENAI_APIKEY_STATIC_POOL = 'openai_apikey';
+const CLAUDE_APIKEY_STATIC_POOL = 'claude_apikey';
 const APIKEY_RECOVERY_REQUEST_BODY = {
   model: 'gpt-5.4-mini',
   input: 'hello',
@@ -47,11 +49,14 @@ function createAccountManager(options) {
   let activeConfigIndex = Number.isInteger(initialActiveConfigIndex) && initialActiveConfigIndex >= 0
     ? Math.min(initialActiveConfigIndex, Math.max(configs.length - 1, 0))
     : 0;
+  const staticActiveConfigIndices = new Map();
   let anonymousDispatchCursor = activeConfigIndex;
   let dispatchLeaseCounter = 0;
   let quotaMonitorRunning = false;
   let currentQuotaMonitorTimer = null;
   let allQuotaMonitorTimer = null;
+
+  rememberApiKeyStaticActivation(configs[activeConfigIndex] || null);
 
   /**
    * 生成日志里使用的账号标识。
@@ -116,20 +121,37 @@ function createAccountManager(options) {
     return reasonMap[reason] || reason || '未知';
   }
 
-  function supportsGptApiKey(config) {
+  function supportsApiKeyCapability(config, capability) {
     if (!config || config.type !== 'apikey') {
       return false;
     }
 
     if (!Array.isArray(config.support)) {
-      return true;
+      return capability === 'gpt';
     }
 
-    return config.support.includes('gpt');
+    return config.support.includes(capability);
+  }
+
+  function supportsGptApiKey(config) {
+    return supportsApiKeyCapability(config, 'gpt');
   }
 
   function shouldUseApiKeyRecoveryMonitoring(config) {
     return supportsGptApiKey(config);
+  }
+
+  function rememberApiKeyStaticActivation(config) {
+    if (!config || config.type !== 'apikey') {
+      return;
+    }
+
+    if (supportsApiKeyCapability(config, 'gpt')) {
+      staticActiveConfigIndices.set(OPENAI_APIKEY_STATIC_POOL, config.index);
+    }
+    if (supportsApiKeyCapability(config, 'claude')) {
+      staticActiveConfigIndices.set(CLAUDE_APIKEY_STATIC_POOL, config.index);
+    }
   }
 
   function hasQuotaOrApiKeyRecoveryTargets(reason = 'poll') {
@@ -562,6 +584,43 @@ function createAccountManager(options) {
     return currentConfig && predicate(currentConfig) ? currentConfig : null;
   }
 
+  function normalizeStaticPoolKey(poolKey) {
+    const normalized = normalizeString(poolKey);
+    return normalized || 'default';
+  }
+
+  function getActiveStaticConfig(poolKey, predicate = () => true) {
+    const staticIndex = staticActiveConfigIndices.get(normalizeStaticPoolKey(poolKey));
+    const currentConfig = configs[staticIndex] || null;
+    return currentConfig && predicate(currentConfig) ? currentConfig : null;
+  }
+
+  function ensureActiveStaticConfig(poolKey, reason = 'select', predicate = () => true) {
+    const normalizedPoolKey = normalizeStaticPoolKey(poolKey);
+    const currentConfig = getActiveStaticConfig(normalizedPoolKey, predicate);
+    if (currentConfig && isConfigAvailable(currentConfig)) {
+      return currentConfig;
+    }
+
+    const priorityIndex = findHighestPriorityAvailableConfigIndex(predicate);
+    if (priorityIndex !== -1) {
+      const nextConfig = configs[priorityIndex];
+      staticActiveConfigIndices.set(normalizedPoolKey, priorityIndex);
+      if (currentConfig && currentConfig !== nextConfig && reason !== 'startup') {
+        warn(`账号切换: ${getAccountLabel(currentConfig)} -> ${getAccountLabel(nextConfig)} (${reason})`);
+      }
+
+      return nextConfig;
+    }
+
+    if (currentConfig && predicate(currentConfig)) {
+      warn(`没有可用账号，继续使用当前账号 ${getAccountLabel(currentConfig)} (${reason})`);
+      return currentConfig;
+    }
+
+    return null;
+  }
+
   function findConfig(predicate = () => true) {
     return configs.find(predicate) || null;
   }
@@ -579,6 +638,7 @@ function createAccountManager(options) {
       nextConfig.runtime.lastCheckedAt = now();
       nextConfig.runtime.lastError = null;
       resetApiKeyRequestResults(nextConfig);
+      rememberApiKeyStaticActivation(nextConfig);
     } else if (nextConfig.type === 'claude_token') {
       nextConfig.runtime.available = true;
       nextConfig.runtime.reason = 'claude_token';
@@ -1415,6 +1475,8 @@ function createAccountManager(options) {
     startQuotaMonitor,
     stopQuotaMonitor,
     getActiveConfig,
+    getActiveStaticConfig,
+    ensureActiveStaticConfig,
     findConfig,
     activateConfig,
     getAccountStatus,
