@@ -277,27 +277,42 @@ function classifyRetryableResponsesStreamPayload(payload, options = {}) {
     : typeof options.eventType === 'string'
       ? options.eventType
       : '';
-  const errorCode = payload && payload.response && payload.response.error && typeof payload.response.error.code === 'string'
-    ? payload.response.error.code
+  const responseError = payload && payload.response && payload.response.error &&
+    typeof payload.response.error === 'object' && !Array.isArray(payload.response.error)
+    ? payload.response.error
+    : null;
+  const payloadError = payload && payload.error &&
+    typeof payload.error === 'object' && !Array.isArray(payload.error)
+    ? payload.error
+    : null;
+  const errorPayload = responseError || payloadError;
+  const errorCode = errorPayload && typeof errorPayload.code === 'string'
+    ? errorPayload.code
     : '';
-  const errorMessage = payload && payload.response && payload.response.error && typeof payload.response.error.message === 'string'
-    ? payload.response.error.message
+  const errorMessage = errorPayload && typeof errorPayload.message === 'string'
+    ? errorPayload.message
     : '';
   const messageKey = getUsageLimitMessageKey(errorMessage);
   const capacityKey = getModelCapacityMessageKey(errorMessage);
   const retryKey = RETRYABLE_STREAM_ERROR_CODES.has(errorCode) ? errorCode : messageKey || capacityKey;
-  const metadata = eventType === 'response.failed'
+  const normalizedEventType = normalizeErrorText(eventType);
+  const isFailureEvent = normalizedEventType === 'response.failed' ||
+    normalizedEventType === 'error' ||
+    normalizedEventType.endsWith('.failed') ||
+    normalizedEventType.endsWith('.error') ||
+    Boolean(errorPayload);
+  const metadata = isFailureEvent
     ? RETRYABLE_STREAM_ERROR_CODES.get(retryKey)
     : null;
 
-  if (!metadata && eventType !== 'response.failed') {
+  if (!isFailureEvent) {
     return null;
   }
 
   return {
     action: 'retry',
     reason: metadata ? metadata.reason : UNKNOWN_RESPONSES_ERROR.reason,
-    retryKey: retryKey || errorCode || 'unknown_error',
+    retryKey: retryKey || errorCode || normalizedEventType || 'unknown_error',
     retrySource: 'stream',
   };
 }
@@ -437,7 +452,12 @@ function createResponsesEventStreamInspector(options = {}) {
 
     const payload = parseJsonObject(payloadText);
     if (!payload) {
-      return { action: 'pass' };
+      return {
+        action: 'retry',
+        reason: UNKNOWN_RESPONSES_ERROR.reason,
+        retryKey: getSseEventType(eventBlock) || 'malformed_event',
+        retrySource: 'stream',
+      };
     }
 
     const eventType = typeof payload.type === 'string' ? payload.type : getSseEventType(eventBlock);

@@ -314,6 +314,40 @@ test('createResponsesEventStreamInspector retries model capacity stream failures
   });
 });
 
+test('createResponsesEventStreamInspector retries generic SSE error events', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'event: error\n' +
+    'data: {"error":{"code":"server_is_overloaded","message":"server overloaded"}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'server_is_overloaded',
+    retrySource: 'stream',
+  });
+});
+
+test('createResponsesEventStreamInspector retries malformed SSE events before forwarding', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'event: response.failed\n' +
+    'data: not-json\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'response.failed',
+    retrySource: 'stream',
+  });
+});
+
 test('createResponsesEventStreamInspector passes through on the first non-prelude event', () => {
   const inspector = createResponsesEventStreamInspector();
 

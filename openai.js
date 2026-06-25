@@ -663,9 +663,30 @@ function canAttemptResponsesFailover(config, requestUrl) {
     );
 }
 
+function canAttemptTokenFailover(config) {
+    return Boolean(
+        accountManager &&
+        config &&
+        config.type === 'token'
+    );
+}
+
 function hasRequestFailoverRetriesRemaining(failoverAttempt) {
     const normalizedAttempt = Number(failoverAttempt);
     return (Number.isFinite(normalizedAttempt) ? Math.max(0, Math.floor(normalizedAttempt)) : 0) < MAX_REQUEST_FAILOVER_RETRIES;
+}
+
+function classifyTokenUpstreamFailure(config, statusCode) {
+    if (!config || config.type !== 'token' || isSuccessfulResponsesStatus(statusCode)) {
+        return null;
+    }
+
+    const normalizedStatusCode = Number(statusCode);
+    return {
+        reason: 'responses_upstream_error',
+        retryKey: Number.isFinite(normalizedStatusCode) ? String(normalizedStatusCode) : 'invalid_status',
+        retrySource: 'http',
+    };
 }
 
 function classifyApiKeyUpstreamFailure(config, statusCode) {
@@ -2611,6 +2632,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
+        const tokenFailure = classifyTokenUpstreamFailure(config, statusCode);
         const shouldInspectResponses = canAttemptResponsesFailover(config, req.url)
             && isResponsesFailoverInspectionCandidate(statusCode, response.headers, {
                 requestedModel: requestedResponseModel,
@@ -2702,6 +2724,40 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
+        if (tokenFailure) {
+            accountManager.markConfigUnavailable(config, tokenFailure.reason, {
+                lastError: `${tokenFailure.retrySource}:${tokenFailure.retryKey}`,
+                switchReason: 'token_upstream_failover',
+            });
+            warn(`token 上游返回错误，自动切号: #${config.index + 1} ${config.description} (${tokenFailure.retrySource}:${tokenFailure.retryKey})`);
+
+            const nextLease = acquireFailoverLease('token_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+
+            if (!requestClosed && nextConfig && nextConfig !== config) {
+                responseFinished = true;
+                void drainAbandonedResponse(response);
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                    cpaStyleCompatibility,
+                });
+                releaseCurrentLease();
+                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                    failoverAttempt: failoverAttempt + 1,
+                    lease: nextLease,
+                    sessionKey: requestSessionKey,
+                    predicate: requestPredicate,
+                    excludedConfigs: [...excludedConfigs, config],
+                    retrySelector,
+                    cpaStyleCompatibility,
+                });
+                return;
+            }
+
+            if (nextLease) {
+                nextLease.release();
+            }
+        }
+
         startForwardingResponse(response, statusCode, response.headers);
     }).catch(err => {
         if (requestClosed) {
@@ -2744,14 +2800,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             if (nextLease) {
                 nextLease.release();
             }
-        } else if (canAttemptResponsesFailover(config, req.url)) {
+        } else if (canAttemptTokenFailover(config)) {
             accountManager.markConfigUnavailable(config, 'responses_upstream_error', {
                 lastError: err.message,
-                switchReason: 'responses_failover',
+                switchReason: 'token_upstream_failover',
             });
-            warn(`responses 上游请求失败，自动切号: #${config.index + 1} ${config.description} (${err.message})`);
+            warn(`token 上游请求失败，自动切号: #${config.index + 1} ${config.description} (${err.message})`);
 
-            const nextLease = acquireFailoverLease('responses_failover');
+            const nextLease = acquireFailoverLease('token_upstream_failover');
             const nextConfig = nextLease ? nextLease.config : null;
 
             if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
@@ -3088,6 +3144,20 @@ async function executeImageBusinessAttempt({
                 statusCode: result.statusCode,
                 bodyText: result.bodyText,
             }),
+        };
+    }
+
+    try {
+        extractImageGenerationResponse(result.bodyText);
+    } catch (err) {
+        return {
+            type: 'retryable_failure',
+            result,
+            classification: {
+                reason: 'responses_upstream_error',
+                retryKey: err.message || 'invalid_image_response',
+                retrySource: 'body',
+            },
         };
     }
 
@@ -4019,6 +4089,7 @@ if (require.main === module) {
 module.exports = {
     buildProxyHeaders,
     classifyApiKeyUpstreamFailure,
+    classifyTokenUpstreamFailure,
     deleteHeadersCaseInsensitive,
     deleteLocalOnlyHeaders,
     LOCAL_ONLY_AUTH_HEADERS,

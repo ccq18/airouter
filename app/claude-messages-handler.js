@@ -1145,6 +1145,27 @@ function createClaudeMessagesHandler({
             let retryClassification = null;
             let convertedApiKeyResultRecorded = false;
 
+            function createResponsesUpstreamErrorClassification(err, retrySource) {
+                const message = err && err.message ? err.message : String(err || 'upstream_error');
+                return {
+                    reason: activeConfig.type === 'apikey' ? 'apikey_upstream_error' : 'responses_upstream_error',
+                    retryKey: message || 'upstream_error',
+                    retrySource
+                };
+            }
+
+            function retryWithNextConfig(classification) {
+                const nextSelection = getRetryConfig(activeConfig, classification, failoverAttempt);
+                if (!nextSelection) {
+                    return false;
+                }
+
+                responseFinished = false;
+                releaseCurrentConfigSelection();
+                startAttempt(nextSelection, failoverAttempt + 1);
+                return true;
+            }
+
             function observeConvertedApiKeyResult(result) {
                 if (
                     convertedApiKeyResultRecorded ||
@@ -1189,6 +1210,7 @@ function createClaudeMessagesHandler({
 
                 const classification = classifyRetryableResponsesStreamPayload(payload, {
                     requestedModel: responsesRequest && responsesRequest.model,
+                    eventType: upstreamEventName,
                 });
                 if (classification && !streamInitialized && !collector.build()) {
                     retryClassification = classification;
@@ -1205,6 +1227,18 @@ function createClaudeMessagesHandler({
                 }
             }
 
+            function handleUpstreamSseParseError(message) {
+                error(message);
+                if (!retryClassification && !streamInitialized && !collector.build()) {
+                    retryClassification = {
+                        action: 'retry',
+                        reason: 'responses_unknown_error',
+                        retryKey: 'malformed_event',
+                        retrySource: 'stream'
+                    };
+                }
+            }
+
             upstream.responsePromise.then(response => {
                 upstreamMeta = {
                     statusCode: Number(response.statusCode || 502),
@@ -1217,7 +1251,7 @@ function createClaudeMessagesHandler({
                             sseState,
                             chunk.toString('utf8'),
                             handleUpstreamSseEvent,
-                            message => error(message)
+                            handleUpstreamSseParseError
                         );
                     } else {
                         responseBodyChunks.push(chunk);
@@ -1232,16 +1266,12 @@ function createClaudeMessagesHandler({
                             sseState,
                             '',
                             handleUpstreamSseEvent,
-                            message => error(message),
+                            handleUpstreamSseParseError,
                             true
                         );
 
                         if (retryClassification) {
-                            const nextSelection = getRetryConfig(activeConfig, retryClassification, failoverAttempt);
-                            if (nextSelection) {
-                                responseFinished = false;
-                                releaseCurrentConfigSelection();
-                                startAttempt(nextSelection, failoverAttempt + 1);
+                            if (retryWithNextConfig(retryClassification)) {
                                 return;
                             }
                         }
@@ -1257,6 +1287,16 @@ function createClaudeMessagesHandler({
 
                         const mappedResponse = collector.build();
                         if (!mappedResponse) {
+                            const classification = {
+                                action: 'retry',
+                                reason: 'responses_upstream_error',
+                                retryKey: 'empty_response',
+                                retrySource: 'stream'
+                            };
+                            if (!streamInitialized && retryWithNextConfig(classification)) {
+                                return;
+                            }
+
                             sendJsonError(res, 502, {
                                 error: 'Bad Gateway',
                                 message: 'Upstream stream completed without enough Claude response events'
@@ -1277,11 +1317,7 @@ function createClaudeMessagesHandler({
                         statusCode: upstreamMeta.statusCode,
                         bodyText: responseText
                     });
-                    const nextSelection = classification ? getRetryConfig(activeConfig, classification, failoverAttempt) : null;
-                    if (nextSelection) {
-                        responseFinished = false;
-                        releaseCurrentConfigSelection();
-                        startAttempt(nextSelection, failoverAttempt + 1);
+                    if (classification && retryWithNextConfig(classification)) {
                         return;
                     }
 
@@ -1296,9 +1332,14 @@ function createClaudeMessagesHandler({
 
                     error(`代理请求失败: ${err.message}`);
                     const statusCode = getGatewayStatusCode(err);
+                    const classification = createResponsesUpstreamErrorClassification(err, 'stream');
+                    if (!streamInitialized && retryWithNextConfig(classification)) {
+                        return;
+                    }
+
                     observeConvertedApiKeyResult({
                         ok: false,
-                        reason: 'apikey_upstream_error',
+                        reason: classification.reason,
                         lastError: err.message,
                         switchReason: 'apikey_upstream_failover'
                     });
@@ -1316,9 +1357,14 @@ function createClaudeMessagesHandler({
                 const message = err.message || 'upstream request failed';
                 error(`代理请求失败: ${message}`);
                 const statusCode = getGatewayStatusCode(err);
+                const classification = createResponsesUpstreamErrorClassification(err, 'request');
+                if (!streamInitialized && retryWithNextConfig(classification)) {
+                    return;
+                }
+
                 observeConvertedApiKeyResult({
                     ok: false,
-                    reason: 'apikey_upstream_error',
+                    reason: classification.reason,
                     lastError: message,
                     switchReason: 'apikey_upstream_failover'
                 });

@@ -11,20 +11,18 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 ## 1. 生效范围
 
-当前自动切号只对以下请求生效：
+当前自动切号主要对以下请求生效：
 
 - 路径命中 `/responses`
 - 当前账号类型是 `token`
 
-也就是说：
+普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。`apikey` 配置项不走 Codex responses 事件解析，但直连上游在响应提交前出现非成功状态、请求异常或响应体中断时，也会找同能力池的下一个可用 apikey。
 
-- 不是所有 OpenAI 兼容接口都会自动切号
-- `apikey` 配置项不会走这套 Codex responses 自动切号逻辑
-- 同一个请求会排除已经失败的账号继续重试，最多重放 2 次；达到上限、没有新的可用 token 账号或响应已经开始写回客户端后，不再继续切号
+同一个请求会排除已经失败的账号继续重试，最多重放 2 次；达到上限、没有新的可用配置或响应已经开始写回客户端后，不再继续切号。
 
 ## 2. 当前真正会触发自动切号的错误
 
-当前实现把“已经进入失败识别窗口”的上游响应都当作 `/responses` 自动切号触发条件。已知错误码会映射到更具体的内部原因码；不认识的错误类型也会统一记为 `responses_unknown_error`，然后继续走切号。
+当前实现把“响应提交给客户端前观察到的异常”都当作自动切号触发条件。错误分类只用于运行态记录和管理页展示；是否切号不再依赖具体错误类型。已知错误码会映射到更具体的内部原因码；不认识的错误类型统一记为 `responses_unknown_error` 或 `responses_upstream_error`，然后继续走切号。
 
 - HTTP `429` 且 `error.type == "usage_limit_reached"`
 - HTTP `429` 且 `error.type == "usage_not_included"`
@@ -36,6 +34,10 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
 - SSE `response.failed` 且 `response.error.code == "model_at_capacity"`，或错误消息包含 `Selected model is at capacity`
 - 其他 `response.failed`
+- SSE `event: error`、`*.failed`、`*.error`，或 payload 中出现 `error`
+- SSE 事件体不是合法 JSON
+- 上游请求失败、连接中断、响应体中断
+- 图片兼容路径里，上游 HTTP 成功但 Responses body 没有可用的 `image_generation_call` 结果
 
 对应内部原因码如下：
 
@@ -50,18 +52,17 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
 | `response.failed + model_at_capacity` | `responses_model_at_capacity` |
-| `其他 response.failed` | `responses_unknown_error` |
+| 其他 SSE 错误事件 / SSE 格式异常 | `responses_unknown_error` |
+| 上游请求失败、连接中断、响应体异常 | `responses_upstream_error` |
 
-## 3. 当前不参与自动切号、只做识别或透传的情况
+## 3. 不再细分但仍会自动切号的情况
 
-下面这些值虽然仍然属于可识别的 `responses` 错误，但当前没有接入专属的细分原因码：
+下面这些值当前没有接入专属的细分原因码，但仍会统一归到 `responses_unknown_error`，然后继续触发账号切换：
 
 - `context_length_exceeded`
 - `invalid_prompt`
 - `server_is_overloaded`
 - `slow_down`
-
-这些情况现在不会被当成成功透传，而是会统一归到 `responses_unknown_error`，然后继续触发账号切换。
 
 ## 4. 响应检查方式
 
@@ -74,9 +75,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
    - `response.created`
    - `response.in_progress`
    这两类事件，会继续等待；如果这些事件里的 `response.model` 已经从请求模型降级成 `gpt-5.4-mini` 或同名日期版本，会立即切号
-5. 如果看到：
-   - `response.failed` 且错误码命中可切号集合
-   就中断当前转发流程，改走切号重试
+5. 如果看到 `response.failed`、`event: error`、`*.failed`、`*.error`、payload 中的 `error`，或 SSE 事件体无法解析，就中断当前转发流程，改走切号重试
 6. 如果在前置阶段先看到了正常输出事件，例如 `response.output_text.delta`
    就认为这条流已经开始正常产出内容，直接透传，不再尝试切号
 

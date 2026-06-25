@@ -8,6 +8,7 @@ const { PassThrough } = require('node:stream');
 const {
   buildProxyHeaders,
   classifyApiKeyUpstreamFailure,
+  classifyTokenUpstreamFailure,
   createResponseModelObserver,
   defaultContentTypeForProxyResponse,
   extractResponseModelFromPayload,
@@ -221,6 +222,25 @@ test('classifyApiKeyUpstreamFailure marks auth, rate limit, and server failures 
     retrySource: 'http',
   });
   assert.equal(classifyApiKeyUpstreamFailure({ type: 'token' }, 503), null);
+});
+
+test('classifyTokenUpstreamFailure treats any non-success token status as failoverable', () => {
+  const tokenConfig = {
+    type: 'token',
+  };
+
+  assert.equal(classifyTokenUpstreamFailure(tokenConfig, 200), null);
+  assert.deepEqual(classifyTokenUpstreamFailure(tokenConfig, 400), {
+    reason: 'responses_upstream_error',
+    retryKey: '400',
+    retrySource: 'http',
+  });
+  assert.deepEqual(classifyTokenUpstreamFailure(tokenConfig, 503), {
+    reason: 'responses_upstream_error',
+    retryKey: '503',
+    retrySource: 'http',
+  });
+  assert.equal(classifyTokenUpstreamFailure({ type: 'apikey' }, 503), null);
 });
 
 test('normalizeProxyJsonBody adapts OpenAI Responses payloads for token-backed Codex requests', () => {
@@ -517,6 +537,123 @@ test('image generations token business request retries the next config before re
   assert.deepEqual(released, [
     'primary token image',
     'backup token image',
+  ]);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload, {
+    created: 123,
+    data: [
+      {
+        b64_json: Buffer.from('image-data').toString('base64'),
+      },
+    ],
+  });
+});
+
+test('image generations token business request retries malformed successful responses bodies', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary token image',
+      access_token: 'token-1',
+      apiBasePath: '/backend-api/codex',
+      baseUrl: 'https://chatgpt-primary.example.com',
+      runtime: { available: true },
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup token image',
+      access_token: 'token-2',
+      apiBasePath: '/backend-api/codex',
+      baseUrl: 'https://chatgpt-backup.example.com',
+      runtime: { available: true },
+    },
+  ];
+  const requests = [];
+  const unavailable = [];
+  const accountManager = {
+    getActiveConfig() {
+      return null;
+    },
+    ensureActiveConfig() {
+      return null;
+    },
+    acquireConfig(reason, predicate, options = {}) {
+      const excluded = Array.isArray(options.exclude) ? options.exclude : [];
+      const config = configs.find(item => predicate(item) && !excluded.includes(item));
+      return config
+        ? {
+          config,
+          sessionKey: options.sessionKey || '',
+          release() {},
+        }
+        : null;
+    },
+    markConfigUnavailable(config, reason, details) {
+      unavailable.push({ config, reason, details });
+    },
+  };
+  const successfulImageEvent = [
+    'event: response.output_item.done',
+    `data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      item: {
+        type: 'image_generation_call',
+        status: 'completed',
+        result: Buffer.from('image-data').toString('base64'),
+      },
+    })}`,
+    '',
+  ].join('\n');
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    requestBuffered: async request => {
+      requests.push(request);
+      if (requests.length === 1) {
+        const bodyText = [
+          'event: response.failed',
+          'data: {"response":{"error":{"code":"server_is_overloaded","message":"server overloaded"}}}',
+          '',
+        ].join('\n');
+        return {
+          statusCode: 200,
+          headers: { 'content-type': 'text/event-stream' },
+          body: Buffer.from(bodyText),
+          bodyText,
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: Buffer.from(successfulImageEvent),
+        bodyText: successfulImageEvent,
+      };
+    },
+    now: () => 123000,
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw a small red hat',
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(requests.map(request => request.headers.authorization), [
+    'Bearer token-1',
+    'Bearer token-2',
+  ]);
+  assert.deepEqual(unavailable.map(item => ({
+    config: item.config.description,
+    reason: item.reason,
+    lastError: item.details.lastError,
+  })), [
+    {
+      config: 'primary token image',
+      reason: 'responses_upstream_error',
+      lastError: 'body:Responses 返回中没有 image_generation_call 结果',
+    },
   ]);
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.payload, {
@@ -1792,6 +1929,212 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
     item.observation.requestModel === 'gpt-5.5' &&
     item.observation.responseModel === 'gpt-5.4'
   )));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'hello',
+    },
+  ]);
+});
+
+test('createClaudeMessagesHandler retries response.failed event names without payload type', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary',
+      access_token: 'token-1',
+      account_id: 'account-1',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup',
+      access_token: 'token-2',
+      account_id: 'account-2',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+  ];
+  const upstreamAccountIds = [];
+  const classifications = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (config, classification) => {
+      classifications.push({ config, classification });
+      return configs[1];
+    },
+    createUpstreamRequest: request => {
+      upstreamAccountIds.push(request.headers['chatgpt-account-id']);
+      if (upstreamAccountIds.length === 1) {
+        const events = [
+          'event: response.failed',
+          'data: {"response":{"error":{"code":"server_is_overloaded","message":"server overloaded"}}}',
+          '',
+        ].join('\n');
+
+        return {
+          responsePromise: Promise.resolve(createUpstreamResponse(200, {
+            'content-type': 'text/event-stream',
+          }, events)),
+          abort() {},
+        };
+      }
+
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}',
+        '',
+        'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+        '',
+        'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+        '',
+        'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"hello"}',
+        '',
+        'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+        '',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+      ].join('\n');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
+  assert.equal(classifications.length, 1);
+  assert.equal(classifications[0].config, configs[0]);
+  assert.deepEqual(classifications[0].classification, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'server_is_overloaded',
+    retrySource: 'stream',
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.content, [
+    {
+      type: 'text',
+      text: 'hello',
+    },
+  ]);
+});
+
+test('createClaudeMessagesHandler retries converted responses stream errors before client commit', async () => {
+  const configs = [
+    {
+      type: 'token',
+      index: 0,
+      description: 'primary',
+      access_token: 'token-1',
+      account_id: 'account-1',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+    {
+      type: 'token',
+      index: 1,
+      description: 'backup',
+      access_token: 'token-2',
+      account_id: 'account-2',
+      baseUrl: 'https://chatgpt.com',
+      apiBasePath: '/backend-api/codex',
+    },
+  ];
+  const upstreamAccountIds = [];
+  const classifications = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (config, classification) => {
+      classifications.push({ config, classification });
+      return configs[1];
+    },
+    createUpstreamRequest: request => {
+      upstreamAccountIds.push(request.headers['chatgpt-account-id']);
+      if (upstreamAccountIds.length === 1) {
+        const response = new PassThrough();
+        response.statusCode = 200;
+        response.headers = {
+          'content-type': 'text/event-stream',
+        };
+        process.nextTick(() => {
+          response.destroy(new Error('upstream stream closed'));
+        });
+
+        return {
+          responsePromise: Promise.resolve(response),
+          abort() {},
+        };
+      }
+
+      const events = [
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}',
+        '',
+        'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+        '',
+        'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+        '',
+        'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"hello"}',
+        '',
+        'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+        '',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+        '',
+      ].join('\n');
+
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, events)),
+        abort() {},
+      };
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
+  assert.equal(classifications.length, 1);
+  assert.equal(classifications[0].config, configs[0]);
+  assert.deepEqual(classifications[0].classification, {
+    reason: 'responses_upstream_error',
+    retryKey: 'upstream stream closed',
+    retrySource: 'stream',
+  });
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.payload.content, [
     {
