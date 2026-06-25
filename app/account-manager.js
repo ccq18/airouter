@@ -110,6 +110,7 @@ function createAccountManager(options) {
       responses_usage_not_included: 'responses 套餐不支持',
       responses_model_downgraded: 'responses 模型被降级',
       responses_model_at_capacity: 'responses 模型容量不足',
+      responses_upstream_error: 'responses 上游请求失败',
       responses_unknown_error: 'responses 未知错误',
       apikey_auth_failed: 'API Key 鉴权失败',
       apikey_rate_limited: 'API Key 被限流',

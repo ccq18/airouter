@@ -115,6 +115,7 @@
 - `/v1/images/generations` 和 `/v1/images/edits` 业务请求自动切号
 - `responses_model_downgraded` 模型降级请求级切换，不改变账号可用性
 - `responses_model_at_capacity` 模型容量不足会触发自动切号，并把当前 token 临时摘除
+- 同一个业务请求发现可切换错误后会找下一个可用配置重放，但最多重放 2 次；第 3 个配置仍失败时返回该次上游错误
 - `apikey` 直连上游最近 30 分钟内最多 10 个真实请求累计 3 次提交响应前的非 200 HTTP 状态、普通代理请求失败或响应体中断摘除
 - 每 3 分钟全量校正中的 GPT apikey 恢复探测
 

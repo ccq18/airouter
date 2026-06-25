@@ -12,6 +12,7 @@ const {
 
 const DEFAULT_RESPONSES_API_PATH = '/backend-api/codex/responses';
 const CLAUDE_RESPONSES_COMPAT_MODEL = 'gpt-5.5';
+const DEFAULT_MAX_FAILOVER_RETRIES = 2;
 const HOP_BY_HOP_HEADERS = new Set([
     'host',
     'connection',
@@ -45,6 +46,23 @@ function resolveResponsesApiPath(config) {
     }
 
     return DEFAULT_RESPONSES_API_PATH;
+}
+
+function normalizeMaxFailoverRetries(value) {
+    const normalized = Number(value);
+    if (!Number.isFinite(normalized) || normalized < 0) {
+        return DEFAULT_MAX_FAILOVER_RETRIES;
+    }
+
+    return Math.floor(normalized);
+}
+
+function hasFailoverRetriesRemaining(failoverAttempt, maxFailoverRetries) {
+    const normalizedAttempt = Number(failoverAttempt);
+    const attempt = Number.isFinite(normalizedAttempt) && normalizedAttempt > 0
+        ? Math.floor(normalizedAttempt)
+        : 0;
+    return attempt < maxFailoverRetries;
 }
 
 function resolveResponsesTarget(config, clientVersion) {
@@ -852,8 +870,11 @@ function createClaudeMessagesHandler({
     getSessionKey = () => '',
     observeResponseModel = null,
     observeApiKeyRequestResult = null,
-    cpaStyleCompatibility = false
+    cpaStyleCompatibility = false,
+    maxFailoverRetries = DEFAULT_MAX_FAILOVER_RETRIES
 }) {
+    const normalizedMaxFailoverRetries = normalizeMaxFailoverRetries(maxFailoverRetries);
+
     return async function handleMessagesRequest(req, res) {
         const incomingUrl = buildIncomingUrl(req);
 
@@ -948,12 +969,22 @@ function createClaudeMessagesHandler({
                 failedConfigs.push(activeConfig);
             }
 
+            const retryAllowed = hasFailoverRetriesRemaining(failoverAttempt, normalizedMaxFailoverRetries);
             const nextSelection = normalizeConfigSelection(handleRetryableUpstreamError(activeConfig, classification, {
                 sessionKey,
                 failoverAttempt,
+                maxFailoverRetries: normalizedMaxFailoverRetries,
+                retryAllowed,
                 failedConfigs: [...failedConfigs],
                 excludedConfigs: [...failedConfigs]
             }));
+            if (!retryAllowed) {
+                if (typeof nextSelection.release === 'function') {
+                    nextSelection.release();
+                }
+                return null;
+            }
+
             if (nextSelection.config && nextSelection.config !== activeConfig && !failedConfigs.includes(nextSelection.config)) {
                 return nextSelection;
             }
@@ -1315,6 +1346,8 @@ function createClaudeMessagesHandler({
 }
 
 module.exports = {
+    DEFAULT_MAX_FAILOVER_RETRIES,
     createClaudeMessagesHandler,
+    hasFailoverRetriesRemaining,
     resolveResponsesApiPath
 };

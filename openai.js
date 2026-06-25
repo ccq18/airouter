@@ -114,6 +114,7 @@ const LOCAL_ONLY_HEADER_PREFIXES = [
 const LOCAL_CLAUDE_AUTH_TOKEN_PREFIX = 'airouter-oauth-';
 const OPENAI_APIKEY_STATIC_POOL = 'openai_apikey';
 const CLAUDE_APIKEY_STATIC_POOL = 'claude_apikey';
+const MAX_REQUEST_FAILOVER_RETRIES = 2;
 const SESSION_KEY_HEADERS = [
     'x-airouter-session-id',
     'session-id',
@@ -662,6 +663,11 @@ function canAttemptResponsesFailover(config, requestUrl) {
     );
 }
 
+function hasRequestFailoverRetriesRemaining(failoverAttempt) {
+    const normalizedAttempt = Number(failoverAttempt);
+    return (Number.isFinite(normalizedAttempt) ? Math.max(0, Math.floor(normalizedAttempt)) : 0) < MAX_REQUEST_FAILOVER_RETRIES;
+}
+
 function classifyApiKeyUpstreamFailure(config, statusCode) {
     if (!config || config.type !== 'apikey') {
         return null;
@@ -1047,6 +1053,7 @@ function createClaudeMessagesRequestHandler(options = {}) {
         cpaStyleCompatibility,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
+            const retryAllowed = !context || context.retryAllowed !== false;
             if (isResponsesModelDowngradeClassification(classification)) {
                 warn(`claude responses 模型降级，自动切号: #${config.index + 1} ${config.description} (${classification.retryKey})`);
                 accountManager.observeResponseModel(config, {
@@ -1058,6 +1065,10 @@ function createClaudeMessagesRequestHandler(options = {}) {
                 });
 
                 if (!context) {
+                    return null;
+                }
+
+                if (!retryAllowed) {
                     return null;
                 }
 
@@ -1092,6 +1103,10 @@ function createClaudeMessagesRequestHandler(options = {}) {
                     return null;
                 }
 
+                if (!retryAllowed) {
+                    return null;
+                }
+
                 const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
                     ? context.excludedConfigs
                     : [config];
@@ -1108,6 +1123,10 @@ function createClaudeMessagesRequestHandler(options = {}) {
             }
 
             if (!context) {
+                return null;
+            }
+
+            if (!retryAllowed) {
                 return null;
             }
 
@@ -2416,6 +2435,10 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     }
 
     function acquireFailoverLease(reason) {
+        if (!hasRequestFailoverRetriesRemaining(failoverAttempt)) {
+            return null;
+        }
+
         if (retrySelector) {
             return retrySelector(reason, requestSessionKey, [...excludedConfigs, config]);
         }
@@ -2699,6 +2722,36 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
 
             const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+
+            if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                    cpaStyleCompatibility,
+                });
+                releaseCurrentLease();
+                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                    failoverAttempt: failoverAttempt + 1,
+                    lease: nextLease,
+                    sessionKey: requestSessionKey,
+                    predicate: requestPredicate,
+                    excludedConfigs: [...excludedConfigs, config],
+                    retrySelector,
+                    cpaStyleCompatibility,
+                });
+                return;
+            }
+
+            if (nextLease) {
+                nextLease.release();
+            }
+        } else if (canAttemptResponsesFailover(config, req.url)) {
+            accountManager.markConfigUnavailable(config, 'responses_upstream_error', {
+                lastError: err.message,
+                switchReason: 'responses_failover',
+            });
+            warn(`responses 上游请求失败，自动切号: #${config.index + 1} ${config.description} (${err.message})`);
+
+            const nextLease = acquireFailoverLease('responses_failover');
             const nextConfig = nextLease ? nextLease.config : null;
 
             if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
@@ -3157,7 +3210,9 @@ async function handleImageBusinessRequest(req, res, options = {}) {
         lastFailure = attempt;
         failedConfigs.push(config);
         currentLease.release();
-        currentLease = acquireImageBusinessLease(manager, sessionKey, failedConfigs);
+        currentLease = failedConfigs.length <= MAX_REQUEST_FAILOVER_RETRIES
+            ? acquireImageBusinessLease(manager, sessionKey, failedConfigs)
+            : null;
     }
 
     writeImageBusinessFailure(res, lastFailure);
@@ -3969,6 +4024,8 @@ module.exports = {
     LOCAL_ONLY_AUTH_HEADERS,
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
+    MAX_REQUEST_FAILOVER_RETRIES,
+    hasRequestFailoverRetriesRemaining,
     createResponseModelObserver,
     defaultContentTypeForProxyResponse,
     extractResponseModelFromPayload,

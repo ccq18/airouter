@@ -11,13 +11,19 @@ const {
   createResponseModelObserver,
   defaultContentTypeForProxyResponse,
   extractResponseModelFromPayload,
+  hasRequestFailoverRetriesRemaining,
   isStreamingResponsesRequest,
   isResponsesFailoverInspectionCandidate,
+  MAX_REQUEST_FAILOVER_RETRIES,
   normalizeProxyJsonBody,
   shouldForceResponsesStoreFalse,
   createImageGenerationsHandler,
 } = require('../openai');
-const { createClaudeMessagesHandler } = require('../app/claude-messages-handler');
+const {
+  DEFAULT_MAX_FAILOVER_RETRIES,
+  createClaudeMessagesHandler,
+  hasFailoverRetriesRemaining,
+} = require('../app/claude-messages-handler');
 
 function createJsonResponseRecorder() {
   const res = new EventEmitter();
@@ -102,6 +108,17 @@ function createUpstreamResponse(statusCode, headers, body) {
   });
   return response;
 }
+
+test('request failover retry helpers allow only two replays', () => {
+  assert.equal(MAX_REQUEST_FAILOVER_RETRIES, 2);
+  assert.equal(DEFAULT_MAX_FAILOVER_RETRIES, 2);
+  assert.equal(hasRequestFailoverRetriesRemaining(0), true);
+  assert.equal(hasRequestFailoverRetriesRemaining(1), true);
+  assert.equal(hasRequestFailoverRetriesRemaining(2), false);
+  assert.equal(hasFailoverRetriesRemaining(0, DEFAULT_MAX_FAILOVER_RETRIES), true);
+  assert.equal(hasFailoverRetriesRemaining(1, DEFAULT_MAX_FAILOVER_RETRIES), true);
+  assert.equal(hasFailoverRetriesRemaining(2, DEFAULT_MAX_FAILOVER_RETRIES), false);
+});
 
 test('buildProxyHeaders strips local-only auth headers before forwarding upstream', () => {
   const headers = buildProxyHeaders({
@@ -510,6 +527,98 @@ test('image generations token business request retries the next config before re
       },
     ],
   });
+});
+
+test('image generations token business request stops after two replay attempts', async () => {
+  const configs = [0, 1, 2, 3].map(index => ({
+    type: 'token',
+    index,
+    description: `token image ${index + 1}`,
+    access_token: `token-${index + 1}`,
+    apiBasePath: '/backend-api/codex',
+    baseUrl: `https://chatgpt-${index + 1}.example.com`,
+    runtime: { available: true },
+  }));
+  const requests = [];
+  const released = [];
+  const unavailable = [];
+  const accountManager = {
+    getActiveConfig() {
+      return null;
+    },
+    ensureActiveConfig() {
+      return null;
+    },
+    acquireConfig(reason, predicate, options = {}) {
+      const excluded = Array.isArray(options.exclude) ? options.exclude : [];
+      const config = configs.find(item => predicate(item) && !excluded.includes(item));
+      return config
+        ? {
+          config,
+          sessionKey: options.sessionKey || '',
+          release: () => released.push(config.description),
+        }
+        : null;
+    },
+    markConfigUnavailable(config, reason) {
+      unavailable.push({ config, reason });
+    },
+  };
+  const bodyText = JSON.stringify({
+    error: {
+      type: 'usage_limit_reached',
+      message: 'still exhausted',
+    },
+  });
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    requestBuffered: async request => {
+      requests.push(request);
+      return {
+        statusCode: 429,
+        headers: { 'content-type': 'application/json' },
+        body: Buffer.from(bodyText),
+        bodyText,
+      };
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw a small red hat',
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(requests.map(request => request.headers.authorization), [
+    'Bearer token-1',
+    'Bearer token-2',
+    'Bearer token-3',
+  ]);
+  assert.equal(requests.some(request => request.headers.authorization === 'Bearer token-4'), false);
+  assert.deepEqual(unavailable.map(item => ({
+    config: item.config.description,
+    reason: item.reason,
+  })), [
+    {
+      config: 'token image 1',
+      reason: 'responses_usage_limit_reached',
+    },
+    {
+      config: 'token image 2',
+      reason: 'responses_usage_limit_reached',
+    },
+    {
+      config: 'token image 3',
+      reason: 'responses_usage_limit_reached',
+    },
+  ]);
+  assert.deepEqual(released, [
+    'token image 1',
+    'token image 2',
+    'token image 3',
+  ]);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.writableEnded, true);
 });
 
 test('image generations apikey business request keeps native Images forwarding', async () => {
@@ -1909,6 +2018,95 @@ test('createClaudeMessagesHandler keeps retrying usage-limit errors until a conf
       text: 'hello',
     },
   ]);
+});
+
+test('createClaudeMessagesHandler stops after two replay attempts', async () => {
+  const configs = [0, 1, 2, 3].map(index => ({
+    type: 'token',
+    index,
+    description: `token ${index + 1}`,
+    access_token: `token-${index + 1}`,
+    account_id: `account-${index + 1}`,
+    baseUrl: 'https://chatgpt.com',
+    apiBasePath: '/backend-api/codex',
+  }));
+  const upstreamAccountIds = [];
+  const retryContexts = [];
+  const classifications = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => configs[0],
+    handleRetryableUpstreamError: (config, classification, context) => {
+      classifications.push({ config, classification });
+      retryContexts.push(context);
+      return configs[classifications.length] || null;
+    },
+    createUpstreamRequest: request => {
+      upstreamAccountIds.push(request.headers['chatgpt-account-id']);
+      return {
+        responsePromise: Promise.resolve(createUpstreamResponse(429, {
+          'content-type': 'application/json',
+        }, JSON.stringify({
+          error: {
+            type: 'usage_limit_reached',
+            message: "You've hit your usage limit.",
+          },
+        }))),
+        abort() {},
+      };
+    },
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2', 'account-3']);
+  assert.equal(upstreamAccountIds.includes('account-4'), false);
+  assert.deepEqual(classifications.map(item => item.config.description), [
+    'token 1',
+    'token 2',
+    'token 3',
+  ]);
+  assert.deepEqual(retryContexts.map(context => ({
+    failoverAttempt: context.failoverAttempt,
+    retryAllowed: context.retryAllowed,
+    excludedConfigs: context.excludedConfigs.map(config => config.description),
+  })), [
+    {
+      failoverAttempt: 0,
+      retryAllowed: true,
+      excludedConfigs: ['token 1'],
+    },
+    {
+      failoverAttempt: 1,
+      retryAllowed: true,
+      excludedConfigs: ['token 1', 'token 2'],
+    },
+    {
+      failoverAttempt: 2,
+      retryAllowed: false,
+      excludedConfigs: ['token 1', 'token 2', 'token 3'],
+    },
+  ]);
+  assert.equal(res.statusCode, 429);
+  assert.deepEqual(res.payload, {
+    error: {
+      type: 'usage_limit_reached',
+      message: "You've hit your usage limit.",
+    },
+  });
 });
 
 test('createClaudeMessagesHandler retries non-200 responses statuses with the next config', async () => {
