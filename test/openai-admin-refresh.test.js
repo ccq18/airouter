@@ -138,6 +138,31 @@ test('activateConfigAdminResponse switches the active runtime config without ref
   assert.equal(response, expectedResponse);
 });
 
+test('activateConfigAdminResponse can switch only one apikey fallback pool', async () => {
+  const calls = [];
+  const manager = {
+    activateStaticConfig: (poolKey, index, reason) => {
+      calls.push(['activateStatic', poolKey, index, reason]);
+    },
+    activateConfig: (index, reason) => {
+      calls.push(['activate', index, reason]);
+    },
+  };
+  const expectedResponse = {
+    openai_fallback_config_index: 1,
+    claude_fallback_config_index: 2,
+  };
+
+  const response = await activateConfigAdminResponse(2, {
+    accountManager: manager,
+    fallbackCapability: 'claude',
+    buildResponse: () => expectedResponse,
+  });
+
+  assert.deepEqual(calls, [['activateStatic', 'claude_apikey', 2, 'admin_manual_activate']]);
+  assert.equal(response, expectedResponse);
+});
+
 test('selectReloadedActiveConfig preserves active config during reorder reloads', () => {
   const calls = [];
   const activeConfig = {

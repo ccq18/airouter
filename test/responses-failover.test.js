@@ -160,7 +160,7 @@ test('classifyRetryableResponsesHttpError treats unknown auth failures as failed
   });
 });
 
-test('classifyRetryableResponsesHttpError treats model capacity HTTP errors as failed', () => {
+test('classifyRetryableResponsesHttpError detects model capacity HTTP errors', () => {
   const result = classifyRetryableResponsesHttpError({
     statusCode: 503,
     bodyText: JSON.stringify({
@@ -172,7 +172,7 @@ test('classifyRetryableResponsesHttpError treats model capacity HTTP errors as f
   });
 
   assert.deepEqual(result, {
-    reason: 'responses_unknown_error',
+    reason: 'responses_model_at_capacity',
     retryKey: 'model_at_capacity',
     retrySource: 'http',
   });
@@ -293,6 +293,23 @@ test('createResponsesEventStreamInspector treats response.failed with unknown er
     action: 'retry',
     reason: 'responses_unknown_error',
     retryKey: 'model_overloaded',
+    retrySource: 'stream',
+  });
+});
+
+test('createResponsesEventStreamInspector retries model capacity stream failures', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'event: response.failed\n' +
+    'data: {"response":{"error":{"code":"model_at_capacity","message":"Selected model is at capacity. Please try a different model."}}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_model_at_capacity',
+    retryKey: 'model_at_capacity',
     retrySource: 'stream',
   });
 });

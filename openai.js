@@ -1612,6 +1612,19 @@ function buildDispatchStatus(activeConfig) {
     };
 }
 
+function getFallbackCapabilityPoolKey(value) {
+    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (normalized === 'gpt' || normalized === 'openai') {
+        return OPENAI_APIKEY_STATIC_POOL;
+    }
+
+    if (normalized === 'claude') {
+        return CLAUDE_APIKEY_STATIC_POOL;
+    }
+
+    return '';
+}
+
 function buildDispatchObservation(accountStatuses = []) {
     const observations = accountStatuses
         .filter(status => status && status.dispatchSession)
@@ -1647,25 +1660,53 @@ function buildDispatchObservation(accountStatuses = []) {
     };
 }
 
-function getDispatchRole(config, activeConfig) {
-    if (!config || !config.runtime || !config.runtime.available) {
-        return 'unavailable';
+function getDispatchRoles(config, activeConfig, fallbackFocus = {}) {
+    if (!config || !config.runtime) {
+        return ['unavailable'];
     }
 
     if (config.type === 'apikey') {
-        return activeConfig === config ? 'apikey_fallback_focus' : 'apikey_fallback';
+        const roles = [];
+        if (configSupportsCapability(config, 'gpt')) {
+            roles.push(config.index === fallbackFocus.openai ? 'openai_apikey_fallback_focus' : 'openai_apikey_fallback');
+        }
+        if (configSupportsCapability(config, 'claude')) {
+            roles.push(config.index === fallbackFocus.claude ? 'claude_apikey_fallback_focus' : 'claude_apikey_fallback');
+        }
+        if (roles.length === 0) {
+            roles.push(activeConfig === config ? 'apikey_fallback_focus' : 'apikey_fallback');
+        }
+
+        return config.runtime.available ? roles : ['unavailable', ...roles];
     }
 
     if (config.type === 'claude_token') {
-        return activeConfig === config ? 'claude_token_focus' : 'claude_token';
+        const role = activeConfig === config ? 'claude_token_focus' : 'claude_token';
+        return config.runtime.available ? [role] : ['unavailable', role];
     }
 
-    return activeConfig === config ? 'openai_token_focus' : 'openai_token';
+    const role = activeConfig === config ? 'openai_token_focus' : 'openai_token';
+    return config.runtime.available ? [role] : ['unavailable', role];
+}
+
+function getDispatchRole(config, activeConfig, fallbackFocus = {}) {
+    const roles = getDispatchRoles(config, activeConfig, fallbackFocus);
+    return roles[0] || 'unavailable';
 }
 
 function buildConfigAdminResponse() {
     const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
     const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
+    const openAiFallbackConfigIndex = accountManager && typeof accountManager.getActiveStaticConfigIndex === 'function'
+        ? accountManager.getActiveStaticConfigIndex(OPENAI_APIKEY_STATIC_POOL)
+        : null;
+    const claudeFallbackConfigIndex = accountManager && typeof accountManager.getActiveStaticConfigIndex === 'function'
+        ? accountManager.getActiveStaticConfigIndex(CLAUDE_APIKEY_STATIC_POOL)
+        : null;
+    const fallbackFocus = {
+        openai: openAiFallbackConfigIndex,
+        claude: claudeFallbackConfigIndex,
+    };
     const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
     const accountStatuses = currentParsedConfig.configs.map((item, index) => (
         accountManager && apiConfigs[index] ? accountManager.getAccountStatus(apiConfigs[index]) : null
@@ -1691,11 +1732,14 @@ function buildConfigAdminResponse() {
         responses: currentParsedConfig.responses ?? null,
         dispatch: dispatchStatus,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
+        openai_fallback_config_index: openAiFallbackConfigIndex,
+        claude_fallback_config_index: claudeFallbackConfigIndex,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
             item,
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
-            dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig) : 'unavailable',
+            dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig, fallbackFocus) : 'unavailable',
+            dispatch_roles: apiConfigs[index] ? getDispatchRoles(apiConfigs[index], activeConfig, fallbackFocus) : ['unavailable'],
             runtime: apiConfigs[index] ? serializeAccountStatus(accountStatuses[index]) : null
         })),
         disabled_configs: (Array.isArray(currentParsedConfig.disabled_configs) ? currentParsedConfig.disabled_configs : []).map((item, index) => ({
@@ -1733,13 +1777,22 @@ async function refreshConfigAdminResponse(options = {}) {
 async function activateConfigAdminResponse(index, options = {}) {
     const manager = options.accountManager || accountManager;
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
+    const fallbackPoolKey = getFallbackCapabilityPoolKey(options.fallbackCapability);
 
     if (!manager || typeof manager.activateConfig !== 'function') {
         throw new ConfigEditorError('账号管理器未初始化');
     }
 
     try {
-        manager.activateConfig(index, 'admin_manual_activate');
+        if (fallbackPoolKey) {
+            if (typeof manager.activateStaticConfig !== 'function') {
+                throw new Error('账号管理器不支持 fallback apikey 独立切换');
+            }
+
+            manager.activateStaticConfig(fallbackPoolKey, index, 'admin_manual_activate');
+        } else {
+            manager.activateConfig(index, 'admin_manual_activate');
+        }
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
@@ -3316,7 +3369,9 @@ app.post('/admin/api/openai/refresh-token', async (req, res) => {
 app.post('/admin/api/configs/:index/activate', async (req, res) => {
     try {
         const targetIndex = parseConfigIndex(req.params.index);
-        res.json(await activateConfigAdminResponse(targetIndex));
+        res.json(await activateConfigAdminResponse(targetIndex, {
+            fallbackCapability: req.body && req.body.fallback_capability
+        }));
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({

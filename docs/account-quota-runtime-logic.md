@@ -28,14 +28,14 @@
 - 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置
 - 普通 apikey 代理在响应提交给客户端时记录成功；响应提交后发生的传输中断不会再触发透明切换，也不会把本次请求记为失败
 - 最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败时，apikey 会被临时标记为不可用
-- 已被标记为不可用且 `support` 包含 `gpt` 时，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用
+- 已被标记为不可用且是当前 OpenAI fallback 焦点、`support` 包含 `gpt` 时，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用
 - GPT apikey 恢复探测默认超时为 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；该超时独立于 token 额度检查的短超时
 - GPT apikey 恢复探测默认使用模型 `gpt-5.4-mini`，可通过配置项里的 `health.model` 覆盖
-- 管理页会显示 GPT apikey 恢复探测是否启用、是否待恢复、上次探测时间、结果、HTTP 状态/错误和探测模型
+- 管理页会显示当前 OpenAI fallback 焦点的 GPT apikey 恢复探测是否启用、是否待恢复、上次探测时间、结果、HTTP 状态/错误和探测模型
 - 只支持 `claude` 的 apikey 不做 `/v1/responses` 恢复探测
-- 手动切换到某个 `apikey` 配置项时，会把该配置恢复为可用
+- 管理页分别提供 OpenAI fallback 与 Claude fallback 两个 apikey 焦点开关；手动切换到某个 `apikey` 配置项时，只会调整对应链路的焦点，并把该配置恢复为可用
 
-后台每分钟轮询所有 `token` 配置项；每 3 分钟也会全量轮询所有 `token` 配置项，并额外探测已不可用的 GPT apikey。定时轮询中账号之间间隔 1 秒。
+后台每分钟轮询所有 `token` 配置项；每 3 分钟也会全量轮询所有 `token` 配置项，并额外探测已不可用的当前 OpenAI fallback 焦点。定时轮询中账号之间间隔 1 秒。
 
 ## 2. 运行时核心对象
 
@@ -102,6 +102,8 @@
 
 这样可以避免短暂网络抖动把仍可转发的 token 账号过早摘除；连续失败达到阈值时，仍会进入正常不可用与切换流程。
 
+例外：额度接口返回 401 或缺少凭证时，如果配置带 `refresh_token` 但刷新失败，系统会立即把该 token 标记为不可用，`reason = token_refresh_failed`，不会继续显示为可用。
+
 ### 3.3 非额度查询场景下的主动失效
 
 当真实业务请求已经命中某个 token 账号，且响应被识别为额度错误或上游错误时，系统会直接把当前账号标记为不可用。请求非 `gpt-5.4-mini` 或它的日期版本后缀时，成功响应被降级成 `gpt-5.4-mini` 或同名日期版本只触发本次请求切走，不标记账号不可用；系统会在运行态模型观测里记录 `downgraded = true`。apikey 账号不会因单次上游错误立即摘除，而是记录最近 30 分钟内最多 10 个已完成真实请求结果；响应提交给客户端前的非 200 HTTP 状态、请求失败或响应体中断累计达到 3 次时，才把当前 apikey 标记为不可用。
@@ -112,6 +114,7 @@
 - `/v1/messages` 业务请求自动切号
 - `/v1/images/generations` 和 `/v1/images/edits` 业务请求自动切号
 - `responses_model_downgraded` 模型降级请求级切换，不改变账号可用性
+- `responses_model_at_capacity` 模型容量不足会触发自动切号，并把当前 token 临时摘除
 - `apikey` 直连上游最近 30 分钟内最多 10 个真实请求累计 3 次提交响应前的非 200 HTTP 状态、普通代理请求失败或响应体中断摘除
 - 每 3 分钟全量校正中的 GPT apikey 恢复探测
 
@@ -167,7 +170,8 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 
 - 切换到 OpenAI token：把该 token 设为 Responses 主链路的调度焦点
 - 切换到 Claude token：把该 token 设为 `/v1/messages` 原样转发主链路的焦点
-- 切换到 apikey：只调整 fallback 焦点；token 主链路可用时仍优先走 token
+- 切换 OpenAI fallback apikey：只调整 Responses/OpenAI fallback 焦点；token 主链路可用时仍优先走 token
+- 切换 Claude fallback apikey：只调整 Claude Messages fallback 焦点；Claude token 主链路可用时仍优先走 Claude token
 - fallback apikey 失败后，会被临时摘除，再尝试同链路下一个 token 或 fallback 配置
 
 1. 如果当前活动配置符合当前路由能力且 `runtime.available = true`，继续保持当前配置。

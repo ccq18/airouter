@@ -45,10 +45,33 @@ function parseJsonResponse(text, context) {
   }
 }
 
+function formatOAuthErrorValue(value) {
+  if (value && typeof value === 'object') {
+    const code = normalizeString(value.code || value.error || value.type);
+    const message = normalizeString(value.message || value.description || value.error_description || value.details);
+
+    if (code && message) {
+      return `${code}: ${message}`;
+    }
+
+    if (code) {
+      return code;
+    }
+
+    if (message) {
+      return message;
+    }
+
+    return '';
+  }
+
+  return normalizeString(value);
+}
+
 function formatOAuthError(payload, fallback) {
   if (payload && typeof payload === 'object') {
-    const error = normalizeString(payload.error);
-    const description = normalizeString(payload.error_description || payload.message || payload.details);
+    const error = formatOAuthErrorValue(payload.error);
+    const description = formatOAuthErrorValue(payload.error_description || payload.message || payload.details);
 
     if (error && description) {
       return `${error}: ${description}`;

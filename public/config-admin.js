@@ -435,6 +435,20 @@
     return getApiKeySupport(item).includes(capability);
   }
 
+  function getDispatchRoles(item) {
+    if (Array.isArray(item && item.dispatch_roles)) {
+      return item.dispatch_roles.filter(role => typeof role === 'string' && role);
+    }
+
+    return typeof item?.dispatch_role === 'string' && item.dispatch_role
+      ? [item.dispatch_role]
+      : [];
+  }
+
+  function hasDispatchRole(item, role) {
+    return getDispatchRoles(item).includes(role);
+  }
+
   function getConfigRole(item) {
     const type = getConfigType(item);
     if (type === 'claude_token') {
@@ -449,13 +463,26 @@
 
     if (type === 'apikey') {
       const support = getApiKeySupport(item);
+      const isOpenAiFocus = hasDispatchRole(item, 'openai_apikey_fallback_focus') ||
+        hasDispatchRole(item, 'apikey_fallback_focus');
+      const isClaudeFocus = hasDispatchRole(item, 'claude_apikey_fallback_focus') ||
+        hasDispatchRole(item, 'apikey_fallback_focus');
+      const focusPriority = isOpenAiFocus && isClaudeFocus
+        ? '双链路兜底焦点'
+        : isOpenAiFocus
+          ? 'OpenAI 兜底焦点'
+          : isClaudeFocus
+            ? 'Claude 兜底焦点'
+            : '兜底';
+      const tone = isOpenAiFocus || isClaudeFocus ? 'active' : 'muted';
+
       if (support.includes('gpt') && support.includes('claude')) {
         return {
           key: 'fallback-both',
           label: 'API key',
           lane: '双链路 fallback',
-          priority: '兜底',
-          tone: 'muted',
+          priority: focusPriority,
+          tone,
         };
       }
 
@@ -464,8 +491,8 @@
           key: 'fallback-claude',
           label: 'API key',
           lane: 'Claude fallback',
-          priority: '兜底',
-          tone: 'muted',
+          priority: focusPriority,
+          tone,
         };
       }
 
@@ -473,8 +500,8 @@
         key: 'fallback-gpt',
         label: 'API key',
         lane: 'Responses fallback',
-        priority: '兜底',
-        tone: 'muted',
+        priority: focusPriority,
+        tone,
       };
     }
 

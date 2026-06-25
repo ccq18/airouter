@@ -109,11 +109,13 @@ function createAccountManager(options) {
       responses_usage_limit_reached: 'responses 窗口额度已用尽',
       responses_usage_not_included: 'responses 套餐不支持',
       responses_model_downgraded: 'responses 模型被降级',
+      responses_model_at_capacity: 'responses 模型容量不足',
       responses_unknown_error: 'responses 未知错误',
       apikey_auth_failed: 'API Key 鉴权失败',
       apikey_rate_limited: 'API Key 被限流',
       apikey_upstream_5xx: 'API Key 上游服务错误',
       apikey_upstream_error: 'API Key 上游请求失败',
+      token_refresh_failed: 'token 刷新失败',
       [`remaining_below_${minRemainingPercent}%`]: `剩余额度低于 ${minRemainingPercent}%`,
       quota_check_failed: '额度检查失败',
     };
@@ -152,6 +154,28 @@ function createAccountManager(options) {
     if (supportsApiKeyCapability(config, 'claude')) {
       staticActiveConfigIndices.set(CLAUDE_APIKEY_STATIC_POOL, config.index);
     }
+  }
+
+  function getStaticPoolCapability(poolKey) {
+    const normalizedPoolKey = normalizeStaticPoolKey(poolKey);
+    if (normalizedPoolKey === OPENAI_APIKEY_STATIC_POOL) {
+      return {
+        capability: 'gpt',
+        label: 'OpenAI fallback',
+      };
+    }
+
+    if (normalizedPoolKey === CLAUDE_APIKEY_STATIC_POOL) {
+      return {
+        capability: 'claude',
+        label: 'Claude fallback',
+      };
+    }
+
+    return {
+      capability: '',
+      label: 'fallback',
+    };
   }
 
   function hasQuotaOrApiKeyRecoveryTargets(reason = 'poll') {
@@ -408,6 +432,20 @@ function createAccountManager(options) {
     return failureCount;
   }
 
+  function markTokenRefreshFailure(config, err, options = {}) {
+    const message = err && err.message ? err.message : String(err || 'token refresh failed');
+    config.runtime.quotaCheckFailures = TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD;
+    config.runtime.available = false;
+    config.runtime.reason = 'token_refresh_failed';
+    config.runtime.lastCheckedAt = now();
+    config.runtime.lastError = message;
+    if (options.allowSwitch && config === getActiveConfig()) {
+      return ensureActiveConfig(options.switchReason || 'token_refresh_failed');
+    }
+
+    return config;
+  }
+
   function getApiKeyRequestResults(config) {
     if (!config || !config.runtime) {
       return [];
@@ -595,6 +633,11 @@ function createAccountManager(options) {
     return currentConfig && predicate(currentConfig) ? currentConfig : null;
   }
 
+  function getActiveStaticConfigIndex(poolKey) {
+    const staticIndex = staticActiveConfigIndices.get(normalizeStaticPoolKey(poolKey));
+    return Number.isInteger(staticIndex) ? staticIndex : null;
+  }
+
   function ensureActiveStaticConfig(poolKey, reason = 'select', predicate = () => true) {
     const normalizedPoolKey = normalizeStaticPoolKey(poolKey);
     const currentConfig = getActiveStaticConfig(normalizedPoolKey, predicate);
@@ -623,6 +666,37 @@ function createAccountManager(options) {
 
   function findConfig(predicate = () => true) {
     return configs.find(predicate) || null;
+  }
+
+  function activateStaticConfig(poolKey, index, reason = 'manual') {
+    if (!Number.isInteger(index) || index < 0 || index >= configs.length) {
+      throw new Error('配置项索引不合法');
+    }
+
+    const normalizedPoolKey = normalizeStaticPoolKey(poolKey);
+    const pool = getStaticPoolCapability(normalizedPoolKey);
+    const nextConfig = configs[index];
+    if (nextConfig.type !== 'apikey') {
+      throw new Error('配置项不是 fallback apikey');
+    }
+
+    if (pool.capability && !supportsApiKeyCapability(nextConfig, pool.capability)) {
+      throw new Error(`配置项不支持 ${pool.label}`);
+    }
+
+    const previousConfig = configs[staticActiveConfigIndices.get(normalizedPoolKey)] || null;
+    nextConfig.runtime.available = true;
+    nextConfig.runtime.reason = 'apikey';
+    nextConfig.runtime.lastCheckedAt = now();
+    nextConfig.runtime.lastError = null;
+    resetApiKeyRequestResults(nextConfig);
+    staticActiveConfigIndices.set(normalizedPoolKey, index);
+
+    if (previousConfig !== nextConfig && reason !== 'startup') {
+      warn(`账号切换: ${previousConfig ? getAccountLabel(previousConfig) : 'none'} -> ${getAccountLabel(nextConfig)} (${pool.label}, ${reason})`);
+    }
+
+    return nextConfig;
   }
 
   function activateConfig(index, reason = 'manual') {
@@ -1169,7 +1243,13 @@ function createAccountManager(options) {
       if (result.statusCode < 200 || result.statusCode >= 300) {
         const missingCredentials = isMissingCredentialsPayload(payload);
         if (isRefreshableQuotaAuthFailure(result, payload)) {
-          const refreshed = await refreshConfigAccessToken(config);
+          let refreshed = false;
+          try {
+            refreshed = await refreshConfigAccessToken(config);
+          } catch (err) {
+            markTokenRefreshFailure(config, err, { allowSwitch, switchReason: 'token_refresh_failed' });
+            return config.runtime;
+          }
           if (refreshed) {
             ({ result, payload } = await requestQuotaPayload(config, targetUrl));
             if (result.statusCode >= 200 && result.statusCode < 300) {
@@ -1248,12 +1328,14 @@ function createAccountManager(options) {
       return [];
     }
 
-    return configs.filter(config => (
-      shouldUseApiKeyRecoveryMonitoring(config) &&
-      config.runtime &&
-      config.runtime.enabled &&
-      !config.runtime.available
-    ));
+    const activeGptApiKey = getActiveStaticConfig(OPENAI_APIKEY_STATIC_POOL, supportsGptApiKey);
+    return activeGptApiKey &&
+      shouldUseApiKeyRecoveryMonitoring(activeGptApiKey) &&
+      activeGptApiKey.runtime &&
+      activeGptApiKey.runtime.enabled &&
+      !activeGptApiKey.runtime.available
+      ? [activeGptApiKey]
+      : [];
   }
 
   function classifyApiKeyRecoveryStatus(statusCode, previousReason) {
@@ -1476,8 +1558,10 @@ function createAccountManager(options) {
     stopQuotaMonitor,
     getActiveConfig,
     getActiveStaticConfig,
+    getActiveStaticConfigIndex,
     ensureActiveStaticConfig,
     findConfig,
+    activateStaticConfig,
     activateConfig,
     getAccountStatus,
     applyQuotaPayload,

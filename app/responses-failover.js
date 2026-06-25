@@ -6,12 +6,14 @@ const RETRYABLE_HTTP_ERROR_TYPES = new Map([
   ['usage_not_included', { reason: 'responses_usage_not_included' }],
   ['unauthorized', { reason: 'missing_credentials' }],
   ['token_revoked', { reason: 'missing_credentials' }],
+  ['model_at_capacity', { reason: 'responses_model_at_capacity' }],
 ]);
 
 const RETRYABLE_STREAM_ERROR_CODES = new Map([
   ['insufficient_quota', { reason: 'responses_insufficient_quota' }],
   ['usage_limit_reached', { reason: 'responses_usage_limit_reached' }],
   ['usage_not_included', { reason: 'responses_usage_not_included' }],
+  ['model_at_capacity', { reason: 'responses_model_at_capacity' }],
 ]);
 const DOWNGRADED_RESPONSE_MODEL = 'gpt-5.4-mini';
 
@@ -127,6 +129,15 @@ function getUsageLimitMessageKey(...values) {
   return '';
 }
 
+function getModelCapacityMessageKey(...values) {
+  const normalized = values
+    .map(normalizeErrorText)
+    .filter(Boolean)
+    .join('\n');
+
+  return normalized.includes('selected model is at capacity') ? 'model_at_capacity' : '';
+}
+
 function parseJsonObject(text) {
   if (typeof text !== 'string' || text.trim().length === 0) {
     return null;
@@ -227,7 +238,14 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
     getPayloadString(payload, ['message']),
     bodyText,
   );
-  const retryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : messageKey;
+  const capacityKey = getModelCapacityMessageKey(
+    getPayloadString(payload, ['error', 'message']),
+    getPayloadString(payload, ['message']),
+    bodyText,
+  );
+  const typedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : '';
+  const codedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorCode) ? errorCode : '';
+  const retryKey = typedRetryKey || codedRetryKey || messageKey || capacityKey;
   const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
 
   if (!metadata) {
@@ -254,7 +272,11 @@ function classifyRetryableResponsesStreamPayload(payload, options = {}) {
     return modelDowngrade;
   }
 
-  const eventType = typeof payload?.type === 'string' ? payload.type : '';
+  const eventType = typeof payload?.type === 'string' && payload.type
+    ? payload.type
+    : typeof options.eventType === 'string'
+      ? options.eventType
+      : '';
   const errorCode = payload && payload.response && payload.response.error && typeof payload.response.error.code === 'string'
     ? payload.response.error.code
     : '';
@@ -262,7 +284,8 @@ function classifyRetryableResponsesStreamPayload(payload, options = {}) {
     ? payload.response.error.message
     : '';
   const messageKey = getUsageLimitMessageKey(errorMessage);
-  const retryKey = RETRYABLE_STREAM_ERROR_CODES.has(errorCode) ? errorCode : messageKey;
+  const capacityKey = getModelCapacityMessageKey(errorMessage);
+  const retryKey = RETRYABLE_STREAM_ERROR_CODES.has(errorCode) ? errorCode : messageKey || capacityKey;
   const metadata = eventType === 'response.failed'
     ? RETRYABLE_STREAM_ERROR_CODES.get(retryKey)
     : null;
@@ -417,9 +440,10 @@ function createResponsesEventStreamInspector(options = {}) {
       return { action: 'pass' };
     }
 
-    const eventType = typeof payload.type === 'string' ? payload.type : '';
+    const eventType = typeof payload.type === 'string' ? payload.type : getSseEventType(eventBlock);
     const classification = classifyRetryableResponsesStreamPayload(payload, {
       requestedModel,
+      eventType,
     });
 
     if (classification) {
@@ -450,6 +474,13 @@ function createResponsesEventStreamInspector(options = {}) {
       return result.action === 'pending' ? { action: 'pass' } : result;
     },
   };
+}
+
+function getSseEventType(eventBlock) {
+  const eventLine = String(eventBlock || '')
+    .split(/\r?\n/)
+    .find(line => line.startsWith('event:'));
+  return eventLine ? eventLine.slice(6).trim() : '';
 }
 
 module.exports = {

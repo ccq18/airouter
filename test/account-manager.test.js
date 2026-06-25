@@ -370,6 +370,63 @@ test('ensureActiveStaticConfig keeps OpenAI and Claude apikey focus separate', (
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
+test('activateStaticConfig changes only the selected apikey fallback pool', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://shared.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-shared',
+      support: ['gpt', 'claude'],
+    }),
+    createConfig(1, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai',
+      support: ['gpt'],
+    }),
+    createConfig(2, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+  const isClaudeApiKey = config => config.type === 'apikey' && config.support.includes('claude');
+
+  manager.ensureActiveStaticConfig('openai_apikey', 'startup', isGptApiKey);
+  manager.ensureActiveStaticConfig('claude_apikey', 'startup', isClaudeApiKey);
+  const selected = manager.activateStaticConfig('claude_apikey', 2, 'admin_manual_activate');
+
+  assert.equal(selected, configs[2]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+  assert.equal(manager.getActiveStaticConfig('claude_apikey', isClaudeApiKey), configs[2]);
+  assert.equal(manager.getActiveStaticConfigIndex('openai_apikey'), 0);
+  assert.equal(manager.getActiveStaticConfigIndex('claude_apikey'), 2);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
+test('activateStaticConfig rejects apikeys outside the selected fallback capability', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  assert.throws(() => {
+    manager.activateStaticConfig('openai_apikey', 0, 'admin_manual_activate');
+  }, /配置项不支持 OpenAI fallback/);
+});
+
 test('account manager does not expose internal helper methods', () => {
   const { manager } = createManager([createConfig(0)]);
 
@@ -1793,6 +1850,41 @@ test('refreshQuotas refreshes token on quota check 401 even when payload is not 
   assert.equal(configs[0].runtime.remainingPercent, 85);
 });
 
+test('refreshQuotas marks token unavailable immediately when refresh_token fails', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      access_token: 'expired-access-token',
+      refresh_token: 'expired-refresh-token',
+    }),
+    createConfig(1, { available: true, reason: 'ok' }, {
+      access_token: 'backup-access-token',
+      account_id: 'backup-account',
+    }),
+  ];
+  let refreshCalled = false;
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => ({
+      statusCode: 401,
+      bodyText: JSON.stringify({
+        detail: 'Unauthorized',
+      }),
+    }),
+    refreshTokenFn: async () => {
+      refreshCalled = true;
+      throw new Error('OpenAI token refresh failed: invalid_grant: refresh token expired');
+    },
+  });
+
+  await manager.refreshQuotas('poll', { refreshAll: false });
+
+  assert.equal(refreshCalled, true);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'token_refresh_failed');
+  assert.equal(configs[0].runtime.lastError, 'OpenAI token refresh failed: invalid_grant: refresh token expired');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 3);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+});
+
 test('refreshQuotas keeps missing_credentials when refresh_token is unavailable', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
@@ -1816,6 +1908,65 @@ test('refreshQuotas keeps missing_credentials when refresh_token is unavailable'
   assert.equal(refreshCalled, false);
   assert.equal(configs[0].runtime.available, false);
   assert.equal(configs[0].runtime.reason, 'missing_credentials');
+});
+
+test('all-account polls probe only the active GPT apikey fallback focus', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-primary.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: false, reason: 'apikey_rate_limited' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-backup.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-2',
+      support: ['gpt'],
+    }),
+    createConfig(2, { available: false, reason: 'apikey_rate_limited' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ id: 'response-ok' }),
+      };
+    },
+  });
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+
+  assert.equal(manager.ensureActiveStaticConfig('openai_apikey', 'startup', isGptApiKey), configs[0]);
+  await manager.refreshQuotas('all_poll');
+  assert.equal(calls.length, 0);
+
+  for (let index = 0; index < 3; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  assert.equal(manager.ensureActiveStaticConfig('openai_apikey', 'openai_failover', isGptApiKey), configs[0]);
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].targetUrl, 'https://openai-primary.example.com/v1/responses');
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[1].runtime.available, false);
+  assert.equal(configs[2].runtime.available, false);
 });
 
 test('refreshQuotas still checks all accounts during startup', async () => {
@@ -1932,16 +2083,9 @@ test('refreshQuotas skips apikey configs during poll', async () => {
   assert.equal(configs[0].runtime.lastCheckedAt, null);
 });
 
-test('refreshQuotas recovers unavailable apikey configs during an all-account poll', async () => {
+test('refreshQuotas recovers only the active unavailable GPT apikey focus during an all-account poll', async () => {
   const configs = [
-    createConfig(0, { reason: 'apikey' }, {
-      type: 'apikey',
-      baseUrl: 'https://ready.example.com/v1',
-      apiBasePath: '',
-      apiKey: 'sk-ready',
-      support: ['gpt'],
-    }),
-    createConfig(1, {
+    createConfig(0, {
       available: false,
       reason: 'apikey_rate_limited',
       lastError: 'http:429',
@@ -1950,6 +2094,17 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
       baseUrl: 'https://recover.example.com/v1',
       apiBasePath: '',
       apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+    createConfig(1, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://other.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-other',
       support: ['gpt'],
     }),
     createConfig(2, {
@@ -1992,27 +2147,23 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
     calls.map(call => call.targetUrl),
     [
       'https://recover.example.com/v1/responses',
-      'https://blocked.example.com/v1/responses',
     ],
   );
   assert.deepEqual(
     calls.map(call => call.headers.authorization),
-    ['Bearer sk-recover', 'Bearer sk-blocked'],
+    ['Bearer sk-recover'],
   );
   assert.deepEqual(
     calls.map(call => JSON.parse(call.body.toString('utf8'))),
     [
       { model: 'gpt-5.4-mini', input: 'hello', stream: false },
-      { model: 'gpt-5.4-mini', input: 'hello', stream: false },
     ],
   );
   assert.equal(configs[0].runtime.available, true);
-  assert.equal(configs[0].runtime.lastCheckedAt, null);
-  assert.equal(configs[1].runtime.available, true);
-  assert.equal(configs[1].runtime.reason, 'apikey');
-  assert.equal(configs[1].runtime.lastError, null);
-  assert.equal(configs[1].runtime.lastCheckedAt, 1713337200000);
-  assert.deepEqual(manager.getAccountStatus(configs[1]).apiKeyRecovery, {
+  assert.equal(configs[0].runtime.reason, 'apikey');
+  assert.equal(configs[0].runtime.lastError, null);
+  assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
+  assert.deepEqual(manager.getAccountStatus(configs[0]).apiKeyRecovery, {
     enabled: true,
     pending: false,
     intervalMs: 3 * 60 * 1000,
@@ -2023,25 +2174,14 @@ test('refreshQuotas recovers unavailable apikey configs during an all-account po
     lastError: null,
     model: 'gpt-5.4-mini',
   });
+  assert.equal(configs[1].runtime.available, false);
+  assert.equal(configs[1].runtime.lastCheckedAt, null);
   assert.equal(configs[2].runtime.available, false);
-  assert.equal(configs[2].runtime.reason, 'apikey_rate_limited');
-  assert.equal(configs[2].runtime.lastError, 'http:429');
-  assert.equal(configs[2].runtime.lastCheckedAt, 1713337200000);
-  assert.deepEqual(manager.getAccountStatus(configs[2]).apiKeyRecovery, {
-    enabled: true,
-    pending: true,
-    intervalMs: 3 * 60 * 1000,
-    lastCheckedAt: 1713337200000,
-    result: 'failed',
-    statusCode: 429,
-    reason: 'apikey_rate_limited',
-    lastError: 'http:429',
-    model: 'gpt-5.4-mini',
-  });
+  assert.equal(configs[2].runtime.lastCheckedAt, null);
   assert.equal(configs[3].runtime.available, false);
   assert.equal(configs[3].runtime.lastCheckedAt, null);
   assert.equal(manager.getAccountStatus(configs[3]).apiKeyRecovery.enabled, false);
-  assert.equal(warnings.some(line => /API Key 恢复可用: #2 account-2/.test(line)), true);
+  assert.equal(warnings.some(line => /API Key 恢复可用: #1 account-1/.test(line)), true);
 });
 
 test('ensureActiveConfig keeps an earlier apikey ahead of a later token config', () => {

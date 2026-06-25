@@ -28,11 +28,13 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 - HTTP `429` 且 `error.type == "usage_limit_reached"`
 - HTTP `429` 且 `error.type == "usage_not_included"`
+- HTTP 非 `200` 且 `error.code == "model_at_capacity"`，或错误消息包含 `Selected model is at capacity`
 - HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
 - 其他 HTTP 非 `200` 响应，包括 `201`、`400`、`500`、`503` 等
 - 请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但成功响应里的实际模型是 `gpt-5.4-mini` 或同名日期版本
 - SSE `response.failed` 且 `response.error.code == "insufficient_quota"`
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
+- SSE `response.failed` 且 `response.error.code == "model_at_capacity"`，或错误消息包含 `Selected model is at capacity`
 - 其他 `response.failed`
 
 对应内部原因码如下：
@@ -41,11 +43,13 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 | --- | --- |
 | `429 + usage_limit_reached` | `responses_usage_limit_reached` |
 | `429 + usage_not_included` | `responses_usage_not_included` |
+| `model_at_capacity` / `Selected model is at capacity` | `responses_model_at_capacity` |
 | `401/403 + unauthorized/token_revoked` | `missing_credentials` |
 | `其他 HTTP 非 200` | `responses_unknown_error` |
 | 请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但响应模型为 `gpt-5.4-mini` 或同名日期版本 | `responses_model_downgraded` |
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
+| `response.failed + model_at_capacity` | `responses_model_at_capacity` |
 | `其他 response.failed` | `responses_unknown_error` |
 
 ## 3. 当前不参与自动切号、只做识别或透传的情况
@@ -65,7 +69,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 1. 如果上游是 HTTP 非 `200`，先读取完整 body，再提取 `error.type` / `error.code` / 顶层 `type` / 顶层 `code`
 2. 如果上游是成功 JSON，且请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，会先缓冲完整响应体并检查 `model` / `response.model`；只有确认没有被降级时才继续透传
-3. 如果上游是 `text/event-stream`，先检查前几个 SSE 事件
+3. 如果上游是 `text/event-stream`，先检查前几个 SSE 事件；事件类型可来自 payload 顶层 `type`，也可来自 SSE `event:` 行
 4. 如果在前置事件里看到：
    - `response.created`
    - `response.in_progress`

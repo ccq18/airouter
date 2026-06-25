@@ -1852,19 +1852,31 @@
 
     function runtimeBadges(item) {
       const tags = [];
+      const roles = Array.isArray(item.dispatch_roles)
+        ? item.dispatch_roles
+        : (item.dispatch_role ? [item.dispatch_role] : []);
+      const hasRole = role => roles.includes(role);
 
-      if (item.dispatch_role === 'openai_token_focus') {
+      if (hasRole('openai_token_focus')) {
         tags.push('<span class="badge ok">OpenAI 主链路</span>');
-      } else if (item.dispatch_role === 'openai_token') {
+      } else if (hasRole('openai_token')) {
         tags.push('<span class="badge ok">OpenAI 主链路</span>');
-      } else if (item.dispatch_role === 'claude_token_focus') {
+      } else if (hasRole('claude_token_focus')) {
         tags.push('<span class="badge ok">Claude 主链路</span>');
-      } else if (item.dispatch_role === 'claude_token') {
+      } else if (hasRole('claude_token')) {
         tags.push('<span class="badge ok">Claude 主链路</span>');
-      } else if (item.dispatch_role === 'apikey_fallback_focus') {
-        tags.push('<span class="badge active">兜底焦点</span>');
-      } else if (item.dispatch_role === 'apikey_fallback') {
-        tags.push('<span class="badge muted">兜底</span>');
+      }
+
+      if (hasRole('openai_apikey_fallback_focus') || hasRole('apikey_fallback_focus')) {
+        tags.push('<span class="badge active">OpenAI 兜底焦点</span>');
+      } else if (hasRole('openai_apikey_fallback') || item.item && getConfigType(item) === 'apikey' && configSupports(item, 'gpt')) {
+        tags.push('<span class="badge muted">OpenAI 兜底</span>');
+      }
+
+      if (hasRole('claude_apikey_fallback_focus') || hasRole('apikey_fallback_focus')) {
+        tags.push('<span class="badge active">Claude 兜底焦点</span>');
+      } else if (hasRole('claude_apikey_fallback') || item.item && getConfigType(item) === 'apikey' && configSupports(item, 'claude')) {
+        tags.push('<span class="badge muted">Claude 兜底</span>');
       } else if (item.is_active) {
         tags.push('<span class="badge active">当前</span>');
       }
@@ -1876,13 +1888,28 @@
       return tags.join('');
     }
 
-    function getActivateButtonText(item) {
-      if (item.dispatch_role === 'apikey_fallback_focus') {
-        return '兜底焦点';
+    function isFallbackFocus(item, capability) {
+      const roles = Array.isArray(item.dispatch_roles)
+        ? item.dispatch_roles
+        : (item.dispatch_role ? [item.dispatch_role] : []);
+      if (capability === 'gpt') {
+        return roles.includes('openai_apikey_fallback_focus') || roles.includes('apikey_fallback_focus');
       }
 
-      if (item.item && item.item.type === 'apikey') {
-        return '设为兜底焦点';
+      if (capability === 'claude') {
+        return roles.includes('claude_apikey_fallback_focus') || roles.includes('apikey_fallback_focus');
+      }
+
+      return false;
+    }
+
+    function getActivateButtonText(item, capability) {
+      if (capability === 'gpt') {
+        return isFallbackFocus(item, 'gpt') ? 'OpenAI 兜底焦点' : '设为 OpenAI 兜底';
+      }
+
+      if (capability === 'claude') {
+        return isFallbackFocus(item, 'claude') ? 'Claude 兜底焦点' : '设为 Claude 兜底';
       }
 
       return '默认主链路';
@@ -2084,6 +2111,16 @@
       const includeActivate = options.includeActivate !== false && getConfigType(item) === 'apikey';
       const canMovePrevious = item.index > 0;
       const canMoveNext = item.index < allConfigs.length - 1;
+      const fallbackButtons = includeActivate
+        ? [
+          configSupports(item, 'gpt')
+            ? `<button class="secondary" type="button" data-action="activate" data-capability="gpt" data-index="${item.index}" ${isFallbackFocus(item, 'gpt') ? 'disabled' : ''}>${getActivateButtonText(item, 'gpt')}</button>`
+            : '',
+          configSupports(item, 'claude')
+            ? `<button class="secondary" type="button" data-action="activate" data-capability="claude" data-index="${item.index}" ${isFallbackFocus(item, 'claude') ? 'disabled' : ''}>${getActivateButtonText(item, 'claude')}</button>`
+            : '',
+        ].join('')
+        : '';
 
       return `
         <div class="config-card-actions">
@@ -2094,9 +2131,7 @@
             <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${canMovePrevious ? '' : 'disabled'}>置顶</button>
           </div>
           <div class="action-row action-row-state">
-            ${includeActivate
-              ? `<button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.dispatch_role === 'apikey_fallback_focus' ? 'disabled' : ''}>${getActivateButtonText(item)}</button>`
-              : ''}
+            ${fallbackButtons}
             <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
             <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
           </div>
@@ -2697,10 +2732,13 @@
       setMessage('info', `已批量删除 ${deletedParts.join('、')}。`);
     }
 
-    async function activateConfig(index) {
+    async function activateConfig(index, capability = '') {
       const numericIndex = Number(index);
       const result = await requestJson(`/admin/api/configs/${index}/activate`, {
         method: 'POST',
+        body: capability ? JSON.stringify({
+          fallback_capability: capability,
+        }) : undefined,
       });
 
       snapshot = result;
@@ -2710,8 +2748,11 @@
       });
       const activated = Array.isArray(result.configs) ? result.configs.find(item => item && item.index === numericIndex) : null;
       const activatedType = activated && activated.item ? activated.item.type : '';
+      const fallbackMessage = capability === 'claude'
+        ? '已设为 Claude fallback apikey 焦点；token 可用时仍优先走 token。'
+        : '已设为 OpenAI fallback apikey 焦点；token 可用时仍优先走 token。';
       setMessage('info', activatedType === 'apikey'
-        ? '已设为 fallback apikey 焦点；token 可用时仍优先走 token。'
+        ? fallbackMessage
         : 'token 主链路默认启用，无需手动切换。');
     }
 
@@ -3072,7 +3113,7 @@
       if (activateButton) {
         activateButton.disabled = true;
         try {
-          await activateConfig(activateButton.dataset.index);
+          await activateConfig(activateButton.dataset.index, activateButton.dataset.capability || '');
         } catch (error) {
           setMessage('error', error.message);
         } finally {

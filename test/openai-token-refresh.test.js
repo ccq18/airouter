@@ -59,3 +59,21 @@ test('refreshOpenAIToken rejects non-2xx OAuth responses', async () => {
     /OpenAI token refresh failed: invalid_grant: refresh token expired/
   );
 });
+
+test('refreshOpenAIToken formats structured OAuth error payloads', async () => {
+  await assert.rejects(
+    () => refreshOpenAIToken({
+      refreshToken: 'old-refresh-token',
+      requestBufferedFn: async () => ({
+        statusCode: 400,
+        bodyText: JSON.stringify({
+          error: {
+            code: 'invalid_grant',
+            message: 'refresh token expired',
+          },
+        }),
+      }),
+    }),
+    /OpenAI token refresh failed: invalid_grant: refresh token expired/
+  );
+});

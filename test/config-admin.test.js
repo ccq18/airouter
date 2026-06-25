@@ -81,8 +81,11 @@ test('config admin exposes manual runtime config activation controls', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
   assert.match(html, /data-action="activate"/);
+  assert.match(html, /data-capability="gpt"/);
+  assert.match(html, /data-capability="claude"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
-  assert.match(html, /已设为 fallback apikey 焦点/);
+  assert.match(html, /已设为 OpenAI fallback apikey 焦点/);
+  assert.match(html, /已设为 Claude fallback apikey 焦点/);
   assert.match(html, /token 主链路默认启用，无需手动切换/);
   assert.match(html, /getConfigType\(item\) === 'apikey'/);
 });
@@ -517,6 +520,55 @@ test('getRouteLanes separates token primary chains from apikey fallbacks', () =>
       fallback: [2],
     },
   ]);
+});
+
+test('getConfigRole identifies separate OpenAI and Claude apikey fallback focus', () => {
+  const openAiFocus = {
+    index: 2,
+    dispatch_role: 'openai_apikey_fallback_focus',
+    item: {
+      type: 'apikey',
+      support: ['gpt'],
+    },
+  };
+  const claudeFocus = {
+    index: 3,
+    dispatch_role: 'claude_apikey_fallback_focus',
+    item: {
+      type: 'apikey',
+      support: ['claude'],
+    },
+  };
+  const sharedFocus = {
+    index: 4,
+    dispatch_roles: ['openai_apikey_fallback_focus', 'claude_apikey_fallback_focus'],
+    item: {
+      type: 'apikey',
+      support: ['gpt', 'claude'],
+    },
+  };
+
+  assert.deepEqual(getConfigRole(openAiFocus), {
+    key: 'fallback-gpt',
+    label: 'API key',
+    lane: 'Responses fallback',
+    priority: 'OpenAI 兜底焦点',
+    tone: 'active',
+  });
+  assert.deepEqual(getConfigRole(claudeFocus), {
+    key: 'fallback-claude',
+    label: 'API key',
+    lane: 'Claude fallback',
+    priority: 'Claude 兜底焦点',
+    tone: 'active',
+  });
+  assert.deepEqual(getConfigRole(sharedFocus), {
+    key: 'fallback-both',
+    label: 'API key',
+    lane: '双链路 fallback',
+    priority: '双链路兜底焦点',
+    tone: 'active',
+  });
 });
 
 test('hasRefreshTokenConfig detects token configs that can be refreshed', () => {
