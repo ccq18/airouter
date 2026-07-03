@@ -92,37 +92,6 @@ jobs:
           console.log(`Synced desktop version to ${version}`);
           NODE
 
-      - name: Configure updater signing
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PATH }}
-        run: |
-          set -euo pipefail
-          has_inline_key=false
-          has_key_file=false
-          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            has_inline_key=true
-          fi
-          if [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ] && [ -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]; then
-            has_key_file=true
-          fi
-
-          if [ "$has_inline_key" = "true" ] || [ "$has_key_file" = "true" ]; then
-            echo "AIR_OUTER_UPDATER_SIGNING_ENABLED=true" >> "$GITHUB_ENV"
-            echo "Updater signing key detected; signed updater artifacts will be generated."
-          else
-            echo "AIR_OUTER_UPDATER_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
-            node <<'NODE'
-            const fs = require('node:fs');
-            const configFile = 'desktop/src-tauri/tauri.conf.json';
-            const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-            config.bundle.createUpdaterArtifacts = false;
-            fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
-            NODE
-            echo "::notice title=Updater signing disabled::TAURI_SIGNING_PRIVATE_KEY was not configured; this run will publish installer artifacts without signed updater packages or latest.json."
-          fi
-
       - name: Build desktop app
         working-directory: desktop
         shell: bash
@@ -131,8 +100,30 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PATH }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          set -o pipefail
-          npm run ${{ matrix.build_script }} 2>&1 | tee ../desktop-build-${{ matrix.platform }}.log
+          set -euo pipefail
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || unset TAURI_SIGNING_PRIVATE_KEY
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ] || unset TAURI_SIGNING_PRIVATE_KEY_PATH
+          [ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ] || unset TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+
+          validation_file="$(mktemp)"
+          signing_check_log="$(mktemp)"
+          trap 'rm -f "$validation_file" "$signing_check_log"' EXIT
+          printf 'airouter updater signing probe\n' > "$validation_file"
+
+          signing_enabled=false
+          build_args=()
+          if npx tauri signer sign "$validation_file" > "$signing_check_log" 2>&1; then
+            signing_enabled=true
+            echo "Updater signing key validated; signed updater artifacts will be generated."
+          else
+            cat "$signing_check_log"
+            build_args=(-- --config '{"bundle":{"createUpdaterArtifacts":false}}')
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            echo "::notice title=Updater signing disabled::Tauri could not sign a validation file; this run will publish installer artifacts without signed updater packages or latest.json."
+          fi
+          echo "AIR_OUTER_UPDATER_SIGNING_ENABLED=$signing_enabled" >> "$GITHUB_ENV"
+
+          npm run ${{ matrix.build_script }} "${build_args[@]}" 2>&1 | tee ../desktop-build-${{ matrix.platform }}.log
 
       - name: Report build failure
         if: failure()

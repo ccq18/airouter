@@ -54,10 +54,14 @@ test('release workflow signs updater artifacts and uploads latest metadata', () 
 });
 
 test('release workflow falls back to installer-only assets without updater signing key', () => {
-  assert.match(workflow, /AIR_OUTER_UPDATER_SIGNING_ENABLED=false/);
-  assert.match(workflow, /createUpdaterArtifacts = false/);
+  assert.match(workflow, /signing_enabled=false/);
+  assert.match(workflow, /AIR_OUTER_UPDATER_SIGNING_ENABLED=\$signing_enabled/);
+  assert.match(workflow, /npx tauri signer sign "\$validation_file"/);
+  assert.match(workflow, /build_args=\(-- --config '\{"bundle":\{"createUpdaterArtifacts":false\}\}'\)/);
+  assert.match(workflow, /unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
   assert.match(workflow, /if \[ "\$\{AIR_OUTER_UPDATER_SIGNING_ENABLED:-false\}" = "true" \]/);
   assert.match(workflow, /steps\.updater\.outputs\.enabled == 'true'/);
+  assert.doesNotMatch(workflow, /Configure updater signing/);
 });
 
 test('release workflow build failure reporter tolerates logs without grep matches', () => {
