@@ -35,7 +35,7 @@ test('desktop boot page exposes the Rust updater command flow', () => {
   assert.match(script, /install_update/);
   assert.match(script, /airouter-update-progress/);
   assert.match(styles, /\.update-dialog/);
-  assert.match(tauriConfig, /"createUpdaterArtifacts":\s*true/);
+  assert.match(tauriConfig, /"createUpdaterArtifacts":\s*false/);
   assert.match(tauriConfig, /"https:\/\/github\.com\/ccq18\/airouter\/releases\/latest\/download\/latest\.json"/);
   assert.match(cargoToml, /tauri-plugin-updater/);
   assert.match(cargoToml, /tauri-plugin-process/);

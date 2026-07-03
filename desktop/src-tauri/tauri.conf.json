@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": ["app", "dmg"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "resources": ["resources/airouter"],
