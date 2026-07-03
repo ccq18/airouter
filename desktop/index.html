@@ -12,6 +12,7 @@
         <div class="brand-row">
           <span class="mark" aria-hidden="true"></span>
           <span class="brand">Airouter</span>
+          <button class="ghost update-check" id="updateCheckBtn" type="button">检查更新</button>
         </div>
         <div class="copy">
           <p class="eyebrow">正在打开配置页</p>
@@ -45,6 +46,43 @@
         </div>
         <pre id="logOutput" hidden></pre>
       </section>
+      <div class="update-toast" id="updateToast" role="status" hidden></div>
+      <div class="update-modal" id="updateDialog" role="dialog" aria-modal="true" aria-labelledby="updateDialogTitle" hidden>
+        <section class="update-dialog">
+          <div class="update-dialog-head">
+            <div>
+              <p class="eyebrow">应用更新</p>
+              <h2 id="updateDialogTitle">发现新版本</h2>
+              <p id="updateDialogIntro">确认后会下载并安装更新，完成后自动重启 Airouter。</p>
+            </div>
+            <button class="ghost" id="updateCloseBtn" type="button" aria-label="关闭更新窗口">关闭</button>
+          </div>
+          <dl class="update-meta">
+            <div>
+              <dt>版本</dt>
+              <dd id="updateVersionText">-</dd>
+            </div>
+            <div id="updateDateRow" hidden>
+              <dt>发布日期</dt>
+              <dd id="updateDateText">-</dd>
+            </div>
+          </dl>
+          <div class="update-notes" id="updateNotes">暂无更新说明。</div>
+          <div class="update-progress-panel" id="updateProgressPanel" hidden>
+            <div class="update-progress-line">
+              <span id="updateProgressMessage">准备下载更新</span>
+              <strong id="updateProgressPercent"></strong>
+            </div>
+            <div class="update-progress-track" id="updateProgressTrack" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100">
+              <span id="updateProgressFill"></span>
+            </div>
+          </div>
+          <div class="update-dialog-actions">
+            <button class="ghost" id="updateLaterBtn" type="button">稍后</button>
+            <button class="primary" id="updateInstallBtn" type="button">安装更新</button>
+          </div>
+        </section>
+      </div>
     </main>
     <script src="./src/main.js"></script>
   </body>

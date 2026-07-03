@@ -9,9 +9,14 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_updater::UpdaterExt;
 
 const APP_DIR_NAME: &str = "Airouter";
 const RUNTIME_DIR_NAME: &str = "airouter";
@@ -39,6 +44,26 @@ struct ServiceStatus {
     runtime_dir: String,
     message: String,
     logs: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckResponse {
+    available: bool,
+    current_version: String,
+    version: Option<String>,
+    date: Option<String>,
+    body: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgress {
+    state: String,
+    downloaded: u64,
+    content_length: Option<u64>,
+    percent: Option<u8>,
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,10 +288,7 @@ fn ensure_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     let config_path = runtime_dir.join(CONFIG_FILE);
     let template_path = runtime_dir.join(CONFIG_TEMPLATE_FILE);
     if !config_path.exists() && !template_path.exists() {
-        return Err(format!(
-            "运行目录缺少配置模板 {}",
-            template_path.display()
-        ));
+        return Err(format!("运行目录缺少配置模板 {}", template_path.display()));
     }
 
     Ok(runtime_dir)
@@ -470,8 +492,8 @@ fn percent_decode(input: &str) -> Result<String, String> {
             }
             let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
                 .map_err(|error| format!("URL 编码无效: {error}"))?;
-            let value = u8::from_str_radix(hex, 16)
-                .map_err(|error| format!("URL 编码无效: {error}"))?;
+            let value =
+                u8::from_str_radix(hex, 16).map_err(|error| format!("URL 编码无效: {error}"))?;
             output.push(value);
             index += 3;
         } else {
@@ -489,7 +511,10 @@ fn post_auth_session_callback(callback_url: &str, payload: &str) -> Result<(), S
     if parsed.scheme() != "http" {
         return Err("AuthSession 回调只允许 http".to_string());
     }
-    if !matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1") | Some("::1")) {
+    if !matches!(
+        parsed.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    ) {
         return Err("AuthSession 回调只允许本机地址".to_string());
     }
 
@@ -557,7 +582,8 @@ fn close_auth_session_window_on_main_thread(app: &AppHandle, label: String) {
 }
 
 fn auth_session_probe_script(callback_url: &str) -> String {
-    let callback_url_json = serde_json::to_string(callback_url).unwrap_or_else(|_| "\"\"".to_string());
+    let callback_url_json =
+        serde_json::to_string(callback_url).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"
 (() => {{
@@ -870,7 +896,10 @@ fn auth_session_probe_script(callback_url: &str) -> String {
     )
 }
 
-fn open_auth_session_window_inner(app: &AppHandle, request: AuthSessionRequest) -> Result<(), String> {
+fn open_auth_session_window_inner(
+    app: &AppHandle,
+    request: AuthSessionRequest,
+) -> Result<(), String> {
     if request.action != "open_auth_session" {
         return Err("未知 AuthSession 请求".to_string());
     }
@@ -878,7 +907,10 @@ fn open_auth_session_window_inner(app: &AppHandle, request: AuthSessionRequest) 
     let login_url = request.login_url.as_deref().unwrap_or(CHATGPT_LOGIN_URL);
     let parsed_url = tauri::Url::parse(login_url)
         .map_err(|error| format!("AuthSession 登录地址无效: {error}"))?;
-    if !matches!(parsed_url.host_str(), Some("chatgpt.com") | Some("chat.openai.com")) {
+    if !matches!(
+        parsed_url.host_str(),
+        Some("chatgpt.com") | Some("chat.openai.com")
+    ) {
         return Err("AuthSession 登录地址必须是 ChatGPT".to_string());
     }
     let label_suffix = request
@@ -918,32 +950,34 @@ fn open_auth_session_window_inner(app: &AppHandle, request: AuthSessionRequest) 
 }
 
 fn start_auth_session_request_watcher(app: AppHandle) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(500));
-        let Ok(runtime_dir) = app_data_root() else {
-            continue;
-        };
-        let request_file = runtime_dir.join(AUTH_SESSION_REQUEST_FILE);
-        if !request_file.exists() {
-            continue;
-        }
-
-        let raw = fs::read_to_string(&request_file).unwrap_or_default();
-        let _ = fs::remove_file(&request_file);
-        let request = match serde_json::from_str::<AuthSessionRequest>(&raw) {
-            Ok(request) => request,
-            Err(error) => {
-                eprintln!("Airouter AuthSession request parse failed: {error}");
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            let Ok(runtime_dir) = app_data_root() else {
+                continue;
+            };
+            let request_file = runtime_dir.join(AUTH_SESSION_REQUEST_FILE);
+            if !request_file.exists() {
                 continue;
             }
-        };
-        let app_for_main = app.clone();
-        if let Err(error) = app.run_on_main_thread(move || {
-            if let Err(error) = open_auth_session_window_inner(&app_for_main, request) {
-                eprintln!("Airouter AuthSession WebView failed: {error}");
+
+            let raw = fs::read_to_string(&request_file).unwrap_or_default();
+            let _ = fs::remove_file(&request_file);
+            let request = match serde_json::from_str::<AuthSessionRequest>(&raw) {
+                Ok(request) => request,
+                Err(error) => {
+                    eprintln!("Airouter AuthSession request parse failed: {error}");
+                    continue;
+                }
+            };
+            let app_for_main = app.clone();
+            if let Err(error) = app.run_on_main_thread(move || {
+                if let Err(error) = open_auth_session_window_inner(&app_for_main, request) {
+                    eprintln!("Airouter AuthSession WebView failed: {error}");
+                }
+            }) {
+                eprintln!("Airouter AuthSession dispatch failed: {error}");
             }
-        }) {
-            eprintln!("Airouter AuthSession dispatch failed: {error}");
         }
     });
 }
@@ -1278,7 +1312,10 @@ fn show_config_page(app: AppHandle) -> Result<ServiceStatus, String> {
 }
 
 #[tauri::command]
-fn initialize_config(app: AppHandle, request: InitialConfigRequest) -> Result<ServiceStatus, String> {
+fn initialize_config(
+    app: AppHandle,
+    request: InitialConfigRequest,
+) -> Result<ServiceStatus, String> {
     let runtime_dir = ensure_runtime(&app)?;
     write_initial_config(&runtime_dir, request)?;
     Ok(status_for_runtime(runtime_dir))
@@ -1332,9 +1369,102 @@ fn reveal_runtime_dir(app: AppHandle) -> Result<(), String> {
     }
 }
 
+fn update_error(error: impl std::fmt::Display) -> String {
+    format!("检查或安装更新失败: {error}")
+}
+
+fn emit_update_progress(
+    app: &AppHandle,
+    state: &str,
+    downloaded: u64,
+    content_length: Option<u64>,
+    message: impl Into<String>,
+) {
+    let percent = content_length
+        .filter(|total| *total > 0)
+        .map(|total| ((downloaded.saturating_mul(100) / total).min(100)) as u8);
+    let _ = app.emit(
+        "airouter-update-progress",
+        UpdateProgress {
+            state: state.to_string(),
+            downloaded,
+            content_length,
+            percent,
+            message: message.into(),
+        },
+    );
+}
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResponse, String> {
+    let current_version = app.package_info().version.to_string();
+    let updater = app.updater().map_err(update_error)?;
+    let update = updater.check().await.map_err(update_error)?;
+
+    Ok(match update {
+        Some(update) => UpdateCheckResponse {
+            available: true,
+            current_version,
+            version: Some(update.version),
+            date: update.date.map(|date| date.to_string()),
+            body: update.body,
+        },
+        None => UpdateCheckResponse {
+            available: false,
+            current_version,
+            version: None,
+            date: None,
+            body: None,
+        },
+    })
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(update_error)?;
+    let update = updater
+        .check()
+        .await
+        .map_err(update_error)?
+        .ok_or_else(|| "当前没有可安装的更新".to_string())?;
+
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let progress_app = app.clone();
+    let finished_app = app.clone();
+    let progress_downloaded = Arc::clone(&downloaded);
+    let finished_downloaded = Arc::clone(&downloaded);
+    update
+        .download_and_install(
+            move |chunk_length, content_length| {
+                let current = progress_downloaded
+                    .fetch_add(chunk_length as u64, Ordering::Relaxed)
+                    .saturating_add(chunk_length as u64);
+                emit_update_progress(
+                    &progress_app,
+                    "downloading",
+                    current,
+                    content_length,
+                    "正在下载更新",
+                );
+            },
+            move || {
+                let current = finished_downloaded.load(Ordering::Relaxed);
+                emit_update_progress(&finished_app, "installing", current, None, "正在安装更新");
+            },
+        )
+        .await
+        .map_err(update_error)?;
+
+    let downloaded = downloaded.load(Ordering::Relaxed);
+    emit_update_progress(&app, "ready", downloaded, None, "更新已安装，正在重启");
+    app.restart();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("external-link")
                 .on_navigation(|webview, url| {
@@ -1415,6 +1545,8 @@ pub fn run() {
             open_admin_window,
             open_admin_in_browser,
             reveal_runtime_dir,
+            check_for_updates,
+            install_update,
             read_recent_logs
         ])
         .build(tauri::generate_context!())
@@ -1501,7 +1633,10 @@ mod tests {
             config.get("apikeys"),
             Some(&Value::from(vec!["sk-airouter-test"]))
         );
-        assert_eq!(config.get("configs"), Some(&Value::from(Vec::<Value>::new())));
+        assert_eq!(
+            config.get("configs"),
+            Some(&Value::from(Vec::<Value>::new()))
+        );
     }
 
     #[test]
@@ -1522,7 +1657,10 @@ mod tests {
 
         assert_eq!(config.get("port"), Some(&Value::from(3009)));
         assert_eq!(config.get("proxy_port"), None);
-        assert_eq!(config.get("apikeys"), Some(&Value::from(Vec::<Value>::new())));
+        assert_eq!(
+            config.get("apikeys"),
+            Some(&Value::from(Vec::<Value>::new()))
+        );
     }
 
     #[test]
@@ -1535,7 +1673,8 @@ mod tests {
             apikey: None,
         };
 
-        let error = build_initial_config_value(r#"{"configs":[]}"#, request).expect_err("invalid port");
+        let error =
+            build_initial_config_value(r#"{"configs":[]}"#, request).expect_err("invalid port");
 
         assert!(error.contains("服务端口"));
     }

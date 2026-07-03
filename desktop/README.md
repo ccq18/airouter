@@ -46,3 +46,59 @@ npm run build:windows
 ```
 
 `build:macos` creates a signed `.dmg` for the current Mac architecture. `build:macos:app` creates only the signed `.app` bundle for local inspection. `build:windows` creates a Windows NSIS installer (`.exe`). GitHub Releases are produced by the tag workflow in `.github/workflows/release.yml`; it builds separate macOS DMGs for Apple Silicon and Intel runners.
+
+## Online Updates
+
+Airouter Desktop uses the Tauri v2 updater with static GitHub Release metadata:
+
+```text
+https://github.com/ccq18/airouter/releases/latest/download/latest.json
+```
+
+The updater verifies every downloaded package with the public key embedded in `src-tauri/tauri.conf.json`. Keep the matching private key outside the repository. The local default path used by `scripts/run-tauri-build.mjs` is:
+
+```text
+~/.tauri/airouter-updater.key
+```
+
+Generate a key pair when setting up a release machine:
+
+```bash
+cd desktop
+npx tauri signer generate --ci -w ~/.tauri/airouter-updater.key
+```
+
+For CI, provide one of these secret forms:
+
+```text
+TAURI_SIGNING_PRIVATE_KEY
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+```
+
+or point at a key file with:
+
+```text
+TAURI_SIGNING_PRIVATE_KEY_PATH
+```
+
+The tag workflow builds macOS arm64, macOS x64, and Windows x64 artifacts. It uploads the user-facing installer plus the signed updater package and generates `latest.json` before publishing the GitHub Release. The expected release assets are:
+
+```text
+Airouter_<version>_arm64.dmg
+Airouter_<version>_arm64.app.tar.gz
+Airouter_<version>_arm64.app.tar.gz.sig
+Airouter_<version>_x64.dmg
+Airouter_<version>_x64.app.tar.gz
+Airouter_<version>_x64.app.tar.gz.sig
+Airouter_<version>_x64-setup.exe
+Airouter_<version>_x64-setup.exe.zip
+Airouter_<version>_x64-setup.exe.zip.sig
+latest.json
+```
+
+You can regenerate release metadata from already collected signed updater artifacts:
+
+```bash
+cd desktop
+npm run release:latest-json -- --input dist-release --output dist-release
+```

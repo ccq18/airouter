@@ -21,17 +21,17 @@ jobs:
             runner: macos-latest
             build_script: build:macos
             asset_arch: arm64
-            artifact_glob: desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            artifact_glob: desktop/dist-release/*
           - platform: macos-x64
             runner: macos-15-intel
             build_script: build:macos
             asset_arch: x64
-            artifact_glob: desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            artifact_glob: desktop/dist-release/*
           - platform: windows
             runner: windows-2022
             build_script: build:windows
             asset_arch: x64
-            artifact_glob: desktop/src-tauri/target/release/bundle/nsis/*.exe
+            artifact_glob: desktop/dist-release/*
 
     steps:
       - name: Checkout
@@ -95,6 +95,10 @@ jobs:
       - name: Build desktop app
         working-directory: desktop
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PATH }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -o pipefail
           npm run ${{ matrix.build_script }} 2>&1 | tee ../desktop-build-${{ matrix.platform }}.log
@@ -153,6 +157,35 @@ jobs:
           fi
           mv "${installers[0]}" "$installer_dir/Airouter_${version}_x64-setup.exe"
 
+      - name: Collect updater release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")"
+          asset_arch="${{ matrix.asset_arch }}"
+          release_dir="desktop/dist-release"
+          rm -rf "$release_dir"
+          mkdir -p "$release_dir"
+
+          if [[ "${{ matrix.platform }}" == macos-* ]]; then
+            dmg_dir="desktop/src-tauri/target/release/bundle/dmg"
+            macos_dir="desktop/src-tauri/target/release/bundle/macos"
+            cp "$dmg_dir/Airouter_${version}_${asset_arch}.dmg" "$release_dir/"
+            cp "$macos_dir/Airouter.app.tar.gz" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz"
+            cp "$macos_dir/Airouter.app.tar.gz.sig" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz.sig"
+          elif [[ "${{ matrix.platform }}" == "windows" ]]; then
+            nsis_dir="desktop/src-tauri/target/release/bundle/nsis"
+            cp "$nsis_dir/Airouter_${version}_x64-setup.exe" "$release_dir/"
+            updater_zips=("$nsis_dir"/*.zip)
+            if [ "${#updater_zips[@]}" -ne 1 ]; then
+              printf 'Expected exactly one Windows updater zip, found %s\n' "${#updater_zips[@]}" >&2
+              printf '%s\n' "${updater_zips[@]}" >&2
+              exit 1
+            fi
+            cp "${updater_zips[0]}" "$release_dir/Airouter_${version}_x64-setup.exe.zip"
+            cp "${updater_zips[0]}.sig" "$release_dir/Airouter_${version}_x64-setup.exe.zip.sig"
+          fi
+
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
@@ -167,11 +200,23 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download packaged artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Generate updater latest.json
+        env:
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          node desktop/scripts/generate-latest-json.mjs --input release-assets --output release-assets --version "$version" --repo "$GH_REPO"
 
       - name: Publish release assets
         env:

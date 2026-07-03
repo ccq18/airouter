@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["app", "dmg"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "resources": ["resources/airouter"],
@@ -34,6 +35,17 @@
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-",
       "entitlements": "entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxNEVDNzk2MjVGODkyRTIKUldUaWt2Z2xsc2RPMGRiaFhLcXpHUGIwaG1ZRlc4NjZBeGJNTFQyN1Q1RlgvMmNFcE00cUhsUWoK",
+      "endpoints": [
+        "https://github.com/ccq18/airouter/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

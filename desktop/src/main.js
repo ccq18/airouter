@@ -7,6 +7,21 @@
   const retryBtn = document.querySelector('#retryBtn');
   const logBtn = document.querySelector('#logBtn');
   const revealBtn = document.querySelector('#revealBtn');
+  const updateCheckBtn = document.querySelector('#updateCheckBtn');
+  const updateToast = document.querySelector('#updateToast');
+  const updateDialog = document.querySelector('#updateDialog');
+  const updateCloseBtn = document.querySelector('#updateCloseBtn');
+  const updateLaterBtn = document.querySelector('#updateLaterBtn');
+  const updateInstallBtn = document.querySelector('#updateInstallBtn');
+  const updateVersionText = document.querySelector('#updateVersionText');
+  const updateDateRow = document.querySelector('#updateDateRow');
+  const updateDateText = document.querySelector('#updateDateText');
+  const updateNotes = document.querySelector('#updateNotes');
+  const updateProgressPanel = document.querySelector('#updateProgressPanel');
+  const updateProgressMessage = document.querySelector('#updateProgressMessage');
+  const updateProgressPercent = document.querySelector('#updateProgressPercent');
+  const updateProgressTrack = document.querySelector('#updateProgressTrack');
+  const updateProgressFill = document.querySelector('#updateProgressFill');
   const logOutput = document.querySelector('#logOutput');
   const setupForm = document.querySelector('#setupForm');
   const setupSubmitBtn = document.querySelector('#setupSubmitBtn');
@@ -15,6 +30,7 @@
   const proxyPortInput = document.querySelector('#proxyPortInput');
   const apikeyEnabledInput = document.querySelector('#apikeyEnabledInput');
   const progress = document.querySelector('#progress');
+  let updateBusy = false;
 
   function invoke(command, args) {
     const api = window.__TAURI__?.core;
@@ -22,6 +38,114 @@
       throw new Error('请在 Airouter 桌面应用中打开');
     }
     return api.invoke(command, args);
+  }
+
+  function setUpdateBusy(nextBusy) {
+    updateBusy = nextBusy;
+    updateCheckBtn.disabled = nextBusy;
+    updateCloseBtn.disabled = nextBusy;
+    updateLaterBtn.disabled = nextBusy;
+    updateInstallBtn.disabled = nextBusy;
+  }
+
+  function showUpdateToast(message, isError = false) {
+    updateToast.textContent = message;
+    updateToast.className = `update-toast${isError ? ' error' : ''}`;
+    updateToast.hidden = false;
+    window.clearTimeout(showUpdateToast.timer);
+    showUpdateToast.timer = window.setTimeout(() => {
+      updateToast.hidden = true;
+    }, 2800);
+  }
+
+  function formatDate(value) {
+    if (!value) {
+      return '';
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString();
+  }
+
+  function resetUpdateProgress() {
+    updateProgressPanel.hidden = true;
+    updateProgressMessage.textContent = '准备下载更新';
+    updateProgressPercent.textContent = '';
+    updateProgressFill.style.width = '0%';
+    updateProgressTrack.classList.remove('indeterminate');
+    updateProgressTrack.removeAttribute('aria-valuenow');
+  }
+
+  function showUpdateDialog(update) {
+    updateVersionText.textContent = update.version || '-';
+    const formattedDate = formatDate(update.date);
+    updateDateRow.hidden = !formattedDate;
+    updateDateText.textContent = formattedDate || '-';
+    updateNotes.textContent = (update.body || '').trim() || '暂无更新说明。';
+    resetUpdateProgress();
+    updateDialog.hidden = false;
+  }
+
+  function closeUpdateDialog() {
+    if (updateBusy) {
+      return;
+    }
+    updateDialog.hidden = true;
+    resetUpdateProgress();
+  }
+
+  function renderUpdateProgress(payload = {}) {
+    updateProgressPanel.hidden = false;
+    updateProgressMessage.textContent = payload.message || '正在更新';
+    if (Number.isFinite(payload.percent)) {
+      const percent = Math.max(0, Math.min(100, Number(payload.percent)));
+      updateProgressPercent.textContent = `${percent}%`;
+      updateProgressFill.style.width = `${percent}%`;
+      updateProgressTrack.classList.remove('indeterminate');
+      updateProgressTrack.setAttribute('aria-valuenow', String(percent));
+    } else {
+      updateProgressPercent.textContent = '';
+      updateProgressFill.style.width = '0%';
+      updateProgressTrack.classList.add('indeterminate');
+      updateProgressTrack.removeAttribute('aria-valuenow');
+    }
+  }
+
+  async function checkForUpdates({ notifyNoUpdate = true } = {}) {
+    if (updateBusy) {
+      return;
+    }
+
+    try {
+      setUpdateBusy(true);
+      updateCheckBtn.textContent = '检查中';
+      const update = await invoke('check_for_updates');
+      if (update && update.available) {
+        showUpdateDialog(update);
+      } else if (notifyNoUpdate) {
+        showUpdateToast('当前已是最新版本');
+      }
+    } catch (error) {
+      showUpdateToast(String(error), true);
+    } finally {
+      updateCheckBtn.textContent = '检查更新';
+      setUpdateBusy(false);
+    }
+  }
+
+  async function installUpdate() {
+    if (updateBusy) {
+      return;
+    }
+
+    try {
+      setUpdateBusy(true);
+      renderUpdateProgress({ message: '准备下载更新' });
+      await invoke('install_update');
+    } catch (error) {
+      showUpdateToast(String(error), true);
+      renderUpdateProgress({ message: String(error) });
+      setUpdateBusy(false);
+    }
   }
 
   function showLoading(text = '启动本地服务') {
@@ -129,6 +253,10 @@
   retryBtn.addEventListener('click', retry);
   logBtn.addEventListener('click', showLogs);
   revealBtn.addEventListener('click', () => invoke('reveal_runtime_dir').catch(showError));
+  updateCheckBtn.addEventListener('click', () => checkForUpdates());
+  updateCloseBtn.addEventListener('click', closeUpdateDialog);
+  updateLaterBtn.addEventListener('click', closeUpdateDialog);
+  updateInstallBtn.addEventListener('click', installUpdate);
   proxyEnabledInput.addEventListener('change', updateSetupControls);
   setupForm.addEventListener('submit', submitSetup);
 
@@ -144,6 +272,7 @@
   Promise.all([
     window.__TAURI__?.event?.listen('airouter-startup-error', (event) => showError(event.payload)),
     window.__TAURI__?.event?.listen('airouter-config-missing', (event) => showSetup(event.payload)),
+    window.__TAURI__?.event?.listen('airouter-update-progress', (event) => renderUpdateProgress(event.payload)),
     initializeBootState(),
   ].filter(Boolean)).catch(showError);
 

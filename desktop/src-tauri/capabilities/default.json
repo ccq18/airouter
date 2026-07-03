@@ -4,6 +4,8 @@
   "description": "Default capability for Airouter Desktop",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "process:default",
+    "updater:default"
   ]
 }

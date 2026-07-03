@@ -88,6 +88,10 @@ button:focus-visible {
   background: var(--accent);
 }
 
+.ghost {
+  background: rgba(255, 255, 255, 0.62);
+}
+
 .boot-shell {
   display: grid;
   min-height: 100vh;
@@ -110,6 +114,16 @@ button:focus-visible {
   align-items: center;
   gap: 10px;
   margin-bottom: 42px;
+}
+
+.brand-row .brand {
+  margin-right: auto;
+}
+
+.update-check {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
 }
 
 .mark {
@@ -220,6 +234,140 @@ pre {
   font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.update-toast {
+  position: fixed;
+  top: 22px;
+  left: 50%;
+  z-index: 20;
+  max-width: min(520px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  border: 1px solid rgba(13, 118, 102, 0.22);
+  border-radius: 8px;
+  padding: 10px 13px;
+  color: var(--accent-ink);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 16px 42px rgba(20, 35, 43, 0.15);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.update-toast.error {
+  color: var(--danger);
+  border-color: rgba(143, 44, 56, 0.26);
+}
+
+.update-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 35, 43, 0.28);
+}
+
+.update-dialog {
+  width: min(560px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 22px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: var(--shadow);
+}
+
+.update-dialog-head,
+.update-dialog-actions,
+.update-progress-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.update-dialog h2 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.15;
+}
+
+.update-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0 0;
+}
+
+.update-meta div,
+.update-notes,
+.update-progress-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(246, 248, 246, 0.82);
+}
+
+.update-meta dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.update-meta dd {
+  margin: 5px 0 0;
+  font-size: 14px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.update-notes {
+  max-height: 180px;
+  margin-top: 12px;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.update-progress-panel {
+  margin-top: 12px;
+}
+
+.update-progress-line {
+  align-items: center;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.update-progress-track {
+  position: relative;
+  height: 7px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(20, 35, 43, 0.1);
+}
+
+.update-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.update-progress-track.indeterminate span {
+  width: 42%;
+  animation: travel 1.25s ease-in-out infinite;
+}
+
+.update-dialog-actions {
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .boot-panel[data-state="error"] .mark,
