@@ -11,7 +11,7 @@
     "tauri": "tauri",
     "dev": "node scripts/prepare-frontend.mjs && node scripts/prepare-resources.mjs && node scripts/prepare-node.mjs && tauri dev",
     "build": "node scripts/prepare-frontend.mjs && node scripts/prepare-resources.mjs && node scripts/prepare-node.mjs && node scripts/run-tauri-build.mjs",
-    "build:macos": "npm run build -- --bundles dmg",
+    "build:macos": "npm run build -- --bundles app,dmg",
     "build:macos:app": "npm run build -- --bundles app",
     "build:windows": "npm run build -- --bundles nsis",
     "release:latest-json": "node scripts/generate-latest-json.mjs"

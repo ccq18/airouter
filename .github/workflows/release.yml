@@ -92,6 +92,37 @@ jobs:
           console.log(`Synced desktop version to ${version}`);
           NODE
 
+      - name: Configure updater signing
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PATH }}
+        run: |
+          set -euo pipefail
+          has_inline_key=false
+          has_key_file=false
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            has_inline_key=true
+          fi
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" ] && [ -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]; then
+            has_key_file=true
+          fi
+
+          if [ "$has_inline_key" = "true" ] || [ "$has_key_file" = "true" ]; then
+            echo "AIR_OUTER_UPDATER_SIGNING_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Updater signing key detected; signed updater artifacts will be generated."
+          else
+            echo "AIR_OUTER_UPDATER_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
+            node <<'NODE'
+            const fs = require('node:fs');
+            const configFile = 'desktop/src-tauri/tauri.conf.json';
+            const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+            config.bundle.createUpdaterArtifacts = false;
+            fs.writeFileSync(configFile, `${JSON.stringify(config, null, 2)}\n`);
+            NODE
+            echo "::notice title=Updater signing disabled::TAURI_SIGNING_PRIVATE_KEY was not configured; this run will publish installer artifacts without signed updater packages or latest.json."
+          fi
+
       - name: Build desktop app
         working-directory: desktop
         shell: bash
@@ -110,13 +141,14 @@ jobs:
           log_file="desktop-build-${{ matrix.platform }}.log"
           if [ -f "$log_file" ]; then
             tail -n 120 "$log_file"
-            summary="$(grep -iE 'error|failed|cannot|could not|not found|denied|panic|exception' "$log_file" | tail -n 40)"
+            summary="$(grep -iE 'error|failed|cannot|could not|not found|denied|panic|exception' "$log_file" | tail -n 40 || true)"
             if [ -z "$summary" ]; then
               summary="$(tail -n 25 "$log_file")"
             fi
             escaped_summary="$(printf '%s' "$summary" | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
             echo "::error title=${{ matrix.platform }} desktop build failed::$escaped_summary"
           fi
+          exit 0
 
       - name: Upload build log
         if: failure()
@@ -171,19 +203,23 @@ jobs:
             dmg_dir="desktop/src-tauri/target/release/bundle/dmg"
             macos_dir="desktop/src-tauri/target/release/bundle/macos"
             cp "$dmg_dir/Airouter_${version}_${asset_arch}.dmg" "$release_dir/"
-            cp "$macos_dir/Airouter.app.tar.gz" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz"
-            cp "$macos_dir/Airouter.app.tar.gz.sig" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz.sig"
+            if [ "${AIR_OUTER_UPDATER_SIGNING_ENABLED:-false}" = "true" ]; then
+              cp "$macos_dir/Airouter.app.tar.gz" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz"
+              cp "$macos_dir/Airouter.app.tar.gz.sig" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz.sig"
+            fi
           elif [[ "${{ matrix.platform }}" == "windows" ]]; then
             nsis_dir="desktop/src-tauri/target/release/bundle/nsis"
             cp "$nsis_dir/Airouter_${version}_x64-setup.exe" "$release_dir/"
-            updater_zips=("$nsis_dir"/*.zip)
-            if [ "${#updater_zips[@]}" -ne 1 ]; then
-              printf 'Expected exactly one Windows updater zip, found %s\n' "${#updater_zips[@]}" >&2
-              printf '%s\n' "${updater_zips[@]}" >&2
-              exit 1
+            if [ "${AIR_OUTER_UPDATER_SIGNING_ENABLED:-false}" = "true" ]; then
+              updater_zips=("$nsis_dir"/*.zip)
+              if [ "${#updater_zips[@]}" -ne 1 ]; then
+                printf 'Expected exactly one Windows updater zip, found %s\n' "${#updater_zips[@]}" >&2
+                printf '%s\n' "${updater_zips[@]}" >&2
+                exit 1
+              fi
+              cp "${updater_zips[0]}" "$release_dir/Airouter_${version}_x64-setup.exe.zip"
+              cp "${updater_zips[0]}.sig" "$release_dir/Airouter_${version}_x64-setup.exe.zip.sig"
             fi
-            cp "${updater_zips[0]}" "$release_dir/Airouter_${version}_x64-setup.exe.zip"
-            cp "${updater_zips[0]}.sig" "$release_dir/Airouter_${version}_x64-setup.exe.zip.sig"
           fi
 
       - name: Upload packaged artifact
@@ -209,7 +245,20 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Detect signed updater artifacts
+        id: updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find release-assets -type f \( -name '*.app.tar.gz.sig' -o -name '*.exe.zip.sig' -o -name '*.nsis.zip.sig' -o -name '*.msi.zip.sig' \) | grep -q .; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Updater metadata skipped::No signed updater artifacts were collected; publish will include installer assets only."
+          fi
+
       - name: Generate updater latest.json
+        if: steps.updater.outputs.enabled == 'true'
         env:
           GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}

@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const test = require('node:test');
 
 const workflow = fs.readFileSync('.github/workflows/release.yml', 'utf8');
+const desktopPackage = JSON.parse(fs.readFileSync('desktop/package.json', 'utf8'));
 
 test('release workflow builds macOS DMGs for Apple Silicon and Intel Macs', () => {
   assert.match(workflow, /platform:\s+macos-arm64/);
@@ -15,6 +16,10 @@ test('release workflow builds macOS DMGs for Apple Silicon and Intel Macs', () =
   assert.match(workflow, /artifact_glob:\s+desktop\/dist-release\/\*/);
   assert.doesNotMatch(workflow, /-\s+platform:\s+macos\s*\n/);
   assert.doesNotMatch(workflow, /bundle\/macos\/\*\.zip/);
+});
+
+test('macOS release build includes the updater-enabled app bundle target', () => {
+  assert.match(desktopPackage.scripts['build:macos'], /--bundles\s+app,dmg/);
 });
 
 test('release workflow derives desktop package version from the Git tag', () => {
@@ -46,4 +51,15 @@ test('release workflow signs updater artifacts and uploads latest metadata', () 
   assert.match(workflow, /desktop\/dist-release\/\*/);
   assert.match(workflow, /Airouter_\$\{version\}_\$\{asset_arch\}\.app\.tar\.gz/);
   assert.match(workflow, /Airouter_\$\{version\}_x64-setup\.exe\.zip/);
+});
+
+test('release workflow falls back to installer-only assets without updater signing key', () => {
+  assert.match(workflow, /AIR_OUTER_UPDATER_SIGNING_ENABLED=false/);
+  assert.match(workflow, /createUpdaterArtifacts = false/);
+  assert.match(workflow, /if \[ "\$\{AIR_OUTER_UPDATER_SIGNING_ENABLED:-false\}" = "true" \]/);
+  assert.match(workflow, /steps\.updater\.outputs\.enabled == 'true'/);
+});
+
+test('release workflow build failure reporter tolerates logs without grep matches', () => {
+  assert.match(workflow, /grep -iE 'error\|failed\|cannot\|could not\|not found\|denied\|panic\|exception' "\$log_file" \| tail -n 40 \|\| true/);
 });
