@@ -18,7 +18,7 @@ jobs:
       matrix:
         include:
           - platform: macos-arm64
-            runner: macos-latest
+            runner: macos-15
             build_script: build:macos
             asset_arch: arm64
             artifact_glob: desktop/dist-release/*
@@ -107,7 +107,8 @@ jobs:
 
           validation_file="$(mktemp)"
           signing_check_log="$(mktemp)"
-          trap 'rm -f "$validation_file" "$signing_check_log"' EXIT
+          fallback_config=".tauri-ci-updater-disabled.json"
+          trap 'rm -f "$validation_file" "$signing_check_log" "$fallback_config"' EXIT
           printf 'airouter updater signing probe\n' > "$validation_file"
 
           signing_enabled=false
@@ -117,7 +118,8 @@ jobs:
             echo "Updater signing key validated; signed updater artifacts will be generated."
           else
             cat "$signing_check_log"
-            build_args=(-- --config '{"bundle":{"createUpdaterArtifacts":false}}')
+            printf '{"bundle":{"createUpdaterArtifacts":false}}\n' > "$fallback_config"
+            build_args=(-- --config "$fallback_config")
             unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD
             echo "::notice title=Updater signing disabled::Tauri could not sign a validation file; this run will publish installer artifacts without signed updater packages or latest.json."
           fi
@@ -132,7 +134,7 @@ jobs:
           log_file="desktop-build-${{ matrix.platform }}.log"
           if [ -f "$log_file" ]; then
             tail -n 120 "$log_file"
-            summary="$(grep -iE 'error|failed|cannot|could not|not found|denied|panic|exception' "$log_file" | tail -n 40 || true)"
+            summary="$(grep -iE '(^|[^[:alpha:]])(error|failed|cannot|could not|not found|denied|panic|exception)([^[:alpha:]]|$)' "$log_file" | tail -n 40 || true)"
             if [ -z "$summary" ]; then
               summary="$(tail -n 25 "$log_file")"
             fi

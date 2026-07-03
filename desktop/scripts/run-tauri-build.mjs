@@ -14,10 +14,15 @@ if (!process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
   process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = '';
 }
 
-const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const isWindows = process.platform === 'win32';
+const command = isWindows ? 'npx.cmd' : 'npx';
 const result = spawnSync(command, ['tauri', 'build', ...process.argv.slice(2)], {
   stdio: 'inherit',
-  shell: false,
+  shell: isWindows,
 });
+
+if (result.error) {
+  console.error(`Failed to start Tauri build command (${command}): ${result.error.message}`);
+}
 
 process.exit(result.status ?? 1);

@@ -7,7 +7,7 @@ const desktopPackage = JSON.parse(fs.readFileSync('desktop/package.json', 'utf8'
 
 test('release workflow builds macOS DMGs for Apple Silicon and Intel Macs', () => {
   assert.match(workflow, /platform:\s+macos-arm64/);
-  assert.match(workflow, /runner:\s+macos-latest/);
+  assert.match(workflow, /runner:\s+macos-15/);
   assert.match(workflow, /asset_arch:\s+arm64/);
   assert.match(workflow, /platform:\s+macos-x64/);
   assert.match(workflow, /runner:\s+macos-15-intel/);
@@ -16,6 +16,7 @@ test('release workflow builds macOS DMGs for Apple Silicon and Intel Macs', () =
   assert.match(workflow, /artifact_glob:\s+desktop\/dist-release\/\*/);
   assert.doesNotMatch(workflow, /-\s+platform:\s+macos\s*\n/);
   assert.doesNotMatch(workflow, /bundle\/macos\/\*\.zip/);
+  assert.doesNotMatch(workflow, /runner:\s+macos-latest/);
 });
 
 test('macOS release build includes the updater-enabled app bundle target', () => {
@@ -57,7 +58,9 @@ test('release workflow falls back to installer-only assets without updater signi
   assert.match(workflow, /signing_enabled=false/);
   assert.match(workflow, /AIR_OUTER_UPDATER_SIGNING_ENABLED=\$signing_enabled/);
   assert.match(workflow, /npx tauri signer sign "\$validation_file"/);
-  assert.match(workflow, /build_args=\(-- --config '\{"bundle":\{"createUpdaterArtifacts":false\}\}'\)/);
+  assert.match(workflow, /fallback_config="\.tauri-ci-updater-disabled\.json"/);
+  assert.match(workflow, /printf '\{"bundle":\{"createUpdaterArtifacts":false\}\}\\n' > "\$fallback_config"/);
+  assert.match(workflow, /build_args=\(-- --config "\$fallback_config"\)/);
   assert.match(workflow, /unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
   assert.match(workflow, /if \[ "\$\{AIR_OUTER_UPDATER_SIGNING_ENABLED:-false\}" = "true" \]/);
   assert.match(workflow, /steps\.updater\.outputs\.enabled == 'true'/);
@@ -65,5 +68,5 @@ test('release workflow falls back to installer-only assets without updater signi
 });
 
 test('release workflow build failure reporter tolerates logs without grep matches', () => {
-  assert.match(workflow, /grep -iE 'error\|failed\|cannot\|could not\|not found\|denied\|panic\|exception' "\$log_file" \| tail -n 40 \|\| true/);
+  assert.match(workflow, /grep -iE '\(\^\|\[\^\[:alpha:\]\]\)\(error\|failed\|cannot\|could not\|not found\|denied\|panic\|exception\)\(\[\^\[:alpha:\]\]\|\$\)' "\$log_file" \| tail -n 40 \|\| true/);
 });
