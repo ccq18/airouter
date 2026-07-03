@@ -1,4 +1,5 @@
 const {
+    normalizeJsonSchemaForCodex,
     normalizeResponsesRequestBody
 } = require('./responses-defaults');
 
@@ -26,6 +27,30 @@ function extractSystemInstructions(system) {
         .filter(block => block && block.type === 'text' && typeof block.text === 'string')
         .map(block => block.text)
         .join('\n\n');
+}
+
+function isClaudeCodeAttributionSystemText(text) {
+    return typeof text === 'string' && text.trimStart().startsWith('x-anthropic-billing-header:');
+}
+
+function mapClaudeSystemToResponsesInput(system) {
+    const content = normalizeClaudeContent(system)
+        .filter(block => block && block.type === 'text' && typeof block.text === 'string')
+        .filter(block => block.text.length > 0 && !isClaudeCodeAttributionSystemText(block.text))
+        .map(block => ({
+            type: 'input_text',
+            text: block.text
+        }));
+
+    if (content.length === 0) {
+        return [];
+    }
+
+    return [{
+        type: 'message',
+        role: 'developer',
+        content
+    }];
 }
 
 function mapClaudeToolChoice(toolChoice) {
@@ -57,68 +82,6 @@ function mapClaudeToolChoice(toolChoice) {
     }
 
     return toolChoice;
-}
-
-function normalizeJsonSchemaForCodex(schema) {
-    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-        return schema;
-    }
-
-    if (Object.keys(schema).length === 0) {
-        return {
-            type: 'object',
-            properties: {},
-            required: [],
-            additionalProperties: false
-        };
-    }
-
-    const normalized = { ...schema };
-    delete normalized.propertyNames;
-    if (normalized.format === 'uri') {
-        delete normalized.format;
-    }
-    const hasObjectProperties = normalized.properties && typeof normalized.properties === 'object' && !Array.isArray(normalized.properties);
-    const isObjectSchema = normalized.type === 'object' || hasObjectProperties;
-
-    if (isObjectSchema) {
-        if (!Object.prototype.hasOwnProperty.call(normalized, 'additionalProperties')) {
-            normalized.additionalProperties = false;
-        }
-
-        if (hasObjectProperties) {
-            normalized.properties = Object.fromEntries(
-                Object.entries(normalized.properties).map(([name, value]) => [name, normalizeJsonSchemaForCodex(value)])
-            );
-        } else {
-            normalized.properties = {};
-        }
-
-        const propertyNames = Object.keys(normalized.properties);
-        normalized.required = propertyNames;
-    }
-
-    if (normalized.additionalProperties && typeof normalized.additionalProperties === 'object') {
-        normalized.additionalProperties = normalizeJsonSchemaForCodex(normalized.additionalProperties);
-    }
-
-    if (Array.isArray(normalized.anyOf)) {
-        normalized.anyOf = normalized.anyOf.map(normalizeJsonSchemaForCodex);
-    }
-
-    if (Array.isArray(normalized.oneOf)) {
-        normalized.oneOf = normalized.oneOf.map(normalizeJsonSchemaForCodex);
-    }
-
-    if (Array.isArray(normalized.allOf)) {
-        normalized.allOf = normalized.allOf.map(normalizeJsonSchemaForCodex);
-    }
-
-    if (normalized.items) {
-        normalized.items = normalizeJsonSchemaForCodex(normalized.items);
-    }
-
-    return normalized;
 }
 
 function mapClaudeTools(tools) {
@@ -218,14 +181,16 @@ function mapTextBlockByRole(role, text) {
     };
 }
 
-function mapClaudeMessagesToResponsesInput(messages) {
+function mapClaudeMessagesToResponsesInput(messages, options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const input = [];
 
     for (const message of Array.isArray(messages) ? messages : []) {
         const blocks = normalizeClaudeContent(message.content);
+        const role = cpaStyleCompatibility && message.role === 'system' ? 'developer' : message.role;
         let currentMessage = {
             type: 'message',
-            role: message.role,
+            role,
             content: []
         };
 
@@ -235,7 +200,7 @@ function mapClaudeMessagesToResponsesInput(messages) {
             }
 
             if (block.type === 'text' && typeof block.text === 'string') {
-                currentMessage.content.push(mapTextBlockByRole(message.role, block.text));
+                currentMessage.content.push(mapTextBlockByRole(role, block.text));
                 continue;
             }
 
@@ -255,7 +220,7 @@ function mapClaudeMessagesToResponsesInput(messages) {
                 pushCurrentMessageInput(input, currentMessage);
                 currentMessage = {
                     type: 'message',
-                    role: message.role,
+                    role,
                     content: []
                 };
                 input.push({
@@ -271,7 +236,7 @@ function mapClaudeMessagesToResponsesInput(messages) {
                 pushCurrentMessageInput(input, currentMessage);
                 currentMessage = {
                     type: 'message',
-                    role: message.role,
+                    role,
                     content: []
                 };
                 input.push({
@@ -289,16 +254,25 @@ function mapClaudeMessagesToResponsesInput(messages) {
 }
 
 function transformClaudeMessagesRequest(body, options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
+    const parallelToolCalls = cpaStyleCompatibility && body?.tool_choice && typeof body.tool_choice === 'object'
+        ? body.tool_choice.disable_parallel_tool_use !== true
+        : false;
     const responsesBody = {
         model: options.model || body.model,
-        instructions: extractSystemInstructions(body.system),
-        input: mapClaudeMessagesToResponsesInput(body.messages),
+        instructions: cpaStyleCompatibility ? '' : extractSystemInstructions(body.system),
+        input: cpaStyleCompatibility
+            ? [
+                ...mapClaudeSystemToResponsesInput(body.system),
+                ...mapClaudeMessagesToResponsesInput(body.messages, { cpaStyleCompatibility })
+            ]
+            : mapClaudeMessagesToResponsesInput(body.messages),
         tools: mapClaudeTools(body.tools),
         tool_choice: mapClaudeToolChoice(body.tool_choice),
-        parallel_tool_calls: false,
+        parallel_tool_calls: parallelToolCalls,
         store: false,
         stream: typeof options.stream === 'boolean' ? options.stream : body.stream === true,
-        include: []
+        include: cpaStyleCompatibility ? ['reasoning.encrypted_content'] : []
     };
 
     if (typeof options.reasoningEffort === 'string' && options.reasoningEffort.length > 0) {

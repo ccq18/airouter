@@ -38,6 +38,11 @@ function cloneRuntime(runtime) {
             active: false,
         };
     }
+    if (Array.isArray(cloned.apiKeyRequestResults)) {
+        cloned.apiKeyRequestResults = cloned.apiKeyRequestResults.map(item => (
+            item && typeof item === 'object' ? { ...item } : item
+        ));
+    }
     return cloned;
 }
 

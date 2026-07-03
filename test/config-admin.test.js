@@ -18,74 +18,157 @@ const {
   getConfigIdentityColumnLabel,
   getConfigIdentityValue,
   buildConfigItemFromForm,
+  normalizeOAuthExportInput,
   buildAdminStatusSummary,
   extractRuntimeStatusTags,
   formatDispatchSessionStatus,
   formatResponseModelStatus,
+  formatApiKeyRecoveryStatus,
   getDispatchModeSummary,
   getActiveConfigLabel,
   hasRefreshTokenConfig,
+  hasRuntimeProblem,
   extractResponseSummary,
   normalizePortValue,
   buildProxyAccessInfo,
   buildRuntimeSyncText,
   formatConfigItemCopyText,
+  moveConfigSnapshotItem,
+  getConfigRole,
+  getRouteLanes,
+  getConfigType,
+  configSupports,
 } = require('../public/config-admin.js');
 
-test('config admin hides the responses settings module', () => {
+test('config admin exposes role pages and keeps Responses settings on the settings page', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
-  const start = html.indexOf('<div id="responsesSettingsSection" class="hidden-settings" hidden>');
-  const end = html.indexOf('</main>', start);
-  const section = start >= 0 && end > start ? html.slice(start, end) : '';
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const settingsPageStart = html.indexOf('data-page="settings"');
+  const hiddenSettingsStart = html.indexOf('<div id="responsesSettingsSection"', settingsPageStart);
+  const settingsPage = settingsPageStart >= 0 && hiddenSettingsStart > settingsPageStart
+    ? html.slice(settingsPageStart, hiddenSettingsStart)
+    : '';
 
-  assert.ok(section, 'responses settings section should be wrapped in a hidden container');
-  assert.match(section, /Responses 设置/);
-  assert.match(section, /这里可以配置 `\/v1\/responses` 的模型别名映射/);
-  assert.match(section, /saveResponsesSettingsButton/);
+  assert.match(html, /data-page-link="upstreams"/);
+  assert.match(html, /data-page-link="openai"/);
+  assert.match(html, /data-page-link="claude"/);
+  assert.match(html, /data-page-link="fallbacks"/);
+  assert.match(html, /data-page-link="settings"/);
+  assert.match(serverSource, /\/admin\/configs\/:page\(upstreams\|openai\|claude\|fallbacks\|settings\|routes\|access\)/);
+  assert.ok(settingsPage, 'settings page should be present');
+  assert.match(settingsPage, /Responses 高级设置/);
+  assert.match(settingsPage, /saveResponsesSettingsButton/);
+  assert.match(settingsPage, /responsesModelAliasesInput/);
+  assert.match(html, /id="responsesSettingsSection" class="hidden-settings" hidden><\/div>/);
 });
 
-test('config admin shows upstream config before edit controls', () => {
+test('config admin uses upstreams as the default page before role-specific edit pages', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const messageIndex = html.indexOf('<div id="message"');
-  const upstreamIndex = html.indexOf('<section class="panel list-panel">');
-  const consoleGridIndex = html.indexOf('<section class="console-grid">');
-  const addConfigIndex = html.indexOf('<h2 class="panel-title">新增配置项</h2>');
+  const upstreamsPageIndex = html.indexOf('data-page="upstreams"');
+  const upstreamIndex = html.indexOf('<h2 class="panel-title">上游配置</h2>');
+  const openAiPageIndex = html.indexOf('data-page="openai"');
+  const addConfigIndex = html.indexOf('<h2 class="panel-title">新增 OpenAI token</h2>');
 
   assert.ok(messageIndex >= 0, 'message area should be present');
-  assert.ok(upstreamIndex > messageIndex, 'upstream config should follow the message area');
-  assert.ok(consoleGridIndex > upstreamIndex, 'edit controls should appear after upstream config');
-  assert.ok(addConfigIndex > upstreamIndex, 'add config panel should appear after upstream config');
+  assert.ok(upstreamsPageIndex > messageIndex, 'upstreams page should follow the message area');
+  assert.ok(upstreamIndex > upstreamsPageIndex, 'upstream config should be inside the upstreams page');
+  assert.ok(openAiPageIndex > upstreamIndex, 'role-specific edit pages should appear after route overview');
+  assert.ok(addConfigIndex > upstreamIndex, 'OpenAI token add panel should appear after route overview');
 });
 
 test('config admin exposes manual runtime config activation controls', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
   assert.match(html, /data-action="activate"/);
+  assert.match(html, /data-capability="gpt"/);
+  assert.match(html, /data-capability="claude"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
-  assert.match(html, /已进入 API Key 覆盖模式/);
-  assert.match(html, /已设置 token 调度锚点/);
+  assert.match(html, /已设为 OpenAI fallback apikey 焦点/);
+  assert.match(html, /已设为 Claude fallback apikey 焦点/);
+  assert.match(html, /token 主链路默认启用，无需手动切换/);
+  assert.match(html, /getConfigType\(item\) === 'apikey'/);
+});
+
+test('config admin exposes enable and disable controls for soft-deleted configs', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+
+  assert.match(html, /disabled_configs/);
+  assert.match(html, /data-action="disable"/);
+  assert.match(html, /data-action="enable"/);
+  assert.match(html, /\/admin\/api\/disabled-configs\/\$\{index\}\/enable/);
+  assert.match(html, /item\.item\.disabled_status \|\| '服务不可见'/);
+  assert.match(html, /配置项已停用并热重载/);
+  assert.match(html, /配置项已启用并热重载/);
+});
+
+test('config admin exposes batch delete controls for configs, disabled configs, and apikeys', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+
+  assert.doesNotMatch(html, /data-action="toggle-select-all-configs"/);
+  assert.doesNotMatch(html, /data-action="toggle-select-all-disabled-configs"/);
+  assert.doesNotMatch(html, /data-action="toggle-select-all-apikeys"/);
+  assert.match(html, /id="batchSelectProblemConfigsButton"/);
+  assert.match(html, /data-action="batch-select-problem-configs"/);
+  assert.match(html, /选择异常配置/);
+  assert.match(html, /id="batchToolbar" class="batch-toolbar"/);
+  assert.doesNotMatch(html, /id="batchToolbar" class="batch-toolbar" hidden/);
+  assert.match(html, /batchToolbarEl\.hidden = false/);
+  assert.doesNotMatch(html, /batchToolbarEl\.hidden = total === 0 && problemIndexes\.length === 0/);
+  assert.match(html, /id="batchEnableSelectedButton"/);
+  assert.match(html, /data-action="batch-enable-selected"/);
+  assert.match(html, /批量启用所选/);
+  assert.match(html, /id="batchDisableSelectedButton"/);
+  assert.match(html, /data-action="batch-disable-selected"/);
+  assert.match(html, /批量停用所选/);
+  assert.match(html, /data-action="toggle-select-config"/);
+  assert.match(html, /data-action="toggle-select-disabled-config"/);
+  assert.match(html, /data-action="toggle-select-apikey"/);
+  assert.doesNotMatch(html, /id="batchDeleteConfigsButton"/);
+  assert.doesNotMatch(html, /id="batchDeleteDisabledConfigsButton"/);
+  assert.doesNotMatch(html, /id="batchDeleteApiKeysButton"/);
+  assert.match(html, /id="batchDeleteSelectedButton"/);
+  assert.match(html, /data-action="batch-delete-selected"/);
+  assert.match(html, /批量删除所选/);
+  assert.match(html, /\/admin\/api\/configs\/batch-disable/);
+  assert.match(html, /\/admin\/api\/disabled-configs\/batch-enable/);
+  assert.match(html, /已批量删除/);
+  assert.match(html, /已批量启用/);
+  assert.match(html, /已批量停用/);
 });
 
 test('config admin exposes copy controls for config item JSON', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
+  const copyFunctionStart = html.indexOf('async function copyConfigItemJson(index)');
+  const copyFunctionEnd = html.indexOf('async function disableConfig(index)', copyFunctionStart);
+  const copyFunction = copyFunctionStart >= 0 && copyFunctionEnd > copyFunctionStart
+    ? html.slice(copyFunctionStart, copyFunctionEnd)
+    : '';
 
   assert.match(html, /data-action="copy-config"/);
   assert.match(html, /copyConfigItemJson\(copyButton\.dataset\.index\)/);
   assert.match(html, /navigator\.clipboard\.writeText/);
+  assert.ok(copyFunction, 'copyConfigItemJson should be present');
+  assert.match(copyFunction, /copyTextToClipboard\(formatConfigItemCopyText\(config\)\)/);
+  assert.doesNotMatch(copyFunction, /当前浏览器不支持剪贴板写入/);
 });
 
-test('config admin keeps the upstream config column compact after adding activation controls', () => {
+test('config admin renders upstream configs as grouped cards after adding activation controls', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
 
-  assert.match(html, /min-width:\s*1040px;/);
-  assert.match(html, /\.account-id-col,\s*\.account-id-cell\s*\{\s*width:\s*240px;\s*min-width:\s*240px;/);
-  assert.match(html, /\.account-id-cell\s*\{\s*white-space:\s*normal;\s*word-break:\s*break-word;\s*overflow-wrap:\s*anywhere;/);
-  assert.match(html, /\.action-cell\s*\{\s*width:\s*280px;\s*white-space:\s*nowrap;/);
+  assert.match(html, /class="config-group-list"/);
+  assert.match(html, /class="config-group-title"/);
+  assert.match(html, /class="config-card/);
+  assert.match(html, /\.config-card\s*\{\s*display:\s*grid;/);
+  assert.match(html, /\.config-card\.with-selection/);
+  assert.match(html, /\.config-card-actions\s*\{\s*display:\s*grid;\s*gap:\s*8px;/);
+  assert.match(html, /\.action-row\s*\{\s*display:\s*flex;\s*flex-wrap:\s*nowrap;\s*gap:\s*6px;/);
+  assert.match(html, /renderGroupedConfigCards/);
 });
 
 test('config admin keeps all console controls after UI refresh', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
-  const accessControlStart = html.indexOf('<h2 class="panel-title">访问控制</h2>');
+  const accessControlStart = html.indexOf('<h2 class="panel-title">入口 apikey</h2>');
   const accessControlEnd = html.indexOf('<div id="responsesSettingsSection"', accessControlStart);
   const accessControlSection = accessControlStart >= 0 && accessControlEnd > accessControlStart
     ? html.slice(accessControlStart, accessControlEnd)
@@ -93,7 +176,8 @@ test('config admin keeps all console controls after UI refresh', () => {
 
   assert.match(html, /class="topbar"/);
   assert.doesNotMatch(html, /id="statusSummary"/);
-  assert.match(html, /class="console-grid"/);
+  assert.match(html, /class="section-stack admin-page"/);
+  assert.match(html, /class="admin-page settings-grid"/);
   assert.match(html, /id="addApiKeyButton"/);
   assert.match(html, /id="proxySettingsPanel"/);
   assert.match(html, /id="servicePortInput"/);
@@ -119,15 +203,17 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
   assert.match(html, /\/admin\/api\/open-external/);
   assert.doesNotMatch(html, /window\.location\.href\s*=\s*url/);
-  assert.match(html, /autoAuthSessionButton\.id = 'autoAuthSessionButton'/);
-  assert.match(html, /createElement\('button'\)/);
-  assert.doesNotMatch(html, /<button[^>]+id="autoAuthSessionButton"/);
-  assert.doesNotMatch(html, /id="desktopAuthSessionActions" hidden/);
+  assert.match(html, /autoAuthSessionButton/);
+  assert.match(html, /desktopAuthSessionActions/);
   assert.match(html, /desktop_app/);
   assert.match(html, /AirouterReceiveAuthSession/);
   assert.match(html, /\/admin\/api\/desktop\/auth-session/);
   assert.doesNotMatch(html, /airouter:\/\/auth-session/);
-  assert.doesNotMatch(html, /window\.__TAURI__/);
+  assert.match(html, /id="desktopUpdateButton"/);
+  assert.match(html, /check_for_updates/);
+  assert.match(html, /install_update/);
+  assert.match(html, /airouter-update-progress/);
+  assert.match(html, /window\.__TAURI__/);
   assert.match(html, /隐私模式登录 ChatGPT/);
   assert.match(html, /不要退出该登录态/);
   assert.match(html, /name="configMode" value="token"/);
@@ -136,14 +222,25 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /name="apiKeySupport" value="claude"/);
   assert.match(html, /data-action="activate"/);
   assert.match(html, /data-action="move-up"/);
+  assert.match(html, /data-action="move-previous"/);
+  assert.match(html, /data-action="move-next"/);
+  assert.match(html, /class="action-row action-row-sort"/);
+  assert.match(html, /class="action-row action-row-state"/);
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-up/);
+  assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-previous/);
+  assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/move-next/);
   assert.match(html, />置顶<\/button>/);
-  assert.doesNotMatch(html, />上移<\/button>/);
+  assert.match(html, />上移<\/button>/);
+  assert.match(html, />下移<\/button>/);
   assert.match(html, /配置项已置顶，当前使用账号未改变/);
-  assert.match(html, /data-action="delete"/);
+  assert.match(html, /配置项已上移，当前使用账号未改变/);
+  assert.match(html, /配置项已下移，当前使用账号未改变/);
+  assert.match(html, /data-action="disable"/);
+  assert.match(html, /data-action="enable"/);
   assert.match(html, /data-action="delete-apikey"/);
   assert.match(html, /可刷新/);
   assert.match(html, /确认删除/);
+  assert.match(html, /确认停用/);
   assert.doesNotMatch(html, /window\.confirm/);
   assert.ok(accessControlSection, 'access control section should be present');
   assert.match(accessControlSection, /id="addApiKeyButton"/);
@@ -232,7 +329,7 @@ test('buildHelloTestRequest matches the Codex CLI responses probe shape', () => 
   const requestBody = buildHelloTestRequest({});
 
   assert.deepEqual(requestBody, {
-    model: 'gpt-5.5',
+    model: 'gpt-5.4-mini',
     instructions: '',
     input: [
       {
@@ -339,9 +436,9 @@ test('getConfigGuideContent explains token JSON and apikey form entry separately
   assert.match(guide.rawJsonPlaceholder, /"accessToken": "\.\.\."/);
   assert.match(guide.rawJsonPlaceholder, /"refresh_token": "\.\.\."/);
   assert.doesNotMatch(guide.rawJsonPlaceholder, /"type": "apikey"/);
-  assert.equal(guide.steps.some(step => /apikey 模式/.test(step.description)), true);
+  assert.equal(guide.steps.some(step => /兜底上游/.test(step.description)), true);
 
-  const tokenStep = guide.steps.find(step => step.title === 'Token 模式');
+  const tokenStep = guide.steps.find(step => step.title === 'OpenAI token');
   assert.match(tokenStep.description, /AuthSession JSON/);
   assert.match(tokenStep.description, /隐私模式/);
   assert.match(tokenStep.description, /不要退出该登录态/);
@@ -351,12 +448,131 @@ test('getConfigGuideContent explains token JSON and apikey form entry separately
   assert.equal(tokenStep.actionCopyText, 'https://chatgpt.com/api/auth/session');
   assert.equal(tokenStep.actionHref, undefined);
 
-  const apiKeyStep = guide.steps.find(step => step.title === 'API Key 模式');
+  const apiKeyStep = guide.steps.find(step => step.title === 'Fallback apikey');
   assert.match(apiKeyStep.description, /输入框/);
   assert.match(apiKeyStep.description, /Claude/);
   assert.match(apiKeyStep.description, /GPT/);
   assert.equal(apiKeyStep.example, undefined);
   assert.equal(apiKeyStep.actionHref, undefined);
+});
+
+test('getRouteLanes separates token primary chains from apikey fallbacks', () => {
+  const snapshot = {
+    configs: [
+      {
+        index: 0,
+        item: {
+          description: 'openai main',
+        },
+      },
+      {
+        index: 1,
+        item: {
+          type: 'claude_token',
+          description: 'claude main',
+        },
+      },
+      {
+        index: 2,
+        item: {
+          type: 'apikey',
+          support: ['gpt'],
+          description: 'gpt fallback',
+        },
+      },
+      {
+        index: 3,
+        item: {
+          type: 'apikey',
+          support: ['claude'],
+          description: 'claude fallback',
+        },
+      },
+    ],
+  };
+  const lanes = getRouteLanes(snapshot);
+
+  assert.equal(getConfigType(snapshot.configs[0]), 'token');
+  assert.equal(getConfigType(snapshot.configs[1]), 'claude_token');
+  assert.equal(configSupports(snapshot.configs[2], 'gpt'), true);
+  assert.equal(configSupports(snapshot.configs[2], 'claude'), false);
+  assert.deepEqual(getConfigRole(snapshot.configs[0]), {
+    key: 'openai-token',
+    label: 'OpenAI token',
+    lane: 'Responses',
+    priority: '主链路',
+    tone: 'ok',
+  });
+  assert.deepEqual(lanes.map(lane => ({
+    key: lane.key,
+    primary: lane.primary.map(item => item.index),
+    fallback: lane.fallback.map(item => item.index),
+  })), [
+    {
+      key: 'responses',
+      primary: [0],
+      fallback: [2],
+    },
+    {
+      key: 'messages',
+      primary: [1],
+      fallback: [3],
+    },
+    {
+      key: 'converted-messages',
+      primary: [0],
+      fallback: [2],
+    },
+  ]);
+});
+
+test('getConfigRole identifies separate OpenAI and Claude apikey fallback focus', () => {
+  const openAiFocus = {
+    index: 2,
+    dispatch_role: 'openai_apikey_fallback_focus',
+    item: {
+      type: 'apikey',
+      support: ['gpt'],
+    },
+  };
+  const claudeFocus = {
+    index: 3,
+    dispatch_role: 'claude_apikey_fallback_focus',
+    item: {
+      type: 'apikey',
+      support: ['claude'],
+    },
+  };
+  const sharedFocus = {
+    index: 4,
+    dispatch_roles: ['openai_apikey_fallback_focus', 'claude_apikey_fallback_focus'],
+    item: {
+      type: 'apikey',
+      support: ['gpt', 'claude'],
+    },
+  };
+
+  assert.deepEqual(getConfigRole(openAiFocus), {
+    key: 'fallback-gpt',
+    label: 'API key',
+    lane: 'Responses fallback',
+    priority: 'OpenAI 兜底焦点',
+    tone: 'active',
+  });
+  assert.deepEqual(getConfigRole(claudeFocus), {
+    key: 'fallback-claude',
+    label: 'API key',
+    lane: 'Claude fallback',
+    priority: 'Claude 兜底焦点',
+    tone: 'active',
+  });
+  assert.deepEqual(getConfigRole(sharedFocus), {
+    key: 'fallback-both',
+    label: 'API key',
+    lane: '双链路 fallback',
+    priority: '双链路兜底焦点',
+    tone: 'active',
+  });
 });
 
 test('hasRefreshTokenConfig detects token configs that can be refreshed', () => {
@@ -371,6 +587,28 @@ test('hasRefreshTokenConfig detects token configs that can be refreshed', () => 
       apikey: 'sk-1',
     },
   }), false);
+});
+
+test('hasRuntimeProblem detects explicit error markers but not unavailable state alone', () => {
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=unknown | 状态=额度检查失败 | 错误=request timeout',
+  }), false);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=额度检查失败 | 错误=quota check failed',
+  }), true);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=认证失败',
+  }), true);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=401',
+  }), false);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=否 | 额度=99% | 状态=额度不可用',
+  }), false);
+  assert.equal(hasRuntimeProblem({
+    runtime_summary: '可用=是 | 额度=83%',
+  }), false);
+  assert.equal(hasRuntimeProblem(null), false);
 });
 
 test('buildConfigItemFromForm keeps token mode as pasted AuthSession JSON', () => {
@@ -430,6 +668,132 @@ test('buildConfigItemFromForm rejects invalid token mode AuthSession JSON array 
     }),
     /第 2 项必须是 JSON 对象/,
   );
+});
+
+test('normalizeOAuthExportInput extracts oauth export arrays into token items', () => {
+  const parsed = normalizeOAuthExportInput(JSON.stringify([
+    {
+      name: 'account-a',
+      type: 'oauth',
+      credentials: {
+        access_token: 'token-a',
+        refresh_token: 'refresh-a',
+        email: 'a@example.com',
+        chatgpt_account_id: 'account-a-id',
+      },
+    },
+    {
+      name: 'account-b',
+      platform: 'openai',
+      type: 'oauth',
+      extra: {
+        chatgpt_account_id: 'account-b-id',
+      },
+      credentials: {
+        access_token: 'token-b',
+      },
+    },
+  ]));
+
+  assert.deepEqual(parsed, [
+    {
+      description: 'a@example.com',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+      refresh_token: 'refresh-a',
+    },
+    {
+      description: 'account-b',
+      account_id: 'account-b-id',
+      access_token: 'token-b',
+    },
+  ]);
+});
+
+test('normalizeOAuthExportInput tolerates trailing commas in pasted oauth exports', () => {
+  const parsed = normalizeOAuthExportInput(`[
+    {
+      "name": "account-a",
+      "type": "oauth",
+      "credentials": {
+        "access_token": "token-a",
+        "chatgpt_account_id": "account-a-id"
+      },
+    },
+  ]`);
+
+  assert.deepEqual(parsed, [
+    {
+      description: 'account-a',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+    },
+  ]);
+});
+
+test('normalizeOAuthExportInput tolerates a truncated oauth export array tail', () => {
+  const parsed = normalizeOAuthExportInput(`[
+    {
+      "name": "account-a",
+      "type": "oauth",
+      "credentials": {
+        "access_token": "token-a",
+        "chatgpt_account_id": "account-a-id"
+      },
+      "extra": {
+        "email": "extra-a@example.com"
+      }
+    },`);
+
+  assert.deepEqual(parsed, [
+    {
+      description: 'extra-a@example.com',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+    },
+  ]);
+});
+
+test('buildConfigItemFromForm converts oauth export arrays from the token textbox', () => {
+  const imported = buildConfigItemFromForm({
+    mode: 'token',
+    tokenRawJson: JSON.stringify([
+      {
+        name: 'account-a',
+        type: 'oauth',
+        credentials: {
+          access_token: 'token-a',
+          chatgpt_account_id: 'account-a-id',
+          refresh_token: 'refresh-a',
+        },
+      },
+      {
+        name: 'account-b',
+        type: 'oauth',
+        extra: {
+          account_id: 'account-b-id',
+        },
+        credentials: {
+          access_token: 'token-b',
+          email: 'b@example.com',
+        },
+      },
+    ]),
+  });
+
+  assert.deepEqual(imported, [
+    {
+      description: 'account-a',
+      account_id: 'account-a-id',
+      access_token: 'token-a',
+      refresh_token: 'refresh-a',
+    },
+    {
+      description: 'b@example.com',
+      account_id: 'account-b-id',
+      access_token: 'token-b',
+    },
+  ]);
 });
 
 test('buildConfigItemFromForm builds an apikey config from normal form fields', () => {
@@ -498,8 +862,8 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
       apikeys: ['sk-airouter-one', 'sk-airouter-two'],
       dispatch: {
         mode: 'token_pool',
-        label: 'Token 并发池: 锚点配置 #2',
-        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        label: 'OpenAI token 池: 焦点配置 #2',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
       },
       configs: [
         {
@@ -533,15 +897,15 @@ test('buildAdminStatusSummary summarizes apikeys, configs, active config, and he
       },
       {
         label: '调度模式',
-        value: 'Token 并发池: 锚点配置 #2',
+        value: 'OpenAI token 池: 焦点配置 #2',
         tone: 'active',
-        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
       },
       {
         label: '健康状态',
-        value: '1 个异常',
-        tone: 'warn',
-        detail: '发现 timeout',
+        value: '未发现异常',
+        tone: 'ok',
+        detail: '基于当前运行态摘要',
       },
     ],
   );
@@ -552,8 +916,8 @@ test('getDispatchModeSummary shows the observed token session target when presen
     getDispatchModeSummary({
       dispatch: {
         mode: 'token_pool',
-        label: 'Token 并发池: 锚点配置 #1',
-        detail: 'token 请求按会话调度，apikey 仅作 fallback',
+        label: 'OpenAI token 池: 焦点配置 #1',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
         observed_session: {
           config_index: 2,
           session_hash: 'abc123def456',
@@ -565,7 +929,7 @@ test('getDispatchModeSummary shows the observed token session target when presen
       },
     }),
     {
-      value: 'Token 并发池: 锚点配置 #1',
+      value: 'OpenAI token 池: 焦点配置 #1',
       tone: 'active',
       detail: '当前会话 #abc123def456 -> 配置 #3',
     },
@@ -638,14 +1002,33 @@ test('formatResponseModelStatus summarizes requested and actual response models'
         response_model: 'gpt-5.4-mini',
         active: true,
         status_code: 200,
+        downgraded: true,
       },
     }),
     {
       title: '响应模型',
       label: 'gpt-5.4-mini',
-      detail: '进行中 · 请求 gpt-5.5 · HTTP 200',
+      detail: '进行中 · 已降级 · 请求 gpt-5.5 · HTTP 200',
       active: true,
       tone: 'warn',
+    },
+  );
+
+  assert.deepEqual(
+    formatResponseModelStatus({
+      response_model: {
+        request_model: 'gpt-5.4-mini',
+        response_model: 'gpt-5.4-mini-2026-03-17',
+        active: false,
+        status_code: 200,
+      },
+    }),
+    {
+      title: '响应模型',
+      label: 'gpt-5.4-mini-2026-03-17',
+      detail: 'HTTP 200',
+      active: false,
+      tone: 'muted',
     },
   );
 
@@ -667,6 +1050,103 @@ test('formatResponseModelStatus summarizes requested and actual response models'
   );
 });
 
+test('moveConfigSnapshotItem reorders configs locally and reindexes rows', () => {
+  const snapshot = {
+    active_config_index: 1,
+    configs: [
+      {
+        index: 0,
+        item: { description: 'first' },
+        is_active: false,
+        runtime: { index: 0 },
+      },
+      {
+        index: 1,
+        item: { description: 'second' },
+        is_active: true,
+        runtime: { index: 1 },
+      },
+      {
+        index: 2,
+        item: { description: 'third' },
+        is_active: false,
+        runtime: { index: 2 },
+      },
+    ],
+    disabled_configs: [
+      {
+        index: 0,
+        item: { description: 'disabled' },
+      },
+    ],
+  };
+
+  const moved = moveConfigSnapshotItem(snapshot, 2, 0);
+
+  assert.deepEqual(moved.configs.map(item => item.item.description), ['third', 'first', 'second']);
+  assert.deepEqual(moved.configs.map(item => item.index), [0, 1, 2]);
+  assert.equal(moved.configs[2].is_active, true);
+  assert.equal(moved.active_config_index, 2);
+  assert.equal(moved.configs[0].runtime.index, 0);
+  assert.notEqual(moved.configs, snapshot.configs);
+  assert.equal(snapshot.configs[0].item.description, 'first');
+  assert.equal(moved.disabled_configs, snapshot.disabled_configs);
+});
+
+test('formatApiKeyRecoveryStatus summarizes GPT apikey recovery probes', () => {
+  assert.deepEqual(
+    formatApiKeyRecoveryStatus({
+      api_key_recovery: {
+        enabled: true,
+        pending: true,
+        interval_ms: 180000,
+        last_checked_at: 1713337200000,
+        result: 'failed',
+        status_code: 429,
+        reason: 'apikey_rate_limited',
+        last_error: 'http:429',
+        model: 'gpt-4.1-mini',
+      },
+    }, {
+      locale: 'en-US',
+      timeZone: 'UTC',
+    }),
+    {
+      title: 'API Key 探测',
+      label: '仍不可用',
+      detail: '上次 07:00:00 · 模型 gpt-4.1-mini · HTTP 429 · http:429 · 仅不可用时每 3 分钟恢复探测',
+      active: false,
+      tone: 'danger',
+    },
+  );
+
+  assert.deepEqual(
+    formatApiKeyRecoveryStatus({
+      api_key_recovery: {
+        enabled: true,
+        pending: true,
+        interval_ms: 180000,
+        last_checked_at: null,
+        result: 'never',
+        model: 'gpt-5.5',
+      },
+    }),
+    {
+      title: 'API Key 探测',
+      label: '等待探测',
+      detail: '模型 gpt-5.5 · 仅不可用时每 3 分钟恢复探测',
+      active: false,
+      tone: 'warn',
+    },
+  );
+
+  assert.equal(formatApiKeyRecoveryStatus({
+    api_key_recovery: {
+      enabled: false,
+    },
+  }), null);
+});
+
 test('extractRuntimeStatusTags falls back when runtime data is missing', () => {
   assert.deepEqual(
     extractRuntimeStatusTags(null),
@@ -676,7 +1156,7 @@ test('extractRuntimeStatusTags falls back when runtime data is missing', () => {
   );
 });
 
-test('getConfigIdentityColumnLabel uses upstream config when any apikey item exists', () => {
+test('getConfigIdentityColumnLabel uses upstream config when any upstream item exists', () => {
   assert.equal(getConfigIdentityColumnLabel({
     configs: [
       {
@@ -690,14 +1170,39 @@ test('getConfigIdentityColumnLabel uses upstream config when any apikey item exi
     configs: [
       {
         item: {
+          type: 'claude_token',
+        },
+      },
+    ],
+  }), '上游配置');
+  assert.equal(getConfigIdentityColumnLabel({
+    configs: [
+      {
+        item: {
           account_id: 'account-1',
         },
       },
     ],
   }), 'account_id');
+  assert.equal(getConfigIdentityColumnLabel({
+    configs: [
+      {
+        item: {
+          account_id: 'account-1',
+        },
+      },
+    ],
+    disabled_configs: [
+      {
+        item: {
+          type: 'apikey',
+        },
+      },
+    ],
+  }), '上游配置');
 });
 
-test('getConfigIdentityValue shows base_url and masks apikey config secrets', () => {
+test('getConfigIdentityValue shows base_url and masks upstream config secrets', () => {
   assert.equal(
     getConfigIdentityValue(
       { mode: 'mixed' },
@@ -724,6 +1229,18 @@ test('getConfigIdentityValue shows base_url and masks apikey config secrets', ()
       },
     ),
     'https://claude.example.com/v1 (sk--...3456)',
+  );
+  assert.equal(
+    getConfigIdentityValue(
+      { mode: 'mixed' },
+      {
+        item: {
+          type: 'claude_token',
+          local_auth_token: 'airouter-oauth-local-token',
+        },
+      },
+    ),
+    'https://api.anthropic.com (air-...oken)',
   );
 });
 

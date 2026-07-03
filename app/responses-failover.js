@@ -6,21 +6,114 @@ const RETRYABLE_HTTP_ERROR_TYPES = new Map([
   ['usage_not_included', { reason: 'responses_usage_not_included' }],
   ['unauthorized', { reason: 'missing_credentials' }],
   ['token_revoked', { reason: 'missing_credentials' }],
+  ['model_at_capacity', { reason: 'responses_model_at_capacity' }],
+]);
+
+const RETRYABLE_HTTP_USAGE_ERROR_TYPES = new Map([
+  ['usage_limit_reached', { reason: 'responses_usage_limit_reached' }],
+  ['usage_not_included', { reason: 'responses_usage_not_included' }],
 ]);
 
 const RETRYABLE_STREAM_ERROR_CODES = new Map([
   ['insufficient_quota', { reason: 'responses_insufficient_quota' }],
   ['usage_limit_reached', { reason: 'responses_usage_limit_reached' }],
   ['usage_not_included', { reason: 'responses_usage_not_included' }],
+  ['model_at_capacity', { reason: 'responses_model_at_capacity' }],
 ]);
+const DOWNGRADED_RESPONSE_MODEL = 'gpt-5.4-mini';
 
 const IGNORABLE_PRELUDE_EVENT_TYPES = new Set([
   'response.created',
   'response.in_progress',
 ]);
 
+const UNKNOWN_RESPONSES_ERROR = {
+  reason: 'responses_unknown_error',
+};
+
+function isSuccessfulResponsesStatus(statusCode) {
+  return Number(statusCode) === 200;
+}
+
 function normalizeErrorText(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function normalizeModelName(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function modelNameHasVersionPrefix(model, prefix) {
+  const normalizedModel = normalizeModelName(model);
+  const normalizedPrefix = normalizeModelName(prefix);
+  if (!normalizedModel || !normalizedPrefix) {
+    return false;
+  }
+
+  if (normalizedModel === normalizedPrefix) {
+    return true;
+  }
+
+  if (!normalizedModel.startsWith(normalizedPrefix)) {
+    return false;
+  }
+
+  const suffix = normalizedModel.slice(normalizedPrefix.length);
+  return /^-\d{4}-\d{2}-\d{2}(?:$|[-._])/.test(suffix);
+}
+
+function areResponseModelsConsistent(requestedModel, responseModel) {
+  return modelNameHasVersionPrefix(responseModel, requestedModel) ||
+    modelNameHasVersionPrefix(requestedModel, responseModel);
+}
+
+function shouldInspectForResponsesModelDowngrade(requestedModel) {
+  const normalizedRequestedModel = normalizeModelName(requestedModel);
+  return Boolean(
+    normalizedRequestedModel &&
+    !areResponseModelsConsistent(normalizedRequestedModel, DOWNGRADED_RESPONSE_MODEL)
+  );
+}
+
+function classifyResponsesModelDowngrade({ requestedModel, responseModel } = {}) {
+  const normalizedResponseModel = normalizeModelName(responseModel);
+  if (
+    !shouldInspectForResponsesModelDowngrade(requestedModel) ||
+    !areResponseModelsConsistent(normalizedResponseModel, DOWNGRADED_RESPONSE_MODEL)
+  ) {
+    return null;
+  }
+
+  const normalizedRequestedModel = String(requestedModel || '').trim();
+  const normalizedObservedModel = String(responseModel || '').trim();
+  return {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: `${normalizedRequestedModel}->${normalizedObservedModel}`,
+    retrySource: 'model',
+    requestedModel: normalizedRequestedModel,
+    responseModel: normalizedObservedModel,
+  };
+}
+
+function isResponsesModelDowngradeClassification(classification) {
+  return Boolean(classification && classification.reason === 'responses_model_downgraded');
+}
+
+function shouldMarkResponsesFailoverUnavailable(classification) {
+  return !isResponsesModelDowngradeClassification(classification);
+}
+
+function extractResponsesPayloadModel(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return '';
+  }
+
+  if (typeof payload.response?.model === 'string' && payload.response.model.trim()) {
+    return payload.response.model.trim();
+  }
+
+  return typeof payload.model === 'string' && payload.model.trim() ? payload.model.trim() : '';
 }
 
 function getUsageLimitMessageKey(...values) {
@@ -39,6 +132,39 @@ function getUsageLimitMessageKey(...values) {
   }
 
   return '';
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findRetryableErrorKey(value, retryableMap) {
+  const normalized = normalizeErrorText(value);
+  if (!normalized) {
+    return '';
+  }
+
+  if (retryableMap.has(normalized)) {
+    return normalized;
+  }
+
+  for (const key of retryableMap.keys()) {
+    const pattern = new RegExp(`(?:^|[^a-z0-9_])(?:[a-z][a-z0-9_+-]*:)?${escapeRegExp(key)}(?=$|[^a-z0-9_])`);
+    if (pattern.test(normalized)) {
+      return key;
+    }
+  }
+
+  return '';
+}
+
+function getModelCapacityMessageKey(...values) {
+  const normalized = values
+    .map(normalizeErrorText)
+    .filter(Boolean)
+    .join('\n');
+
+  return normalized.includes('selected model is at capacity') ? 'model_at_capacity' : '';
 }
 
 function parseJsonObject(text) {
@@ -100,7 +226,7 @@ function getAuthFailureKey(payload, bodyText) {
 
 function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const normalizedStatusCode = Number(statusCode);
-  if (normalizedStatusCode !== 429 && normalizedStatusCode !== 401 && normalizedStatusCode !== 403) {
+  if (!Number.isFinite(normalizedStatusCode) || isSuccessfulResponsesStatus(normalizedStatusCode)) {
     return null;
   }
 
@@ -117,22 +243,55 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
       };
     }
 
-    return null;
+    return {
+      reason: UNKNOWN_RESPONSES_ERROR.reason,
+      retryKey: String(normalizedStatusCode),
+      retrySource: 'http',
+    };
   }
 
   const errorType = payload && payload.error && typeof payload.error.type === 'string'
     ? payload.error.type
+    : '';
+  const errorText = payload && typeof payload.error === 'string'
+    ? payload.error
+    : '';
+  const errorCode = payload && payload.error && typeof payload.error.code === 'string'
+    ? payload.error.code
+    : '';
+  const topLevelType = payload && typeof payload.type === 'string'
+    ? payload.type
+    : '';
+  const topLevelCode = payload && typeof payload.code === 'string'
+    ? payload.code
     : '';
   const messageKey = getUsageLimitMessageKey(
     getPayloadString(payload, ['error', 'message']),
     getPayloadString(payload, ['message']),
     bodyText,
   );
-  const retryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : messageKey;
+  const capacityKey = getModelCapacityMessageKey(
+    getPayloadString(payload, ['error', 'message']),
+    getPayloadString(payload, ['message']),
+    bodyText,
+  );
+  const retryKey =
+    findRetryableErrorKey(errorType, RETRYABLE_HTTP_ERROR_TYPES) ||
+    findRetryableErrorKey(errorCode, RETRYABLE_HTTP_ERROR_TYPES) ||
+    findRetryableErrorKey(errorText, RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
+    findRetryableErrorKey(getPayloadString(payload, ['error', 'message']), RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
+    findRetryableErrorKey(getPayloadString(payload, ['message']), RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
+    findRetryableErrorKey(bodyText, RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
+    messageKey ||
+    capacityKey;
   const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
 
   if (!metadata) {
-    return null;
+    return {
+      reason: UNKNOWN_RESPONSES_ERROR.reason,
+      retryKey: errorType || errorCode || topLevelType || topLevelCode || `http_${normalizedStatusCode}`,
+      retrySource: 'http',
+    };
   }
 
   return {
@@ -142,28 +301,60 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   };
 }
 
-function classifyRetryableResponsesStreamPayload(payload) {
-  const eventType = typeof payload?.type === 'string' ? payload.type : '';
-  const errorCode = payload && payload.response && payload.response.error && typeof payload.response.error.code === 'string'
-    ? payload.response.error.code
+function classifyRetryableResponsesStreamPayload(payload, options = {}) {
+  const modelDowngrade = classifyResponsesModelDowngrade({
+    requestedModel: options.requestedModel,
+    responseModel: extractResponsesPayloadModel(payload),
+  });
+  if (modelDowngrade) {
+    return modelDowngrade;
+  }
+
+  const eventType = typeof payload?.type === 'string' && payload.type
+    ? payload.type
+    : typeof options.eventType === 'string'
+      ? options.eventType
+      : '';
+  const responseError = payload && payload.response && payload.response.error &&
+    typeof payload.response.error === 'object' && !Array.isArray(payload.response.error)
+    ? payload.response.error
+    : null;
+  const payloadError = payload && payload.error &&
+    typeof payload.error === 'object' && !Array.isArray(payload.error)
+    ? payload.error
+    : null;
+  const errorPayload = responseError || payloadError;
+  const errorCode = errorPayload && typeof errorPayload.code === 'string'
+    ? errorPayload.code
     : '';
-  const errorMessage = payload && payload.response && payload.response.error && typeof payload.response.error.message === 'string'
-    ? payload.response.error.message
+  const errorMessage = errorPayload && typeof errorPayload.message === 'string'
+    ? errorPayload.message
     : '';
   const messageKey = getUsageLimitMessageKey(errorMessage);
-  const retryKey = RETRYABLE_STREAM_ERROR_CODES.has(errorCode) ? errorCode : messageKey;
-  const metadata = eventType === 'response.failed'
+  const capacityKey = getModelCapacityMessageKey(errorMessage);
+  const retryKey =
+    findRetryableErrorKey(errorCode, RETRYABLE_STREAM_ERROR_CODES) ||
+    findRetryableErrorKey(errorMessage, RETRYABLE_STREAM_ERROR_CODES) ||
+    messageKey ||
+    capacityKey;
+  const normalizedEventType = normalizeErrorText(eventType);
+  const isFailureEvent = normalizedEventType === 'response.failed' ||
+    normalizedEventType === 'error' ||
+    normalizedEventType.endsWith('.failed') ||
+    normalizedEventType.endsWith('.error') ||
+    Boolean(errorPayload);
+  const metadata = isFailureEvent
     ? RETRYABLE_STREAM_ERROR_CODES.get(retryKey)
     : null;
 
-  if (!metadata) {
+  if (!isFailureEvent) {
     return null;
   }
 
   return {
     action: 'retry',
-    reason: metadata.reason,
-    retryKey,
+    reason: metadata ? metadata.reason : UNKNOWN_RESPONSES_ERROR.reason,
+    retryKey: retryKey || errorCode || normalizedEventType || 'unknown_error',
     retrySource: 'stream',
   };
 }
@@ -258,6 +449,7 @@ function drainAbandonedResponse(response) {
 function createResponsesEventStreamInspector(options = {}) {
   const {
     maxBufferBytes = 64 * 1024,
+    requestedModel = '',
   } = options;
 
   const decoder = new StringDecoder('utf8');
@@ -302,11 +494,19 @@ function createResponsesEventStreamInspector(options = {}) {
 
     const payload = parseJsonObject(payloadText);
     if (!payload) {
-      return { action: 'pass' };
+      return {
+        action: 'retry',
+        reason: UNKNOWN_RESPONSES_ERROR.reason,
+        retryKey: getSseEventType(eventBlock) || 'malformed_event',
+        retrySource: 'stream',
+      };
     }
 
-    const eventType = typeof payload.type === 'string' ? payload.type : '';
-    const classification = classifyRetryableResponsesStreamPayload(payload);
+    const eventType = typeof payload.type === 'string' ? payload.type : getSseEventType(eventBlock);
+    const classification = classifyRetryableResponsesStreamPayload(payload, {
+      requestedModel,
+      eventType,
+    });
 
     if (classification) {
       return classification;
@@ -338,13 +538,25 @@ function createResponsesEventStreamInspector(options = {}) {
   };
 }
 
+function getSseEventType(eventBlock) {
+  const eventLine = String(eventBlock || '')
+    .split(/\r?\n/)
+    .find(line => line.startsWith('event:'));
+  return eventLine ? eventLine.slice(6).trim() : '';
+}
+
 module.exports = {
   applyResponsesFailoverRequestHeaders,
+  classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
   classifyRetryableResponsesStreamPayload,
   createResponsesEventStreamInspector,
   drainAbandonedResponse,
   getHeaderValue,
   isInspectableResponsesEventStream,
+  isSuccessfulResponsesStatus,
+  isResponsesModelDowngradeClassification,
   normalizeContentEncoding,
+  shouldMarkResponsesFailoverUnavailable,
+  shouldInspectForResponsesModelDowngrade,
 };

@@ -24,16 +24,24 @@ const { createAccountManager } = require('./app/account-manager');
 const { refreshOpenAIToken } = require('./app/openai-token-refresh');
 const {
     applyResponsesFailoverRequestHeaders,
+    classifyResponsesModelDowngrade,
     classifyRetryableResponsesHttpError,
     createResponsesEventStreamInspector,
     drainAbandonedResponse,
     isInspectableResponsesEventStream,
+    isResponsesModelDowngradeClassification,
+    isSuccessfulResponsesStatus,
     normalizeContentEncoding,
+    shouldMarkResponsesFailoverUnavailable,
+    shouldInspectForResponsesModelDowngrade,
 } = require('./app/responses-failover');
 const {
     resolveClaudeCodeOptions,
     resolveResponsesOptions,
     createRuntimeConfigs,
+    createTokenRuntimeConfig,
+    createApiKeyRuntimeConfig,
+    createClaudeTokenRuntimeConfig,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring,
     configSupportsCapability,
@@ -41,9 +49,16 @@ const {
 } = require('./app/openai-config');
 const {
     ConfigEditorError,
-    addConfigItem,
+    addConfigItems,
     buildImportedConfigItem,
     deleteConfigItem,
+    deleteConfigItems,
+    deleteDisabledConfigItem,
+    deleteDisabledConfigItems,
+    disableConfigItem,
+    disableConfigItems,
+    enableConfigItem,
+    enableConfigItems,
     moveConfigItem,
     readParsedConfigFile,
     updateConfigSettings,
@@ -53,10 +68,15 @@ const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
 const {
     generateRandomSecret,
     getConfiguredApiKeys,
+    getConfiguredClaudeTokenRequestAuthTokenHashes,
+    getConfiguredClaudeTokenRequestAuthTokens,
     getConfiguredAuthToken,
     hasConfiguredApiKeys,
+    extractRequestApiKey,
     isAuthorizedAdminRequest,
-    isAuthorizedRequest
+    isAuthorizedRequest,
+    isAuthorizedRequestWithTokenHashes,
+    sha256Hex
 } = require('./app/request-auth');
 // https://chatgpt.com/api/auth/session
 // ==================== 配置 ====================
@@ -69,10 +89,9 @@ const DESKTOP_AUTH_SESSION_REQUEST_FILE = path.join(__dirname, 'airouter.auth-se
 const DESKTOP_AUTH_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
-const ALL_QUOTA_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const ALL_QUOTA_CHECK_INTERVAL_MS = 3 * 60 * 1000;
 const ALL_QUOTA_CHECK_DELAY_MS = 1000;
 const MIN_REMAINING_PERCENT = 3;
-const MIN_WEEKLY_REMAINING_PERCENT = 1;
 const HOP_BY_HOP_HEADERS = new Set([
     'host',
     'connection',
@@ -94,6 +113,10 @@ const LOCAL_ONLY_HEADER_PREFIXES = [
     'x-airouter-',
     'x-admin-'
 ];
+const LOCAL_CLAUDE_AUTH_TOKEN_PREFIX = 'airouter-oauth-';
+const OPENAI_APIKEY_STATIC_POOL = 'openai_apikey';
+const CLAUDE_APIKEY_STATIC_POOL = 'claude_apikey';
+const MAX_REQUEST_FAILOVER_RETRIES = 2;
 const SESSION_KEY_HEADERS = [
     'x-airouter-session-id',
     'session-id',
@@ -130,6 +153,7 @@ function parseTimeoutMs(name, fallbackValue) {
 
 const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 10 * 60 * 1000);
 const QUOTA_CHECK_TIMEOUT_MS = parseTimeoutMs('QUOTA_CHECK_TIMEOUT_MS', 10 * 1000);
+const APIKEY_RECOVERY_TIMEOUT_MS = parseTimeoutMs('APIKEY_RECOVERY_TIMEOUT_MS', 10 * 60 * 1000);
 
 function hasCliFlag(flag) {
     return process.argv.includes(flag);
@@ -166,6 +190,10 @@ function getConfigPoolType(configs) {
 
 function hasQuotaMonitoredConfigs(configs) {
     return (configs || []).some(config => shouldUseQuotaMonitoring(config.type));
+}
+
+function hasRecoverableApiKeyConfigs(configs) {
+    return (configs || []).some(config => configSupportsCapability(config, 'gpt'));
 }
 
 function ensureSecuritySettings(parsed) {
@@ -215,6 +243,7 @@ let responsesConfig = resolveResponsesOptions({
 });
 let accountManager = null;
 let handleClaudeMessagesRequest = null;
+let handleCpaClaudeMessagesRequest = null;
 let server = null;
 let shuttingDown = false;
 const activeSockets = new Set();
@@ -482,8 +511,57 @@ function isGptApiKeyProxyConfig(item) {
     return configSupportsCapability(item, 'gpt');
 }
 
+function isClaudeTokenProxyConfig(item) {
+    return Boolean(item && item.type === 'claude_token');
+}
+
+function isClaudeApiKeyProxyConfig(item) {
+    return Boolean(item && item.type === 'apikey' && configSupportsCapability(item, 'claude'));
+}
+
+function isDirectClaudeProxyConfig(item) {
+    return Boolean(item && (item.type === 'claude_token' || configSupportsCapability(item, 'claude')));
+}
+
 function isRuntimeConfigAvailable(item) {
     return Boolean(item && item.runtime && item.runtime.enabled && item.runtime.available);
+}
+
+function isLocalClaudeAuthToken(value) {
+    return typeof value === 'string' && value.startsWith(LOCAL_CLAUDE_AUTH_TOKEN_PREFIX);
+}
+
+function getClaudeMessagesConfiguredRequestAuthTokens(parsedConfig) {
+    const configuredApiKeys = getConfiguredApiKeys(parsedConfig);
+    if (configuredApiKeys.length === 0) {
+        return [];
+    }
+
+    return [
+        ...configuredApiKeys,
+        ...getConfiguredClaudeTokenRequestAuthTokens(parsedConfig)
+    ];
+}
+
+function getClaudeMessagesConfiguredRequestAuthTokenHashes(parsedConfig) {
+    const configuredApiKeys = getConfiguredApiKeys(parsedConfig);
+    if (configuredApiKeys.length === 0) {
+        return [];
+    }
+
+    return getConfiguredClaudeTokenRequestAuthTokenHashes(parsedConfig);
+}
+
+function isClaudeMessagesProxyPath(req) {
+    const baseUrl = String(req && req.baseUrl ? req.baseUrl : '');
+    const pathName = String(req && req.path ? req.path : '');
+    const originalUrl = String(req && req.originalUrl ? req.originalUrl : req && req.url ? req.url : '');
+    const requestPath = `${baseUrl}${pathName}` || originalUrl.split('?')[0];
+
+    return requestPath === '/v1/messages' ||
+        requestPath.startsWith('/v1/messages/') ||
+        requestPath === '/cpa/v1/messages' ||
+        requestPath.startsWith('/cpa/v1/messages/');
 }
 
 function isExcludedRuntimeConfig(item, excludedConfigs = []) {
@@ -504,14 +582,113 @@ function createStaticConfigLease(config, sessionKey = '') {
     };
 }
 
-function canAttemptResponsesFailover(config, requestUrl, attempt) {
+function acquireFirstAvailableStaticConfigLease(manager, predicate, sessionKey = '', excludedConfigs = []) {
+    if (!manager || typeof manager.findConfig !== 'function') {
+        return null;
+    }
+
+    const config = manager.findConfig(item => (
+        predicate(item) &&
+        !isExcludedRuntimeConfig(item, excludedConfigs) &&
+        isRuntimeConfigAvailable(item)
+    ));
+
+    return config ? createStaticConfigLease(config, sessionKey) : null;
+}
+
+function acquireAvailableStaticConfigLease(manager, reason, predicate, sessionKey = '', excludedConfigs = [], poolKey = 'default') {
+    const isCandidate = item => predicate(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+    if (
+        typeof manager.getActiveStaticConfig === 'function' &&
+        typeof manager.ensureActiveStaticConfig === 'function'
+    ) {
+        const currentConfig = manager.getActiveStaticConfig(poolKey, isCandidate);
+        if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
+            return createStaticConfigLease(currentConfig, sessionKey);
+        }
+
+        const nextConfig = manager.ensureActiveStaticConfig(poolKey, reason, isCandidate);
+        if (nextConfig && isRuntimeConfigAvailable(nextConfig)) {
+            return createStaticConfigLease(nextConfig, sessionKey);
+        }
+
+        return null;
+    }
+
+    const currentConfig = manager.getActiveConfig(isCandidate);
+    if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
+        return createStaticConfigLease(currentConfig, sessionKey);
+    }
+
+    const nextConfig = manager.ensureActiveConfig(reason, isCandidate);
+    if (nextConfig && isRuntimeConfigAvailable(nextConfig)) {
+        return createStaticConfigLease(nextConfig, sessionKey);
+    }
+
+    return null;
+}
+
+function acquireTokenThenGptApiKeyLease(manager, reason, sessionKey, excludedConfigs = []) {
+    const tokenLease = manager.acquireConfig(reason, isTokenProxyConfig, {
+        sessionKey,
+        exclude: excludedConfigs,
+        allowFallback: false,
+    });
+    if (tokenLease) {
+        return tokenLease;
+    }
+
+    const apiKeyLease = acquireAvailableStaticConfigLease(
+        manager,
+        reason,
+        isGptApiKeyProxyConfig,
+        sessionKey,
+        excludedConfigs,
+        OPENAI_APIKEY_STATIC_POOL
+    );
+    if (apiKeyLease) {
+        return apiKeyLease;
+    }
+
+    return manager.acquireConfig(reason, isTokenProxyConfig, {
+        sessionKey,
+        exclude: excludedConfigs,
+    });
+}
+
+function canAttemptResponsesFailover(config, requestUrl) {
     return Boolean(
         accountManager &&
         config &&
         config.type === 'token' &&
-        Number(attempt || 0) < 1 &&
         isResponsesPath(requestUrl)
     );
+}
+
+function canAttemptTokenFailover(config) {
+    return Boolean(
+        accountManager &&
+        config &&
+        config.type === 'token'
+    );
+}
+
+function hasRequestFailoverRetriesRemaining(failoverAttempt) {
+    const normalizedAttempt = Number(failoverAttempt);
+    return (Number.isFinite(normalizedAttempt) ? Math.max(0, Math.floor(normalizedAttempt)) : 0) < MAX_REQUEST_FAILOVER_RETRIES;
+}
+
+function classifyTokenUpstreamFailure(config, statusCode) {
+    if (!config || config.type !== 'token' || isSuccessfulResponsesStatus(statusCode)) {
+        return null;
+    }
+
+    const normalizedStatusCode = Number(statusCode);
+    return {
+        reason: 'responses_upstream_error',
+        retryKey: Number.isFinite(normalizedStatusCode) ? String(normalizedStatusCode) : 'invalid_status',
+        retrySource: 'http',
+    };
 }
 
 function classifyApiKeyUpstreamFailure(config, statusCode) {
@@ -544,15 +721,31 @@ function classifyApiKeyUpstreamFailure(config, statusCode) {
         };
     }
 
+    if (!isSuccessfulResponsesStatus(normalizedStatusCode)) {
+        return {
+            reason: 'apikey_upstream_error',
+            retryKey: Number.isFinite(normalizedStatusCode) ? String(normalizedStatusCode) : 'invalid_status',
+            retrySource: 'http',
+        };
+    }
+
     return null;
 }
 
-function isResponsesFailoverInspectionCandidate(statusCode, headers) {
+function isResponsesFailoverInspectionCandidate(statusCode, headers, options = {}) {
     const normalizedStatusCode = Number(statusCode);
-    return normalizedStatusCode === 429 ||
-        normalizedStatusCode === 401 ||
-        normalizedStatusCode === 403 ||
-        isInspectableResponsesEventStream(headers);
+    if (Number.isFinite(normalizedStatusCode) && !isSuccessfulResponsesStatus(normalizedStatusCode)) {
+        return true;
+    }
+
+    if (isInspectableResponsesEventStream(headers)) {
+        return true;
+    }
+
+    const contentType = getHeaderValue(headers, 'content-type').toLowerCase();
+    return isSuccessfulResponsesStatus(normalizedStatusCode) &&
+        contentType.includes('json') &&
+        shouldInspectForResponsesModelDowngrade(options.requestedModel);
 }
 
 function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) {
@@ -566,8 +759,10 @@ function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) 
     return responseMeta;
 }
 
-async function inspectResponsesEventStream(response) {
-    const inspector = createResponsesEventStreamInspector();
+async function inspectResponsesEventStream(response, options = {}) {
+    const inspector = createResponsesEventStreamInspector({
+        requestedModel: options.requestedModel,
+    });
     const bufferedChunks = [];
     const contentEncoding = normalizeContentEncoding(getHeaderValue(response.headers, 'content-encoding'));
     let decoder = null;
@@ -696,8 +891,8 @@ async function inspectResponsesEventStream(response) {
     });
 }
 
-async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders) {
-    if ([429, 401, 403].includes(Number(statusCode))) {
+async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders, options = {}) {
+    if (Number.isFinite(Number(statusCode)) && !isSuccessfulResponsesStatus(statusCode)) {
         const bodyBuffer = await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
         const classification = classifyRetryableResponsesHttpError({
@@ -721,7 +916,9 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
     }
 
     if (isInspectableResponsesEventStream(rawHeaders)) {
-        const streamInspection = await inspectResponsesEventStream(response);
+        const streamInspection = await inspectResponsesEventStream(response, {
+            requestedModel: options.requestedModel,
+        });
 
         if (streamInspection.decision.action === 'retry') {
             return {
@@ -746,35 +943,115 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
         };
     }
 
+    const contentType = getHeaderValue(rawHeaders, 'content-type').toLowerCase();
+    if (
+        isSuccessfulResponsesStatus(statusCode) &&
+        contentType.includes('json') &&
+        shouldInspectForResponsesModelDowngrade(options.requestedModel)
+    ) {
+        const bodyBuffer = await consumeResponseBody(response);
+        const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
+        let responseModel = '';
+
+        try {
+            responseModel = extractResponseModelFromPayload(JSON.parse(bodyText));
+        } catch (err) {
+            responseModel = '';
+        }
+
+        const classification = classifyResponsesModelDowngrade({
+            requestedModel: options.requestedModel,
+            responseModel,
+        });
+
+        if (classification) {
+            return {
+                action: 'retry',
+                classification,
+                forwardMode: 'buffered',
+                bodyBuffer,
+            };
+        }
+
+        return {
+            action: 'forward-buffered',
+            bodyBuffer,
+        };
+    }
+
     return {
         action: 'skip',
     };
 }
 
-function createClaudeMessagesRequestHandler() {
+function createClaudeMessagesRequestHandler(options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
+    function acquireClaudeMessagesConfig(sessionKey, excludedConfigs = [], reason = 'claude_request', localAuthToken = '') {
+        const isClaudeTokenConfig = item => isClaudeTokenProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+        const isClaudeApiKeyConfig = item => isClaudeApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+        const matchesClaudeTokenRequestAuth = item => item &&
+            item.type === 'claude_token' &&
+            localAuthToken &&
+            (
+                item.local_auth_token === localAuthToken ||
+                item.access_token === localAuthToken ||
+                (Array.isArray(item.request_auth_token_sha256s) && item.request_auth_token_sha256s.includes(sha256Hex(localAuthToken)))
+            );
+        const isMatchingClaudeTokenConfig = item => item &&
+            matchesClaudeTokenRequestAuth(item) &&
+            !isExcludedRuntimeConfig(item, excludedConfigs);
+        const boundClaudeTokenConfig = localAuthToken && typeof accountManager.findConfig === 'function'
+            ? accountManager.findConfig(matchesClaudeTokenRequestAuth)
+            : null;
+
+        if (boundClaudeTokenConfig) {
+            const matchedClaudeTokenConfig = accountManager.findConfig(item => isMatchingClaudeTokenConfig(item) && isRuntimeConfigAvailable(item));
+            return matchedClaudeTokenConfig
+                ? createStaticConfigLease(matchedClaudeTokenConfig, sessionKey)
+                : null;
+        }
+
+        if (isLocalClaudeAuthToken(localAuthToken)) {
+            return null;
+        }
+
+        const matchedClaudeTokenLease = localAuthToken
+            ? acquireFirstAvailableStaticConfigLease(accountManager, isMatchingClaudeTokenConfig, sessionKey, excludedConfigs)
+            : null;
+        if (matchedClaudeTokenLease) {
+            return matchedClaudeTokenLease;
+        }
+
+        const claudeTokenLease = acquireFirstAvailableStaticConfigLease(accountManager, isClaudeTokenConfig, sessionKey, excludedConfigs);
+        if (claudeTokenLease) {
+            return claudeTokenLease;
+        }
+
+        const claudeApiKeyLease = acquireAvailableStaticConfigLease(
+            accountManager,
+            reason,
+            isClaudeApiKeyConfig,
+            sessionKey,
+            excludedConfigs,
+            CLAUDE_APIKEY_STATIC_POOL
+        );
+        if (claudeApiKeyLease) {
+            return claudeApiKeyLease;
+        }
+
+        return acquireTokenThenGptApiKeyLease(accountManager, reason, sessionKey, excludedConfigs);
+    }
+
     return createClaudeMessagesHandler({
         getConfig: (req, context = {}) => {
             const sessionKey = normalizeSessionKey(context.sessionKey);
-            const isClaudeApiKeyConfig = item => configSupportsCapability(item, 'claude');
-            const currentClaudeApiKeyConfig = accountManager.getActiveConfig(isClaudeApiKeyConfig);
-            if (currentClaudeApiKeyConfig && isRuntimeConfigAvailable(currentClaudeApiKeyConfig)) {
-                return createStaticConfigLease(currentClaudeApiKeyConfig, sessionKey);
+            const config = acquireClaudeMessagesConfig(sessionKey, [], 'claude_request', extractRequestApiKey(req.headers));
+
+            if (config) {
+                return config;
             }
 
-            const nextClaudeApiKeyConfig = accountManager.ensureActiveConfig('claude_request', isClaudeApiKeyConfig);
-            if (nextClaudeApiKeyConfig && isRuntimeConfigAvailable(nextClaudeApiKeyConfig)) {
-                return createStaticConfigLease(nextClaudeApiKeyConfig, sessionKey);
-            }
-
-            const config = accountManager.acquireConfig('claude_request', item => item.type === 'token', {
-                sessionKey,
-            });
-
-            if (!config) {
-                throw new Error(`当前没有可用 support 包含 claude 的 apikey 或 token 配置，请先访问 ${buildAdminPath()} 添加账号`);
-            }
-
-            return config;
+            throw new Error(`当前没有可用 claude_token、support 包含 claude 的 apikey、token 或 support 包含 gpt 的 apikey 配置，请先访问 ${buildAdminPath()} 添加账号`);
         },
         accessLogEnabled: ACCESS_LOG_ENABLED,
         log,
@@ -793,32 +1070,106 @@ function createClaudeMessagesRequestHandler() {
             );
         },
         responsesOptions: responsesConfig,
-        upstreamModel: process.env.CLAUDE_PROXY_MODEL || claudeCodeConfig.model,
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
-        clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1',
+        clientVersion: process.env.CODEX_CLIENT_VERSION || '1.0.1',
         upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+        cpaStyleCompatibility,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
+            const retryAllowed = !context || context.retryAllowed !== false;
+            if (isResponsesModelDowngradeClassification(classification)) {
+                warn(`claude responses 模型降级，自动切号: #${config.index + 1} ${config.description} (${classification.retryKey})`);
+                accountManager.observeResponseModel(config, {
+                    requestModel: classification.requestedModel,
+                    responseModel: classification.responseModel,
+                    source: 'claude_messages',
+                    statusCode: 200,
+                    downgraded: true,
+                });
+
+                if (!context) {
+                    return null;
+                }
+
+                if (!retryAllowed) {
+                    return null;
+                }
+
+                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                    ? context.excludedConfigs
+                    : [config];
+
+                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_model_downgrade');
+            }
+
+            if (config && isDirectClaudeProxyConfig(config)) {
+                if (config.type === 'apikey') {
+                    const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
+                        ok: false,
+                        reason: classification.reason,
+                        lastError: `${classification.retrySource}:${classification.retryKey}`,
+                        switchReason: 'apikey_upstream_failover',
+                    });
+
+                    if (apiKeyResult.unavailable) {
+                        warn(`claude apikey 上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                    }
+                } else {
+                    warn(`claude token 上游返回错误: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
+                }
+
+                if (config.type === 'claude_token') {
+                    return null;
+                }
+
+                if (!context) {
+                    return null;
+                }
+
+                if (!retryAllowed) {
+                    return null;
+                }
+
+                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                    ? context.excludedConfigs
+                    : [config];
+
+                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_direct_failover');
+            }
+
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
-            accountManager.markConfigUnavailable(config, classification.reason, {
-                lastError: `${classification.retrySource}:${classification.retryKey}`,
-                switchReason: 'claude_responses_failover',
-            });
+            if (shouldMarkResponsesFailoverUnavailable(classification)) {
+                accountManager.markConfigUnavailable(config, classification.reason, {
+                    lastError: `${classification.retrySource}:${classification.retryKey}`,
+                    switchReason: 'claude_responses_failover',
+                });
+            }
 
             if (!context) {
                 return null;
             }
 
-            return accountManager.acquireConfig('claude_responses_failover', item => item.type === config.type, {
-                sessionKey: context.sessionKey,
-                exclude: [config],
-                allowFallback: false,
-            });
+            if (!retryAllowed) {
+                return null;
+            }
+
+            const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                ? context.excludedConfigs
+                : [config];
+
+            return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_failover');
         },
         observeResponseModel: (config, observation) => {
             if (accountManager && typeof accountManager.observeResponseModel === 'function') {
                 accountManager.observeResponseModel(config, observation);
             }
+        },
+        observeApiKeyRequestResult: (config, result) => {
+            if (accountManager && typeof accountManager.recordApiKeyRequestResult === 'function') {
+                return accountManager.recordApiKeyRequestResult(config, result);
+            }
+
+            return null;
         }
     });
 }
@@ -840,11 +1191,11 @@ function applyLoadedConfig(loadedConfig) {
         initialActiveConfigIndex: loadedConfig.initialActiveConfigIndex ?? 0,
         quotaCheckPath: QUOTA_CHECK_PATH,
         quotaCheckTimeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+        apiKeyRecoveryTimeoutMs: APIKEY_RECOVERY_TIMEOUT_MS,
         quotaCheckIntervalMs: QUOTA_CHECK_INTERVAL_MS,
         allQuotaCheckIntervalMs: ALL_QUOTA_CHECK_INTERVAL_MS,
         allQuotaCheckDelayMs: ALL_QUOTA_CHECK_DELAY_MS,
         minRemainingPercent: MIN_REMAINING_PERCENT,
-        minWeeklyRemainingPercent: MIN_WEEKLY_REMAINING_PERCENT,
         buildAuthHeadersForConfig,
         shouldUseQuotaMonitoring,
         refreshTokenFn: ({ refreshToken, clientId }) => refreshOpenAIToken({
@@ -858,6 +1209,9 @@ function applyLoadedConfig(loadedConfig) {
         now: getCurrentTimestamp
     });
     handleClaudeMessagesRequest = createClaudeMessagesRequestHandler();
+    handleCpaClaudeMessagesRequest = createClaudeMessagesRequestHandler({
+        cpaStyleCompatibility: true
+    });
 }
 
 function hydrateLoadedConfig(loadedConfig, options = {}) {
@@ -909,6 +1263,158 @@ function persistConfigWithoutRuntimeReload(nextParsed) {
     const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed);
     currentParsedConfig = savedParsed;
     return savedParsed;
+}
+
+function createInvalidRuntimeConfig(item, index, message) {
+    const itemType = getConfigItemType(item);
+    const configType = itemType === 'apikey' || itemType === 'claude_token' ? itemType : 'token';
+    const rawDescription = typeof item?.description === 'string' ? item.description.trim() : '';
+    const description = rawDescription || `${configType === 'apikey' ? 'APIKey 配置' : configType === 'claude_token' ? 'Claude OAuth 配置' : 'OpenAI 配置'} #${index + 1}`;
+    const runtime = {
+        enabled: false,
+        available: false,
+        lastCheckedAt: null,
+        remainingPercent: null,
+        primaryRemainingPercent: null,
+        primaryResetAt: null,
+        primaryResetAfterSeconds: null,
+        secondaryRemainingPercent: null,
+        secondaryResetAt: null,
+        secondaryResetAfterSeconds: null,
+        reason: 'invalid_config',
+        lastError: message || 'invalid config',
+        unavailableUntil: null
+    };
+
+    if (configType === 'apikey') {
+        return {
+            type: 'apikey',
+            index,
+            baseUrl: '',
+            apiBasePath: '',
+            apiKey: '',
+            support: ['gpt'],
+            health: {},
+            description,
+            runtime
+        };
+    }
+
+    if (configType === 'claude_token') {
+        return {
+            type: 'claude_token',
+            index,
+            baseUrl: '',
+            apiBasePath: '',
+            access_token: '',
+            refresh_token: '',
+            local_auth_token: '',
+            account_uuid: '',
+            organization_uuid: '',
+            expires_at: null,
+            description,
+            runtime
+        };
+    }
+
+    return {
+        type: 'token',
+        index,
+        baseUrl: '',
+        apiBasePath: '',
+        access_token: '',
+        refresh_token: '',
+        client_id: '',
+        account_id: '',
+        description,
+        runtime
+    };
+}
+
+function createRuntimeConfigWithoutThrow(item, index) {
+    try {
+        if (getConfigItemType(item) === 'apikey') {
+            return createApiKeyRuntimeConfig(item, index);
+        }
+
+        if (getConfigItemType(item) === 'claude_token') {
+            return createClaudeTokenRuntimeConfig(item, index);
+        }
+
+        return createTokenRuntimeConfig(item, index);
+    } catch (err) {
+        return createInvalidRuntimeConfig(item, index, err.message);
+    }
+}
+
+function getConfigItemDescription(item, runtimeConfig, index) {
+    const rawDescription = typeof item?.description === 'string' ? item.description.trim() : '';
+
+    if (rawDescription) {
+        return rawDescription;
+    }
+
+    const type = runtimeConfig && runtimeConfig.type === 'apikey'
+        ? 'apikey'
+        : runtimeConfig && runtimeConfig.type === 'claude_token'
+            ? 'claude_token'
+            : 'token';
+    return `${type === 'apikey' ? 'APIKey 配置' : type === 'claude_token' ? 'Claude OAuth 配置' : 'OpenAI 配置'} #${index + 1}`;
+}
+
+function reindexRuntimeConfig(runtimeConfig, item, index) {
+    return {
+        ...runtimeConfig,
+        index,
+        description: getConfigItemDescription(item, runtimeConfig, index)
+    };
+}
+
+function alignRuntimeConfigsToParsed(parsed, runtimeConfigs = apiConfigs) {
+    const configs = Array.isArray(parsed && parsed.configs) ? parsed.configs : [];
+
+    return configs.map((item, index) => {
+        const runtimeConfig = runtimeConfigs[index] || createRuntimeConfigWithoutThrow(item, index);
+        return reindexRuntimeConfig(runtimeConfig, item, index);
+    });
+}
+
+function buildPreparedLoadedConfig(savedParsed, runtimeConfigs) {
+    return {
+        parsed: savedParsed,
+        configs: runtimeConfigs,
+        claudeCode: claudeCodeConfig,
+        responses: responsesConfig
+    };
+}
+
+async function persistAppendedConfigItems(previousParsed, nextParsed, appendedItems, reason, options = {}) {
+    const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed, { validate: false });
+    const previousRuntimeConfigs = alignRuntimeConfigsToParsed(previousParsed);
+    const appendedRuntimeConfigs = appendedItems.map((item, offset) => (
+        createRuntimeConfigWithoutThrow(item, previousRuntimeConfigs.length + offset)
+    ));
+    const nextRuntimeConfigs = alignRuntimeConfigsToParsed(savedParsed, [
+        ...previousRuntimeConfigs,
+        ...appendedRuntimeConfigs
+    ]);
+
+    return reloadRuntime(buildPreparedLoadedConfig(savedParsed, nextRuntimeConfigs), reason, options);
+}
+
+async function persistMovedConfigItem(previousParsed, nextParsed, fromIndex, toIndex, reason, options = {}) {
+    const savedParsed = writeParsedConfigFile(CONFIG_FILE, nextParsed, { validate: false });
+    const previousRuntimeConfigs = alignRuntimeConfigsToParsed(previousParsed);
+    const nextRuntimeConfigs = previousRuntimeConfigs.slice();
+    const [movedConfig] = nextRuntimeConfigs.splice(fromIndex, 1);
+
+    if (movedConfig) {
+        nextRuntimeConfigs.splice(toIndex, 0, movedConfig);
+    }
+
+    const reindexedRuntimeConfigs = alignRuntimeConfigsToParsed(savedParsed, nextRuntimeConfigs);
+
+    return reloadRuntime(buildPreparedLoadedConfig(savedParsed, reindexedRuntimeConfigs), reason, options);
 }
 
 function persistTokenRefreshForConfig(update) {
@@ -977,6 +1483,76 @@ function triggerServiceStart(options = {}) {
 
 function triggerServiceRestart(options = {}) {
     return triggerServiceCommand('restart', options);
+}
+
+let desktopAuthSessionJob = null;
+
+function startDesktopAuthSessionJob() {
+    const job = {
+        id: `${Date.now()}`,
+        status: 'running',
+        started_at: Date.now(),
+        payload: null,
+        last_probe: '',
+        error: ''
+    };
+    desktopAuthSessionJob = job;
+    fs.writeFileSync(
+        DESKTOP_AUTH_SESSION_REQUEST_FILE,
+        JSON.stringify({
+            action: 'open_auth_session',
+            job_id: job.id,
+            login_url: 'https://chatgpt.com/',
+            callback_url: `http://localhost:${runtimePort}/admin/api/desktop/auth-session/callback?auth_token=${encodeURIComponent(getConfiguredAuthToken(currentParsedConfig))}`,
+            created_at: new Date().toISOString()
+        }, null, 2)
+    );
+    return job;
+}
+
+function receiveDesktopAuthSession(payload) {
+    if (typeof payload === 'string') {
+        try {
+            payload = JSON.parse(payload);
+        } catch (err) {
+            throw new ConfigEditorError('AuthSession 回填 JSON 解析失败');
+        }
+    }
+
+    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
+        throw new ConfigEditorError('自动获取 AuthSession 尚未启动');
+    }
+
+    const session = payload && payload.session;
+    if (!session || typeof session !== 'object' || !session.accessToken || !session.account || !session.account.id) {
+        throw new ConfigEditorError('AuthSession JSON 不完整');
+    }
+
+    desktopAuthSessionJob.status = 'complete';
+    desktopAuthSessionJob.payload = {
+        ok: true,
+        session
+    };
+    return desktopAuthSessionJob.payload;
+}
+
+function updateDesktopAuthSessionProbe(payload) {
+    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
+        return;
+    }
+
+    if (payload && payload.cancelled) {
+        desktopAuthSessionJob.status = 'cancelled';
+        desktopAuthSessionJob.error = typeof payload.message === 'string'
+            ? payload.message
+            : 'ChatGPT 登录窗口已关闭';
+        return;
+    }
+
+    const message = payload && typeof payload.message === 'string'
+        ? payload.message
+        : '等待 ChatGPT 登录完成';
+    desktopAuthSessionJob.last_probe = message.slice(0, 500);
 }
 
 function listenOnPort(port) {
@@ -1069,6 +1645,26 @@ function serializeAccountStatus(accountStatus) {
         secondary_reset_after_seconds: accountStatus.secondaryResetAfterSeconds,
         last_checked_at: accountStatus.lastCheckedAt,
         reason: accountStatus.reason,
+        quota_check_failures: accountStatus.quotaCheckFailures,
+        unavailable_until: accountStatus.unavailableUntil,
+        api_key_request_window: accountStatus.apiKeyRequestWindow ? {
+            failure_count: accountStatus.apiKeyRequestWindow.failureCount,
+            sample_size: accountStatus.apiKeyRequestWindow.sampleSize,
+            failure_threshold: accountStatus.apiKeyRequestWindow.failureThreshold,
+            window_size: accountStatus.apiKeyRequestWindow.windowSize,
+            sample_ttl_ms: accountStatus.apiKeyRequestWindow.sampleTtlMs,
+        } : null,
+        api_key_recovery: accountStatus.apiKeyRecovery ? {
+            enabled: accountStatus.apiKeyRecovery.enabled,
+            pending: accountStatus.apiKeyRecovery.pending,
+            interval_ms: accountStatus.apiKeyRecovery.intervalMs,
+            last_checked_at: accountStatus.apiKeyRecovery.lastCheckedAt,
+            result: accountStatus.apiKeyRecovery.result,
+            status_code: accountStatus.apiKeyRecovery.statusCode,
+            reason: accountStatus.apiKeyRecovery.reason,
+            last_error: accountStatus.apiKeyRecovery.lastError,
+            model: accountStatus.apiKeyRecovery.model,
+        } : null,
         in_flight: accountStatus.inFlight,
         dispatch_session: accountStatus.dispatchSession ? {
             session_hash: accountStatus.dispatchSession.sessionHash,
@@ -1089,6 +1685,7 @@ function serializeAccountStatus(accountStatus) {
             status_code: accountStatus.responseModel.statusCode,
             observed_at: accountStatus.responseModel.observedAt,
             last_seen_at: accountStatus.responseModel.lastSeenAt,
+            downgraded: accountStatus.responseModel.downgraded === true,
         } : null,
         runtime_summary: accountStatus.runtimeSummary,
         summary_line: accountStatus.summaryLine,
@@ -1100,23 +1697,44 @@ function buildDispatchStatus(activeConfig) {
         return {
             mode: 'empty',
             label: '无可用配置',
-            detail: '请先添加 token 或 apikey 配置'
+            detail: '请先添加 OpenAI token、Claude token 或 fallback apikey'
         };
     }
 
     if (activeConfig.type === 'apikey') {
         return {
-            mode: 'apikey_override',
-            label: `API Key 覆盖: 配置 #${activeConfig.index + 1}`,
-            detail: '支持的流量会优先走当前 apikey'
+            mode: 'apikey_fallback_focus',
+            label: `Fallback apikey 焦点: 配置 #${activeConfig.index + 1}`,
+            detail: 'apikey 只在对应 token 链路不可用时兜底'
+        };
+    }
+
+    if (activeConfig.type === 'claude_token') {
+        return {
+            mode: 'claude_token_focus',
+            label: `Claude token 焦点: 配置 #${activeConfig.index + 1}`,
+            detail: 'Claude token 负责 /v1/messages 主链路'
         };
     }
 
     return {
         mode: 'token_pool',
-        label: `Token 并发池: 锚点配置 #${activeConfig.index + 1}`,
-        detail: 'token 请求按会话调度，apikey 仅作 fallback'
+        label: `OpenAI token 池: 焦点配置 #${activeConfig.index + 1}`,
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback'
     };
+}
+
+function getFallbackCapabilityPoolKey(value) {
+    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (normalized === 'gpt' || normalized === 'openai') {
+        return OPENAI_APIKEY_STATIC_POOL;
+    }
+
+    if (normalized === 'claude') {
+        return CLAUDE_APIKEY_STATIC_POOL;
+    }
+
+    return '';
 }
 
 function buildDispatchObservation(accountStatuses = []) {
@@ -1154,21 +1772,53 @@ function buildDispatchObservation(accountStatuses = []) {
     };
 }
 
-function getDispatchRole(config, activeConfig) {
-    if (!config || !config.runtime || !config.runtime.available) {
-        return 'unavailable';
+function getDispatchRoles(config, activeConfig, fallbackFocus = {}) {
+    if (!config || !config.runtime) {
+        return ['unavailable'];
     }
 
     if (config.type === 'apikey') {
-        return activeConfig === config ? 'apikey_override' : 'apikey_fallback';
+        const roles = [];
+        if (configSupportsCapability(config, 'gpt')) {
+            roles.push(config.index === fallbackFocus.openai ? 'openai_apikey_fallback_focus' : 'openai_apikey_fallback');
+        }
+        if (configSupportsCapability(config, 'claude')) {
+            roles.push(config.index === fallbackFocus.claude ? 'claude_apikey_fallback_focus' : 'claude_apikey_fallback');
+        }
+        if (roles.length === 0) {
+            roles.push(activeConfig === config ? 'apikey_fallback_focus' : 'apikey_fallback');
+        }
+
+        return config.runtime.available ? roles : ['unavailable', ...roles];
     }
 
-    return activeConfig === config ? 'token_anchor' : 'token_dispatch';
+    if (config.type === 'claude_token') {
+        const role = activeConfig === config ? 'claude_token_focus' : 'claude_token';
+        return config.runtime.available ? [role] : ['unavailable', role];
+    }
+
+    const role = activeConfig === config ? 'openai_token_focus' : 'openai_token';
+    return config.runtime.available ? [role] : ['unavailable', role];
+}
+
+function getDispatchRole(config, activeConfig, fallbackFocus = {}) {
+    const roles = getDispatchRoles(config, activeConfig, fallbackFocus);
+    return roles[0] || 'unavailable';
 }
 
 function buildConfigAdminResponse() {
     const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
     const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
+    const openAiFallbackConfigIndex = accountManager && typeof accountManager.getActiveStaticConfigIndex === 'function'
+        ? accountManager.getActiveStaticConfigIndex(OPENAI_APIKEY_STATIC_POOL)
+        : null;
+    const claudeFallbackConfigIndex = accountManager && typeof accountManager.getActiveStaticConfigIndex === 'function'
+        ? accountManager.getActiveStaticConfigIndex(CLAUDE_APIKEY_STATIC_POOL)
+        : null;
+    const fallbackFocus = {
+        openai: openAiFallbackConfigIndex,
+        claude: claudeFallbackConfigIndex,
+    };
     const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
     const accountStatuses = currentParsedConfig.configs.map((item, index) => (
         accountManager && apiConfigs[index] ? accountManager.getAccountStatus(apiConfigs[index]) : null
@@ -1194,14 +1844,32 @@ function buildConfigAdminResponse() {
         responses: currentParsedConfig.responses ?? null,
         dispatch: dispatchStatus,
         active_config_index: activeAccountStatus ? activeAccountStatus.index : null,
+        openai_fallback_config_index: openAiFallbackConfigIndex,
+        claude_fallback_config_index: claudeFallbackConfigIndex,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
             item,
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
-            dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig) : 'unavailable',
+            dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig, fallbackFocus) : 'unavailable',
+            dispatch_roles: apiConfigs[index] ? getDispatchRoles(apiConfigs[index], activeConfig, fallbackFocus) : ['unavailable'],
             runtime: apiConfigs[index] ? serializeAccountStatus(accountStatuses[index]) : null
+        })),
+        disabled_configs: (Array.isArray(currentParsedConfig.disabled_configs) ? currentParsedConfig.disabled_configs : []).map((item, index) => ({
+            index,
+            item
         }))
     };
+}
+
+function getConfigRuntimeSummary(index) {
+    if (!accountManager || !apiConfigs[index]) {
+        return '';
+    }
+
+    const accountStatus = accountManager.getAccountStatus(apiConfigs[index]);
+    return accountStatus && typeof accountStatus.runtimeSummary === 'string'
+        ? accountStatus.runtimeSummary
+        : '';
 }
 
 async function refreshConfigAdminResponse(options = {}) {
@@ -1221,13 +1889,22 @@ async function refreshConfigAdminResponse(options = {}) {
 async function activateConfigAdminResponse(index, options = {}) {
     const manager = options.accountManager || accountManager;
     const buildResponse = options.buildResponse || buildConfigAdminResponse;
+    const fallbackPoolKey = getFallbackCapabilityPoolKey(options.fallbackCapability);
 
     if (!manager || typeof manager.activateConfig !== 'function') {
         throw new ConfigEditorError('账号管理器未初始化');
     }
 
     try {
-        manager.activateConfig(index, 'admin_manual_activate');
+        if (fallbackPoolKey) {
+            if (typeof manager.activateStaticConfig !== 'function') {
+                throw new Error('账号管理器不支持 fallback apikey 独立切换');
+            }
+
+            manager.activateStaticConfig(fallbackPoolKey, index, 'admin_manual_activate');
+        } else {
+            manager.activateConfig(index, 'admin_manual_activate');
+        }
     } catch (err) {
         throw new ConfigEditorError(err.message);
     }
@@ -1289,6 +1966,47 @@ function parseConfigIndex(value) {
     return index;
 }
 
+function parseBatchIndexes(body, label) {
+    const indexes = body && Array.isArray(body.indexes) ? body.indexes : null;
+    if (!indexes || indexes.length === 0) {
+        throw new ConfigEditorError(`${label}索引不能为空`);
+    }
+
+    return indexes.map(value => {
+        if (typeof value === 'number') {
+            return value;
+        }
+
+        if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+            return Number.parseInt(value.trim(), 10);
+        }
+
+        throw new ConfigEditorError(`${label}索引不合法`);
+    });
+}
+
+function deleteApiKeys(parsed, indexes) {
+    const apikeys = getConfiguredApiKeys(parsed);
+    const targetIndexes = parseBatchIndexes({ indexes }, 'apikey');
+    const seen = new Set();
+
+    for (const index of targetIndexes) {
+        if (!Number.isInteger(index) || index < 0 || index >= apikeys.length) {
+            throw new ConfigEditorError('apikey 索引不合法');
+        }
+
+        if (seen.has(index)) {
+            throw new ConfigEditorError('apikey 索引重复');
+        }
+
+        seen.add(index);
+    }
+
+    return updateConfigSettings(parsed, {
+        apikeys: apikeys.filter((_, index) => !seen.has(index))
+    });
+}
+
 function createMissingConfigResponse(res) {
     return res.status(503).json({
         error: 'Service Unavailable',
@@ -1325,14 +2043,19 @@ function isAdminApiRequest(req) {
 }
 
 function requireConfiguredApiKeys(req, res, next) {
-    const configuredApiKeys = getConfiguredApiKeys(currentParsedConfig);
+    const configuredApiKeys = isClaudeMessagesProxyPath(req)
+        ? getClaudeMessagesConfiguredRequestAuthTokens(currentParsedConfig)
+        : getConfiguredApiKeys(currentParsedConfig);
+    const configuredTokenHashes = isClaudeMessagesProxyPath(req)
+        ? getClaudeMessagesConfiguredRequestAuthTokenHashes(currentParsedConfig)
+        : [];
 
     if (configuredApiKeys.length === 0) {
         next();
         return;
     }
 
-    if (!isAuthorizedRequest(req.headers, configuredApiKeys)) {
+    if (!isAuthorizedRequestWithTokenHashes(req.headers, configuredApiKeys, configuredTokenHashes)) {
         createProxyUnauthorizedResponse(res);
         return;
     }
@@ -1421,76 +2144,6 @@ function openExternalUrl(rawUrl, options = {}) {
     });
 }
 
-let desktopAuthSessionJob = null;
-
-function startDesktopAuthSessionJob() {
-    const job = {
-        id: `${Date.now()}`,
-        status: 'running',
-        started_at: Date.now(),
-        payload: null,
-        last_probe: '',
-        error: ''
-    };
-    desktopAuthSessionJob = job;
-    fs.writeFileSync(
-        DESKTOP_AUTH_SESSION_REQUEST_FILE,
-        JSON.stringify({
-            action: 'open_auth_session',
-            job_id: job.id,
-            login_url: 'https://chatgpt.com/',
-            callback_url: `http://localhost:${runtimePort}/admin/api/desktop/auth-session/callback?auth_token=${encodeURIComponent(getConfiguredAuthToken(currentParsedConfig))}`,
-            created_at: new Date().toISOString()
-        }, null, 2)
-    );
-    return job;
-}
-
-function receiveDesktopAuthSession(payload) {
-    if (typeof payload === 'string') {
-        try {
-            payload = JSON.parse(payload);
-        } catch (err) {
-            throw new ConfigEditorError('AuthSession 回填 JSON 解析失败');
-        }
-    }
-
-    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
-        throw new ConfigEditorError('自动获取 AuthSession 尚未启动');
-    }
-
-    const session = payload && payload.session;
-    if (!session || typeof session !== 'object' || !session.accessToken || !session.account || !session.account.id) {
-        throw new ConfigEditorError('AuthSession JSON 不完整');
-    }
-
-    desktopAuthSessionJob.status = 'complete';
-    desktopAuthSessionJob.payload = {
-        ok: true,
-        session
-    };
-    return desktopAuthSessionJob.payload;
-}
-
-function updateDesktopAuthSessionProbe(payload) {
-    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
-        return;
-    }
-
-    if (payload && payload.cancelled) {
-        desktopAuthSessionJob.status = 'cancelled';
-        desktopAuthSessionJob.error = typeof payload.message === 'string'
-            ? payload.message
-            : 'ChatGPT 登录窗口已关闭';
-        return;
-    }
-
-    const message = payload && typeof payload.message === 'string'
-        ? payload.message
-        : '等待 ChatGPT 登录完成';
-    desktopAuthSessionJob.last_probe = message.slice(0, 500);
-}
-
 function parseConfigItemJson(rawJson) {
     if (typeof rawJson !== 'string' || rawJson.trim().length === 0) {
         throw new ConfigEditorError('请先输入配置项 JSON');
@@ -1524,29 +2177,24 @@ function parseConfigItemJson(rawJson) {
     }
 }
 
-function validateConfigItemBeforeAdd(type, item) {
-    try {
-        return createRuntimeConfigs({
-            configs: [item],
-            claude_code: {},
-        })[0];
-    } catch (err) {
-        throw new ConfigEditorError(err.message);
-    }
-}
-
 function shouldForceResponsesStoreFalse(config, rewrittenUrl) {
     return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
 }
 
-function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions) {
+function shouldUseCodexResponsesCompatibility(config, rewrittenUrl) {
+    return Boolean(config && config.type === 'token' && isResponsesPath(rewrittenUrl));
+}
+
+function normalizeProxyJsonBody(config, rewrittenUrl, body, responsesOptions, options = {}) {
     return normalizeResponsesRequestBody(rewrittenUrl, body, {
         ...responsesOptions,
         forceStoreFalse: shouldForceResponsesStoreFalse(config, rewrittenUrl),
+        codexCompatibility: shouldUseCodexResponsesCompatibility(config, rewrittenUrl),
+        cpaStyleCompatibility: options.cpaStyleCompatibility === true,
     });
 }
 
-function prepareFailoverRequest(req, nextConfig, body, originalUrl) {
+function prepareFailoverRequest(req, nextConfig, body, originalUrl, options = {}) {
     req.url = rewriteProxyUrl(originalUrl, nextConfig);
     const contentType = String(req.headers['content-type'] || '').toLowerCase();
     if (!Buffer.isBuffer(body) || !contentType.includes('application/json')) {
@@ -1555,7 +2203,9 @@ function prepareFailoverRequest(req, nextConfig, body, originalUrl) {
 
     try {
         const jsonBody = JSON.parse(body.toString('utf8'));
-        return Buffer.from(JSON.stringify(normalizeProxyJsonBody(nextConfig, req.url, jsonBody, responsesConfig)));
+        return Buffer.from(JSON.stringify(normalizeProxyJsonBody(nextConfig, req.url, jsonBody, responsesConfig, {
+            cpaStyleCompatibility: options.cpaStyleCompatibility === true,
+        })));
     } catch (err) {
         return body;
     }
@@ -1619,8 +2269,11 @@ function normalizeUpstreamResponseHeaders(rawHeaders) {
     return headers;
 }
 
-function applyResponseHeaders(res, statusCode, rawHeaders) {
+function applyResponseHeaders(res, statusCode, rawHeaders, options = {}) {
     const headers = normalizeUpstreamResponseHeaders(rawHeaders);
+    if (!headers['content-type'] && options.defaultContentType) {
+        headers['content-type'] = options.defaultContentType;
+    }
 
     res.status(statusCode);
     for (const [name, value] of Object.entries(headers)) {
@@ -1631,6 +2284,29 @@ function applyResponseHeaders(res, statusCode, rawHeaders) {
         statusCode,
         headers
     };
+}
+
+function isStreamingResponsesRequest(requestPath, body) {
+    if (!isResponsesPath(requestPath)) {
+        return false;
+    }
+
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+        return true;
+    }
+
+    try {
+        const payload = JSON.parse(body.toString('utf8'));
+        return payload && payload.stream !== false;
+    } catch (err) {
+        return true;
+    }
+}
+
+function defaultContentTypeForProxyResponse(requestPath, body) {
+    return isStreamingResponsesRequest(requestPath, body)
+        ? 'text/event-stream; charset=utf-8'
+        : null;
 }
 
 function normalizeObservedModel(value) {
@@ -1783,6 +2459,7 @@ function createResponseModelObserver(options = {}) {
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const requestSessionKey = normalizeSessionKey(options.sessionKey);
     const requestPredicate = typeof options.predicate === 'function' ? options.predicate : () => true;
     const excludedConfigs = Array.isArray(options.excludedConfigs) ? options.excludedConfigs : [];
@@ -1809,6 +2486,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     let headersApplied = false;
     let responseFinished = false;
     let requestClosed = false;
+    let apiKeyRequestResultRecorded = false;
     const shouldLogQuotaUsage = req.method === 'GET' && isQuotaUsagePath(req.url);
     const responseBodyChunks = [];
     let upstreamResponseHeaders = {};
@@ -1840,7 +2518,20 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
     }
 
+    function recordCurrentApiKeyRequestResult(result) {
+        if (!config || config.type !== 'apikey' || apiKeyRequestResultRecorded) {
+            return null;
+        }
+
+        apiKeyRequestResultRecorded = true;
+        return accountManager.recordApiKeyRequestResult(config, result);
+    }
+
     function acquireFailoverLease(reason) {
+        if (!hasRequestFailoverRetriesRemaining(failoverAttempt)) {
+            return null;
+        }
+
         if (retrySelector) {
             return retrySelector(reason, requestSessionKey, [...excludedConfigs, config]);
         }
@@ -1875,17 +2566,20 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     }
 
     function startForwardingResponse(response, statusCode, rawHeaders, initialChunks = []) {
-        const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders);
+        const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders, {
+            defaultContentType: defaultContentTypeForProxyResponse(req.url, body),
+        });
         upstreamResponseHeaders = responseMeta.headers;
         headersApplied = true;
         res.flushHeaders();
+        recordCurrentApiKeyRequestResult({ ok: true });
         observeCurrentResponseModel({
             active: true,
             statusCode,
         });
         const responseModelObserver = createResponseModelObserver({
-            contentType: getHeaderValue(rawHeaders, 'content-type'),
-            contentEncoding: getHeaderValue(rawHeaders, 'content-encoding'),
+            contentType: getHeaderValue(responseMeta.headers, 'content-type'),
+            contentEncoding: getHeaderValue(responseMeta.headers, 'content-encoding'),
             onModel: responseModel => {
                 observeCurrentResponseModel({
                     active: true,
@@ -1927,6 +2621,12 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
             error('代理请求失败:', err.message);
             if (!res.headersSent) {
+                recordCurrentApiKeyRequestResult({
+                    ok: false,
+                    reason: 'apikey_upstream_error',
+                    lastError: err.message,
+                    switchReason: 'apikey_upstream_failover',
+                });
                 const gatewayStatusCode = getGatewayStatusCode(err);
                 releaseCurrentLease();
                 res.status(gatewayStatusCode).json({
@@ -1966,18 +2666,26 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         const statusCode = Number(response.statusCode || 502);
         const apiKeyFailure = classifyApiKeyUpstreamFailure(config, statusCode);
         if (apiKeyFailure) {
-            warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey})`);
-            accountManager.markConfigUnavailable(config, apiKeyFailure.reason, {
+            const apiKeyResult = recordCurrentApiKeyRequestResult({
+                ok: false,
+                reason: apiKeyFailure.reason,
                 lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
                 switchReason: 'apikey_upstream_failover',
             });
+
+            if (apiKeyResult.unavailable) {
+                warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+            }
+
             const nextLease = acquireFailoverLease('apikey_upstream_failover');
             const nextConfig = nextLease ? nextLease.config : null;
 
-            if (!requestClosed && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
+            if (!requestClosed && nextConfig && nextConfig !== config) {
                 responseFinished = true;
                 void drainAbandonedResponse(response);
-                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                    cpaStyleCompatibility,
+                });
                 releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
@@ -1986,6 +2694,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     predicate: requestPredicate,
                     excludedConfigs: [...excludedConfigs, config],
                     retrySelector,
+                    cpaStyleCompatibility,
                 });
                 return;
             }
@@ -1995,25 +2704,43 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
-        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url, failoverAttempt)
-            && isResponsesFailoverInspectionCandidate(statusCode, response.headers);
+        const tokenFailure = classifyTokenUpstreamFailure(config, statusCode);
+        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url)
+            && isResponsesFailoverInspectionCandidate(statusCode, response.headers, {
+                requestedModel: requestedResponseModel,
+            });
 
         if (shouldInspectResponses) {
-            const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers);
+            const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers, {
+                requestedModel: requestedResponseModel,
+            });
 
             if (inspection.action === 'retry') {
-                warn(`responses 自动切号: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
-                accountManager.markConfigUnavailable(config, inspection.classification.reason, {
-                    lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
-                    switchReason: 'responses_failover',
-                });
-                const nextLease = acquireFailoverLease('responses_failover');
+                const modelDowngraded = isResponsesModelDowngradeClassification(inspection.classification);
+                warn(`${modelDowngraded ? 'responses 模型降级，自动切号' : 'responses 自动切号'}: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
+                if (modelDowngraded) {
+                    observeCurrentResponseModel({
+                        active: true,
+                        responseModel: inspection.classification.responseModel,
+                        statusCode,
+                        downgraded: true,
+                    });
+                } else if (shouldMarkResponsesFailoverUnavailable(inspection.classification)) {
+                    accountManager.markConfigUnavailable(config, inspection.classification.reason, {
+                        lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                        switchReason: 'responses_failover',
+                    });
+                }
+
+                const nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
                 const nextConfig = nextLease ? nextLease.config : null;
 
                 if (!requestClosed && nextConfig && nextConfig !== config) {
                     responseFinished = true;
                     void drainAbandonedResponse(response);
-                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+                    const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                        cpaStyleCompatibility,
+                    });
                     releaseCurrentLease();
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
@@ -2022,6 +2749,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         predicate: requestPredicate,
                         excludedConfigs: [...excludedConfigs, config],
                         retrySelector,
+                        cpaStyleCompatibility,
                     });
                     return;
                 }
@@ -2068,24 +2796,22 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
-        startForwardingResponse(response, statusCode, response.headers);
-    }).catch(err => {
-        if (requestClosed) {
-            return;
-        }
-
-        error('代理请求失败:', err.message);
-        if (config && config.type === 'apikey') {
-            warn(`apikey 上游请求失败: #${config.index + 1} ${config.description} (${err.message})`);
-            accountManager.markConfigUnavailable(config, 'apikey_upstream_error', {
-                lastError: err.message,
-                switchReason: 'apikey_upstream_failover',
+        if (tokenFailure) {
+            accountManager.markConfigUnavailable(config, tokenFailure.reason, {
+                lastError: `${tokenFailure.retrySource}:${tokenFailure.retryKey}`,
+                switchReason: 'token_upstream_failover',
             });
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            warn(`token 上游返回错误，自动切号: #${config.index + 1} ${config.description} (${tokenFailure.retrySource}:${tokenFailure.retryKey})`);
+
+            const nextLease = acquireFailoverLease('token_upstream_failover');
             const nextConfig = nextLease ? nextLease.config : null;
 
-            if (!headersApplied && !res.headersSent && Number(failoverAttempt || 0) < 1 && nextConfig && nextConfig !== config) {
-                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl);
+            if (!requestClosed && nextConfig && nextConfig !== config) {
+                responseFinished = true;
+                void drainAbandonedResponse(response);
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                    cpaStyleCompatibility,
+                });
                 releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
@@ -2094,6 +2820,81 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     predicate: requestPredicate,
                     excludedConfigs: [...excludedConfigs, config],
                     retrySelector,
+                    cpaStyleCompatibility,
+                });
+                return;
+            }
+
+            if (nextLease) {
+                nextLease.release();
+            }
+        }
+
+        startForwardingResponse(response, statusCode, response.headers);
+    }).catch(err => {
+        if (requestClosed) {
+            return;
+        }
+
+        error('代理请求失败:', err.message);
+        if (config && config.type === 'apikey') {
+            const apiKeyResult = recordCurrentApiKeyRequestResult({
+                ok: false,
+                reason: 'apikey_upstream_error',
+                lastError: err.message,
+                switchReason: 'apikey_upstream_failover',
+            });
+
+            if (apiKeyResult.unavailable) {
+                warn(`apikey 上游请求失败并标记不可用: #${config.index + 1} ${config.description} (${err.message}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+            }
+
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+
+            if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                    cpaStyleCompatibility,
+                });
+                releaseCurrentLease();
+                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                    failoverAttempt: failoverAttempt + 1,
+                    lease: nextLease,
+                    sessionKey: requestSessionKey,
+                    predicate: requestPredicate,
+                    excludedConfigs: [...excludedConfigs, config],
+                    retrySelector,
+                    cpaStyleCompatibility,
+                });
+                return;
+            }
+
+            if (nextLease) {
+                nextLease.release();
+            }
+        } else if (canAttemptTokenFailover(config)) {
+            accountManager.markConfigUnavailable(config, 'responses_upstream_error', {
+                lastError: err.message,
+                switchReason: 'token_upstream_failover',
+            });
+            warn(`token 上游请求失败，自动切号: #${config.index + 1} ${config.description} (${err.message})`);
+
+            const nextLease = acquireFailoverLease('token_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+
+            if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
+                const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
+                    cpaStyleCompatibility,
+                });
+                releaseCurrentLease();
+                proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
+                    failoverAttempt: failoverAttempt + 1,
+                    lease: nextLease,
+                    sessionKey: requestSessionKey,
+                    predicate: requestPredicate,
+                    excludedConfigs: [...excludedConfigs, config],
+                    retrySelector,
+                    cpaStyleCompatibility,
                 });
                 return;
             }
@@ -2131,35 +2932,13 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     res.on('close', closeUpstream);
 }
 
-function createHandler(proxyPath = '') {
+function createHandler(proxyPath = '', options = {}) {
+    const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     return function handler(req, res) {
         const incomingUrl = buildIncomingUrl(req, proxyPath);
 
         function acquireProxyLease(sessionKey, excludedConfigs = []) {
-            const activeApiKeyConfig = accountManager.getActiveConfig(item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs));
-            if (activeApiKeyConfig && isRuntimeConfigAvailable(activeApiKeyConfig)) {
-                return createStaticConfigLease(activeApiKeyConfig, sessionKey);
-            }
-
-            const tokenLease = accountManager.acquireConfig('proxy_request', isTokenProxyConfig, {
-                sessionKey,
-                exclude: excludedConfigs,
-                allowFallback: false,
-            });
-            if (tokenLease) {
-                return tokenLease;
-            }
-
-            const isAllowedGptApiKeyProxyConfig = item => isGptApiKeyProxyConfig(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
-            const nextApiKeyConfig = accountManager.ensureActiveConfig('proxy_request', isAllowedGptApiKeyProxyConfig);
-            if (nextApiKeyConfig && isRuntimeConfigAvailable(nextApiKeyConfig)) {
-                return createStaticConfigLease(nextApiKeyConfig, sessionKey);
-            }
-
-            return accountManager.acquireConfig('proxy_request', isTokenProxyConfig, {
-                sessionKey,
-                exclude: excludedConfigs,
-            });
+            return acquireTokenThenGptApiKeyLease(accountManager, 'proxy_request', sessionKey, excludedConfigs);
         }
 
         function forwardWithConfig(lease, body, jsonBody = null) {
@@ -2177,7 +2956,9 @@ function createHandler(proxyPath = '') {
             let nextBody = body;
             if (Buffer.isBuffer(nextBody) && jsonBody) {
                 try {
-                    nextBody = Buffer.from(JSON.stringify(normalizeProxyJsonBody(config, req.url, jsonBody, responsesConfig)));
+                    nextBody = Buffer.from(JSON.stringify(normalizeProxyJsonBody(config, req.url, jsonBody, responsesConfig, {
+                        cpaStyleCompatibility,
+                    })));
                 } catch (err) {
                     lease.release();
                     error('处理请求体时出错:', err.message);
@@ -2194,6 +2975,7 @@ function createHandler(proxyPath = '') {
                 sessionKey: lease.sessionKey,
                 predicate: config.type === 'token' ? isTokenProxyConfig : isGptApiKeyProxyConfig,
                 retrySelector: (reason, retrySessionKey, excludedConfigs) => acquireProxyLease(retrySessionKey, excludedConfigs),
+                cpaStyleCompatibility,
             });
         }
 
@@ -2231,6 +3013,22 @@ function createHandler(proxyPath = '') {
     };
 }
 
+function createCpaHandler() {
+    return createHandler('/cpa', {
+        cpaStyleCompatibility: true,
+    });
+}
+
+function forwardCpaClaudeMessagesRequest(req, res) {
+    const originalUrl = req.url;
+    req.url = buildIncomingUrl(req, '/cpa');
+    void handleCpaClaudeMessagesRequest(req, res).finally(() => {
+        req.url = originalUrl;
+    }).catch(err => {
+        reportBusinessRequestError(res, err, 'Claude Messages 请求处理失败');
+    });
+}
+
 function readBufferedRequestBody(req, limitBytes = 1024 * 1024) {
     return new Promise((resolve, reject) => {
         const chunks = [];
@@ -2255,38 +3053,11 @@ function readBufferedRequestBody(req, limitBytes = 1024 * 1024) {
     });
 }
 
-async function handleTokenImageGenerationRequest(req, res, config) {
-    const body = await readBufferedRequestBody(req);
-    let payload;
-    try {
-        payload = JSON.parse(body.toString('utf8'));
-    } catch (err) {
-        res.status(400).json({
-            error: '请求体处理失败',
-            details: `图片生成请求必须是 JSON: ${err.message}`,
-        });
-        return;
-    }
+function acquireImageBusinessLease(manager, sessionKey, excludedConfigs = []) {
+    return acquireTokenThenGptApiKeyLease(manager, 'image_request', sessionKey, excludedConfigs);
+}
 
-    let responsesPayload;
-    try {
-        responsesPayload = buildResponsesImageGenerationBody(payload, {
-            // token 模式真正使用的是 Responses 模型，不是客户端传来的
-            // gpt-image-* 图片模型名。Codex 源码的模型目录在
-            // codex-rs/models-manager/models.json，当前列出：
-            // gpt-5.5、gpt-5.4、gpt-5.4-mini、gpt-5.3-codex、
-            // gpt-5.2、codex-auto-review。某个模型是否开启
-            // image_generation 工具，以当前账号后端运行时为准。
-            model: process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
-        });
-    } catch (err) {
-        res.status(400).json({
-            error: '请求体处理失败',
-            details: err.message,
-        });
-        return;
-    }
-
+function buildTokenImageUpstreamRequest(req, config, responsesPayload) {
     const upstreamPath = `${config.apiBasePath}/responses`;
     const normalizedPayload = normalizeProxyJsonBody(config, upstreamPath, responsesPayload, responsesConfig);
     const upstreamBody = Buffer.from(JSON.stringify(normalizedPayload));
@@ -2300,112 +3071,314 @@ async function handleTokenImageGenerationRequest(req, res, config) {
         upstreamPath
     );
     const targetUrl = new URL(upstreamPath, config.baseUrl).toString();
-    const result = await requestBuffered({
+
+    return {
         method: 'POST',
         targetUrl,
         headers,
         body: upstreamBody,
         timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
-    });
-
-    if (result.statusCode < 200 || result.statusCode >= 300) {
-        writeBufferedUpstreamResponse(res, result.statusCode, result.headers, result.body);
-        return;
-    }
-
-    const imageResponse = extractImageGenerationResponse(result.bodyText, {
-        created: Math.floor(Date.now() / 1000),
-    });
-    res.status(200).json(imageResponse);
-}
-
-async function handleTokenImageEditRequest(req, res, config) {
-    const body = await readBufferedRequestBody(req, 32 * 1024 * 1024);
-    let responsesPayload;
-    try {
-        const form = parseMultipartFormData(body, req.headers['content-type']);
-        responsesPayload = buildResponsesImageEditBody(form, {
-            // token 模式的模型支持规则见上面的图片生成处理逻辑。apikey 配置
-            // 不走这里，而是直接由上游 Images API 决定支持哪些图片模型。
-            model: process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
-        });
-    } catch (err) {
-        res.status(400).json({
-            error: '请求体处理失败',
-            details: err.message,
-        });
-        return;
-    }
-
-    const upstreamPath = `${config.apiBasePath}/responses`;
-    const normalizedPayload = normalizeProxyJsonBody(config, upstreamPath, responsesPayload, responsesConfig);
-    const upstreamBody = Buffer.from(JSON.stringify(normalizedPayload));
-    const requestHeaders = {
-        ...req.headers,
-        accept: 'text/event-stream, application/json',
-        'content-type': 'application/json',
     };
-    const headers = applyResponsesFailoverRequestHeaders(
-        buildProxyHeaders(requestHeaders, config, upstreamBody.length),
-        upstreamPath
-    );
-    const targetUrl = new URL(upstreamPath, config.baseUrl).toString();
-    const result = await requestBuffered({
-        method: 'POST',
-        targetUrl,
-        headers,
-        body: upstreamBody,
-        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
-    });
+}
 
-    if (result.statusCode < 200 || result.statusCode >= 300) {
-        writeBufferedUpstreamResponse(res, result.statusCode, result.headers, result.body);
+function buildNativeImageUpstreamRequest(req, incomingUrl, config, body) {
+    const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
+    const headers = buildProxyHeaders(req.headers, config, body.length);
+    return {
+        method: req.method,
+        targetUrl: new URL(rewrittenUrl, config.baseUrl).toString(),
+        headers,
+        body,
+        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+    };
+}
+
+function createTokenImageGenerationPayloadFactory(body, options = {}) {
+    let prepared = false;
+    let result = null;
+
+    return function getTokenImageGenerationPayload() {
+        if (prepared) {
+            return result;
+        }
+
+        prepared = true;
+        try {
+            const payload = JSON.parse(body.toString('utf8'));
+            result = {
+                ok: true,
+                payload: buildResponsesImageGenerationBody(payload, {
+                    // token 模式真正使用的是 Responses 模型，不是客户端传来的
+                    // gpt-image-* 图片模型名。Codex 源码的模型目录在
+                    // codex-rs/models-manager/models.json，当前列出：
+                    // gpt-5.5、gpt-5.4、gpt-5.4-mini、gpt-5.3-codex、
+                    // gpt-5.2、codex-auto-review。某个模型是否开启
+                    // image_generation 工具，以当前账号后端运行时为准。
+                    model: options.responsesModel || process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
+                }),
+            };
+        } catch (err) {
+            result = {
+                ok: false,
+                statusCode: 400,
+                payload: {
+                    error: '请求体处理失败',
+                    details: err instanceof SyntaxError
+                        ? `图片生成请求必须是 JSON: ${err.message}`
+                        : err.message,
+                },
+            };
+        }
+
+        return result;
+    };
+}
+
+function createTokenImageEditPayloadFactory(req, body, options = {}) {
+    let prepared = false;
+    let result = null;
+
+    return function getTokenImageEditPayload() {
+        if (prepared) {
+            return result;
+        }
+
+        prepared = true;
+        try {
+            const form = parseMultipartFormData(body, req.headers['content-type']);
+            result = {
+                ok: true,
+                payload: buildResponsesImageEditBody(form, {
+                    // token 模式的模型支持规则见图片生成处理逻辑。apikey 配置
+                    // 不走这里，而是直接由上游 Images API 决定支持哪些图片模型。
+                    model: options.responsesModel || process.env.AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL || 'gpt-5.5',
+                }),
+            };
+        } catch (err) {
+            result = {
+                ok: false,
+                statusCode: 400,
+                payload: {
+                    error: '请求体处理失败',
+                    details: err.message,
+                },
+            };
+        }
+
+        return result;
+    };
+}
+
+async function executeImageBusinessAttempt({
+    req,
+    incomingUrl,
+    config,
+    body,
+    getTokenResponsesPayload,
+    requestBufferedImpl
+}) {
+    if (config.type !== 'token') {
+        const result = await requestBufferedImpl(buildNativeImageUpstreamRequest(req, incomingUrl, config, body));
+        if (isSuccessfulResponsesStatus(result.statusCode)) {
+            return {
+                type: 'native_success',
+                result,
+            };
+        }
+
+        return {
+            type: 'retryable_failure',
+            result,
+            classification: classifyApiKeyUpstreamFailure(config, result.statusCode) || {
+                reason: 'apikey_upstream_error',
+                retryKey: String(result.statusCode || 'invalid_status'),
+                retrySource: 'http',
+            },
+        };
+    }
+
+    const responsesPayload = getTokenResponsesPayload();
+    if (!responsesPayload.ok) {
+        return {
+            type: 'client_error',
+            statusCode: responsesPayload.statusCode,
+            payload: responsesPayload.payload,
+        };
+    }
+
+    const result = await requestBufferedImpl(buildTokenImageUpstreamRequest(req, config, responsesPayload.payload));
+
+    if (!isSuccessfulResponsesStatus(result.statusCode)) {
+        return {
+            type: 'retryable_failure',
+            result,
+            classification: classifyRetryableResponsesHttpError({
+                statusCode: result.statusCode,
+                bodyText: result.bodyText,
+            }),
+        };
+    }
+
+    try {
+        extractImageGenerationResponse(result.bodyText);
+    } catch (err) {
+        return {
+            type: 'retryable_failure',
+            result,
+            classification: {
+                reason: 'responses_upstream_error',
+                retryKey: err.message || 'invalid_image_response',
+                retrySource: 'body',
+            },
+        };
+    }
+
+    return {
+        type: 'token_success',
+        result,
+    };
+}
+
+function recordImageBusinessFailure(manager, config, classification, resultOrError) {
+    if (config.type === 'token') {
+        manager.markConfigUnavailable(config, classification.reason, {
+            lastError: `${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}`,
+            switchReason: 'image_responses_failover',
+        });
+        warn(`图片 responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'})`);
         return;
     }
 
-    const imageResponse = extractImageGenerationResponse(result.bodyText, {
-        created: Math.floor(Date.now() / 1000),
+    const apiKeyResult = manager.recordApiKeyRequestResult(config, {
+        ok: false,
+        reason: classification.reason,
+        lastError: resultOrError instanceof Error
+            ? resultOrError.message
+            : `${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}`,
+        switchReason: 'apikey_upstream_failover',
+    });
+
+    if (apiKeyResult && apiKeyResult.unavailable) {
+        warn(`apikey 图片上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+    }
+}
+
+function recordImageBusinessSuccess(manager, config) {
+    if (
+        config.type === 'apikey' &&
+        manager &&
+        typeof manager.recordApiKeyRequestResult === 'function'
+    ) {
+        manager.recordApiKeyRequestResult(config, { ok: true });
+    }
+}
+
+function writeImageBusinessSuccess(res, attempt, now) {
+    if (attempt.type === 'native_success') {
+        writeBufferedUpstreamResponse(res, attempt.result.statusCode, attempt.result.headers, attempt.result.body);
+        return;
+    }
+
+    const imageResponse = extractImageGenerationResponse(attempt.result.bodyText, {
+        created: Math.floor(now() / 1000),
     });
     res.status(200).json(imageResponse);
 }
 
-function createImageGenerationsHandler() {
-    const proxyHandler = createHandler();
+function writeImageBusinessFailure(res, failure) {
+    if (failure && failure.result) {
+        writeBufferedUpstreamResponse(res, failure.result.statusCode, failure.result.headers, failure.result.body);
+        return;
+    }
 
+    const statusCode = getGatewayStatusCode(failure && failure.error);
+    res.status(statusCode).json({
+        error: statusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
+        message: failure && failure.error ? failure.error.message : '当前没有可用配置',
+    });
+}
+
+async function handleImageBusinessRequest(req, res, options = {}) {
+    const manager = options.accountManager || accountManager;
+    const requestBufferedImpl = options.requestBuffered || requestBuffered;
+    const now = typeof options.now === 'function' ? options.now : Date.now;
+    const incomingUrl = buildIncomingUrl(req);
+    const body = await readBufferedRequestBody(req, options.bodyLimitBytes || 1024 * 1024);
+    const sessionKey = getRequestSessionKey(req, incomingUrl);
+    const getTokenResponsesPayload = options.createTokenPayloadFactory(req, body, options);
+    const failedConfigs = [];
+    let currentLease = acquireImageBusinessLease(manager, sessionKey);
+    let lastFailure = null;
+
+    while (currentLease && currentLease.config) {
+        const config = currentLease.config;
+        let attempt;
+
+        try {
+            attempt = await executeImageBusinessAttempt({
+                req,
+                incomingUrl,
+                config,
+                body,
+                getTokenResponsesPayload,
+                requestBufferedImpl,
+            });
+        } catch (err) {
+            attempt = {
+                type: 'retryable_failure',
+                error: err,
+                classification: {
+                    reason: config.type === 'token' ? 'responses_upstream_error' : 'apikey_upstream_error',
+                    retryKey: err.message || 'request_error',
+                    retrySource: 'request',
+                },
+            };
+        }
+
+        if (attempt.type === 'client_error') {
+            currentLease.release();
+            res.status(attempt.statusCode).json(attempt.payload);
+            return;
+        }
+
+        if (attempt.type === 'token_success' || attempt.type === 'native_success') {
+            currentLease.release();
+            recordImageBusinessSuccess(manager, config);
+            writeImageBusinessSuccess(res, attempt, now);
+            return;
+        }
+
+        recordImageBusinessFailure(manager, config, attempt.classification, attempt.error || attempt.result);
+        lastFailure = attempt;
+        failedConfigs.push(config);
+        currentLease.release();
+        currentLease = failedConfigs.length <= MAX_REQUEST_FAILOVER_RETRIES
+            ? acquireImageBusinessLease(manager, sessionKey, failedConfigs)
+            : null;
+    }
+
+    writeImageBusinessFailure(res, lastFailure);
+}
+
+function createImageGenerationsHandler(options = {}) {
     return function imageGenerationsHandler(req, res) {
-        const isOpenAiConfig = item => item.type === 'token' || configSupportsCapability(item, 'gpt');
-        const config = accountManager.getActiveConfig(isOpenAiConfig) ||
-            accountManager.ensureActiveConfig('proxy_request', isOpenAiConfig);
-        if (!config) {
-            return createMissingConfigResponse(res);
-        }
-
-        if (config.type !== 'token') {
-            return proxyHandler(req, res);
-        }
-
-        void handleTokenImageGenerationRequest(req, res, config).catch(err => {
+        return handleImageBusinessRequest(req, res, {
+            ...options,
+            bodyLimitBytes: 1024 * 1024,
+            createTokenPayloadFactory: (_req, body, handlerOptions) => createTokenImageGenerationPayloadFactory(body, handlerOptions),
+        }).catch(err => {
             reportBusinessRequestError(res, err, '图片生成请求处理失败');
         });
     };
 }
 
-function createImageEditsHandler() {
-    const proxyHandler = createHandler();
-
+function createImageEditsHandler(options = {}) {
     return function imageEditsHandler(req, res) {
-        const isOpenAiConfig = item => item.type === 'token' || configSupportsCapability(item, 'gpt');
-        const config = accountManager.getActiveConfig(isOpenAiConfig) ||
-            accountManager.ensureActiveConfig('proxy_request', isOpenAiConfig);
-        if (!config) {
-            return createMissingConfigResponse(res);
-        }
-
-        if (config.type !== 'token') {
-            return proxyHandler(req, res);
-        }
-
-        void handleTokenImageEditRequest(req, res, config).catch(err => {
+        return handleImageBusinessRequest(req, res, {
+            ...options,
+            bodyLimitBytes: 32 * 1024 * 1024,
+            createTokenPayloadFactory: createTokenImageEditPayloadFactory,
+        }).catch(err => {
             reportBusinessRequestError(res, err, '图片编辑请求处理失败');
         });
     };
@@ -2416,7 +3389,16 @@ async function handleConfigMutation(res, mutate, reason, successStatus = 200, pe
         const parsed = readParsedConfigFile(CONFIG_FILE);
         const nextParsed = mutate(parsed);
         await persistAndReloadConfig(nextParsed, reason, persistOptions);
-        res.status(successStatus).json(buildConfigAdminResponse());
+        const responseBody = typeof persistOptions.buildResponse === 'function'
+            ? persistOptions.buildResponse({ parsed, nextParsed })
+            : {
+                ...buildConfigAdminResponse(),
+                ...(persistOptions.responseExtras || {})
+            };
+        res.status(successStatus).json({
+            ...responseBody,
+            ...(persistOptions.responseExtras || {})
+        });
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
@@ -2524,11 +3506,6 @@ app.get('/config-admin.js', (req, res) => {
 
 app.use('/admin', requireAdminAuthToken);
 app.use('/admin/api', express.json({ limit: '1mb' }));
-
-app.get('/admin/configs', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
-});
-
 app.use('/admin/api/desktop/auth-session/callback', express.text({
     type: 'text/plain',
     limit: '1mb'
@@ -2537,6 +3514,14 @@ app.use('/admin/api/desktop/auth-session/callback', express.urlencoded({
     extended: false,
     limit: '1mb'
 }));
+
+app.get('/admin/configs', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
+});
+
+app.get('/admin/configs/:page(upstreams|openai|claude|fallbacks|settings|routes|access)', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
+});
 
 app.get('/admin/api/configs', (req, res) => {
     try {
@@ -2589,7 +3574,9 @@ app.post('/admin/api/openai/refresh-token', async (req, res) => {
 app.post('/admin/api/configs/:index/activate', async (req, res) => {
     try {
         const targetIndex = parseConfigIndex(req.params.index);
-        res.json(await activateConfigAdminResponse(targetIndex));
+        res.json(await activateConfigAdminResponse(targetIndex, {
+            fallbackCapability: req.body && req.body.fallback_capability
+        }));
     } catch (err) {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
@@ -2600,21 +3587,159 @@ app.post('/admin/api/configs/:index/activate', async (req, res) => {
 });
 
 app.post('/admin/api/configs/:index/move-up', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
+        const targetIndex = parseConfigIndex(req.params.index);
+        if (targetIndex === 0) {
+            throw new ConfigEditorError('第一个配置项已经在最前');
+        }
+
+        const movedFrom = targetIndex;
+        const nextParsed = moveConfigItem(parsed, targetIndex, 0);
+        await persistMovedConfigItem(parsed, nextParsed, targetIndex, 0, 'admin_move_config', {
+            preserveActiveConfig: true,
+            skipQuotaRefresh: true
+        });
+
+        res.status(200).json({
+            ok: true,
+            moved_from: movedFrom,
+            moved_to: 0
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置置顶失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs/:index/move-previous', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
+        const targetIndex = parseConfigIndex(req.params.index);
+        if (targetIndex === 0) {
+            throw new ConfigEditorError('第一个配置项已经在最前');
+        }
+
+        const movedFrom = targetIndex;
+        const nextParsed = moveConfigItem(parsed, targetIndex, targetIndex - 1);
+        await persistMovedConfigItem(parsed, nextParsed, targetIndex, targetIndex - 1, 'admin_move_config', {
+            preserveActiveConfig: true,
+            skipQuotaRefresh: true
+        });
+
+        res.status(200).json({
+            ok: true,
+            moved_from: movedFrom,
+            moved_to: targetIndex - 1
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置上移失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs/:index/move-next', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
+        const targetIndex = parseConfigIndex(req.params.index);
+        const configsLength = Array.isArray(parsed && parsed.configs) ? parsed.configs.length : 0;
+        if (targetIndex >= configsLength - 1) {
+            throw new ConfigEditorError('最后一个配置项已经在最后');
+        }
+
+        const movedFrom = targetIndex;
+        const nextParsed = moveConfigItem(parsed, targetIndex, targetIndex + 1);
+        await persistMovedConfigItem(parsed, nextParsed, targetIndex, targetIndex + 1, 'admin_move_config', {
+            preserveActiveConfig: true,
+            skipQuotaRefresh: true
+        });
+
+        res.status(200).json({
+            ok: true,
+            moved_from: movedFrom,
+            moved_to: targetIndex + 1
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? '配置下移失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.post('/admin/api/configs/:index/disable', async (req, res) => {
     await handleConfigMutation(
         res,
         parsed => {
             const targetIndex = parseConfigIndex(req.params.index);
-            if (targetIndex === 0) {
-                throw new ConfigEditorError('第一个配置项已经在最前');
-            }
-
-            return moveConfigItem(parsed, targetIndex, 0);
+            return disableConfigItem(parsed, targetIndex, {
+                disabledStatus: getConfigRuntimeSummary(targetIndex)
+            });
         },
-        'admin_move_config',
+        'admin_disable_config',
         200,
         {
-            preserveActiveConfig: true,
             skipQuotaRefresh: true
+        }
+    );
+});
+
+app.post('/admin/api/configs/batch-disable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => {
+            const indexes = parseBatchIndexes(req.body, '配置项');
+            const disabledStatuses = {};
+
+            for (const index of indexes) {
+                disabledStatuses[index] = getConfigRuntimeSummary(index);
+            }
+
+            return disableConfigItems(parsed, indexes, {
+                disabledStatuses
+            });
+        },
+        'admin_batch_disable_config',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                moved_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
+        }
+    );
+});
+
+app.post('/admin/api/disabled-configs/:index/enable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => enableConfigItem(parsed, parseConfigIndex(req.params.index)),
+        'admin_enable_config',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
+});
+
+app.post('/admin/api/disabled-configs/batch-enable', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => enableConfigItems(parsed, parseBatchIndexes(req.body, '停用配置项')),
+        'admin_batch_enable_config',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                moved_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
         }
     );
 });
@@ -2634,7 +3759,7 @@ app.post('/admin/api/configs/:index/refresh-token', async (req, res) => {
 
 app.post('/admin/api/configs', async (req, res) => {
     try {
-        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const parsed = readParsedConfigFile(CONFIG_FILE, { validate: false });
         const rawInput = parseConfigItemJson(req.body && req.body.raw_json);
         const configType = req.body && typeof req.body.config_type === 'string'
             ? req.body.config_type.trim()
@@ -2661,22 +3786,8 @@ app.post('/admin/api/configs', async (req, res) => {
                 throw err;
             }
         });
-        const validatedRuntimeConfigs = itemsWithCreatedAt.map((item, index) => {
-            try {
-                return validateConfigItemBeforeAdd(null, item);
-            } catch (err) {
-                if (itemsWithCreatedAt.length > 1) {
-                    throw new ConfigEditorError(`第 ${index + 1} 个配置项无效: ${err.message}`);
-                }
-                throw err;
-            }
-        });
-        const nextParsed = itemsWithCreatedAt.reduce(
-            (next, item) => addConfigItem(next, item),
-            parsed
-        );
-        await persistAndReloadConfig(nextParsed, 'admin_create', {
-            runtimeOverrides: validatedRuntimeConfigs,
+        const nextParsed = addConfigItems(parsed, itemsWithCreatedAt);
+        await persistAppendedConfigItems(parsed, nextParsed, itemsWithCreatedAt, 'admin_create', {
             skipQuotaRefresh: true
         });
         res.status(201).json({
@@ -2709,6 +3820,26 @@ app.post('/admin/api/apikeys', async (req, res) => {
         const statusCode = err instanceof ConfigEditorError ? 400 : 500;
         res.status(statusCode).json({
             error: statusCode === 400 ? 'apikey 新增失败' : '配置更新失败',
+            details: err.message
+        });
+    }
+});
+
+app.delete('/admin/api/apikeys/batch-delete', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const indexes = parseBatchIndexes(req.body, 'apikey');
+        const nextParsed = deleteApiKeys(parsed, indexes);
+
+        persistConfigWithoutRuntimeReload(nextParsed);
+        res.status(200).json({
+            ...buildConfigAdminResponse(),
+            deleted_count: indexes.length
+        });
+    } catch (err) {
+        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
+        res.status(statusCode).json({
+            error: statusCode === 400 ? 'apikey 删除失败' : '配置更新失败',
             details: err.message
         });
     }
@@ -2922,11 +4053,53 @@ app.post('/admin/api/restart-service', (req, res) => {
     }
 });
 
+app.delete('/admin/api/configs/batch-delete', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteConfigItems(parsed, parseBatchIndexes(req.body, '配置项')),
+        'admin_batch_delete',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                deleted_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
+        }
+    );
+});
+
 app.delete('/admin/api/configs/:index', async (req, res) => {
     await handleConfigMutation(
         res,
         parsed => deleteConfigItem(parsed, parseConfigIndex(req.params.index)),
         'admin_delete',
+        200,
+        {
+            skipQuotaRefresh: true
+        }
+    );
+});
+
+app.delete('/admin/api/disabled-configs/batch-delete', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteDisabledConfigItems(parsed, parseBatchIndexes(req.body, '停用配置项')),
+        'admin_batch_delete_disabled_config',
+        200,
+        {
+            skipQuotaRefresh: true,
+            responseExtras: {
+                deleted_count: Array.isArray(req.body && req.body.indexes) ? req.body.indexes.length : 0
+            }
+        }
+    );
+});
+
+app.delete('/admin/api/disabled-configs/:index', async (req, res) => {
+    await handleConfigMutation(
+        res,
+        parsed => deleteDisabledConfigItem(parsed, parseConfigIndex(req.params.index)),
+        'admin_delete_disabled_config',
         200,
         {
             skipQuotaRefresh: true
@@ -2962,8 +4135,33 @@ app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
     });
 });
 
+app.post('/v1/messages/count_tokens', requireConfiguredApiKeys, (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
+    void handleClaudeMessagesRequest(req, res).catch(err => {
+        reportBusinessRequestError(res, err, 'Claude Messages token 统计请求处理失败');
+    });
+});
+
 app.post('/v1/images/generations', requireConfiguredApiKeys, createImageGenerationsHandler());
 app.post('/v1/images/edits', requireConfiguredApiKeys, createImageEditsHandler());
+
+// CLIProxyAPI 风格前缀入口
+app.post('/cpa/v1/messages', requireConfiguredApiKeys, (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
+    return forwardCpaClaudeMessagesRequest(req, res);
+});
+
+app.post('/cpa/v1/messages/count_tokens', requireConfiguredApiKeys, (req, res) => {
+    if (!accountManager.getActiveConfig()) {
+        return createMissingConfigResponse(res);
+    }
+    return forwardCpaClaudeMessagesRequest(req, res);
+});
+app.use('/cpa/v1', requireConfiguredApiKeys, createCpaHandler());
 
 // 兼容 OpenAI 风格接口
 app.use('/v1', requireConfiguredApiKeys, createHandler());
@@ -3009,9 +4207,10 @@ async function startServer() {
             log(`  - 模式: ${configType}`);
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
-            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟额外全量校正（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 或周额度不高于 ${MIN_WEEKLY_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
+            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟额外全量校正（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
             log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
+            log(`  - apikey 恢复探测超时: ${hasRecoverableApiKeyConfigs(apiConfigs) ? `${APIKEY_RECOVERY_TIMEOUT_MS}ms` : '关闭（无 GPT apikey 配置项）'}`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
             log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
             if (hasQuotaMonitoredConfigs(apiConfigs) && apiConfigs.length > 0) {
@@ -3027,10 +4226,10 @@ async function startServer() {
             }
             log('');
             log('路由规则:');
-            log('  - token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
-            log('  - /v1/messages -> 优先使用 support 包含 claude 的 apikey 原样转发；无可用 claude apikey 时使用 token -> /backend-api/codex/responses (Claude compatibility)');
-            log('  - /v1/images/generations 与 /v1/images/edits -> token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON');
-            log('  - /v1/* -> token 配置项会重写到 /backend-api/codex/*；support 包含 gpt 的 apikey 配置项会直连对应 base_url，并自动补 client_version=1');
+            log('  - OpenAI token 请求按会话 key 使用一致性 hash ring 调度；无会话 key 时按 in-flight 分摊；apikey 不参与并发调度');
+            log('  - /v1/messages -> 本地 fake token 命中 claude_token 时严格绑定该 Claude 登录态；否则优先使用 claude_token，随后使用 support 包含 claude 的 apikey 原样转发；无可用 Claude 直转配置时使用 OpenAI token 或 support 包含 gpt 的 apikey 走 Responses 转换');
+            log('  - /v1/images/generations 与 /v1/images/edits -> OpenAI token 配置项会通过 /backend-api/codex/responses 的 image_generation 工具返回 OpenAI Images JSON；token 不可用时才使用 support 包含 gpt 的 apikey 兜底');
+            log('  - /v1/* -> OpenAI token 配置项会重写到 /backend-api/codex/*；token 不可用时才使用 support 包含 gpt 的 apikey 直连对应 base_url，并自动补 client_version=1');
             log('  - /wham/* -> token 配置项会重写到 /backend-api/wham/*；apikey 配置项会直连对应 base_url');
         })().catch(err => {
             error('初始化账号信息失败:', err.message);
@@ -3061,21 +4260,29 @@ if (require.main === module) {
 module.exports = {
     buildProxyHeaders,
     classifyApiKeyUpstreamFailure,
+    classifyTokenUpstreamFailure,
     deleteHeadersCaseInsensitive,
     deleteLocalOnlyHeaders,
     LOCAL_ONLY_AUTH_HEADERS,
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
+    MAX_REQUEST_FAILOVER_RETRIES,
+    hasRequestFailoverRetriesRemaining,
     createResponseModelObserver,
+    defaultContentTypeForProxyResponse,
     extractResponseModelFromPayload,
+    isStreamingResponsesRequest,
     isResponsesFailoverInspectionCandidate,
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,
+    createImageGenerationsHandler,
+    createImageEditsHandler,
     activateConfigAdminResponse,
     openExternalUrl,
     reportBusinessRequestError,
     registerProcessSafetyHandlers,
     refreshConfigAdminResponse,
+    serializeAccountStatus,
     selectReloadedActiveConfig,
     refreshConfigTokenAdminResponse,
     startServer,

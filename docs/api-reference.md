@@ -1,6 +1,6 @@
 # API 接口文档
 
-本文档只描述客户端可以直接调用的 Airouter 对外接口。管理页、管理 API、桌面端控制接口、上游后台接口不在本文档范围内。
+本文档只描述客户端可以直接调用的 Airouter 对外接口。管理页、管理 API、上游后台接口不在本文档范围内。
 
 默认服务地址：
 
@@ -29,19 +29,24 @@ x-api-key: sk-airouter-xxxx
 | `GET` | `/health` | 查看本地服务和当前账号状态 |
 | `POST` | `/v1/responses` | OpenAI Responses 兼容接口 |
 | `POST` | `/v1/messages` | Claude Messages 兼容接口 |
+| `POST` | `/cpa/v1/responses` | CLIProxyAPI 风格前缀下的 Responses 兼容入口 |
+| `POST` | `/cpa/v1/messages` | CLIProxyAPI 风格前缀下的 Claude Messages 兼容入口 |
 | `POST` | `/v1/images/generations` | OpenAI Images 图片生成兼容接口 |
 | `POST` | `/v1/images/edits` | OpenAI Images 图片编辑兼容接口 |
 | 任意 | `/v1/*` | 其它 OpenAI `/v1` 兼容接口透传 |
+| 任意 | `/cpa/v1/*` | 剥离 `/cpa` 前缀后复用 `/v1/*` 兼容链路 |
 
 ## 通用转发规则
 
 Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配置优先级越高；当前活动配置可用时会继续沿用。
 
-`token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和部分账号切换逻辑。
+`token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和运行态可用性选择；OpenAI token 和 Claude token 不依赖手动切换焦点，只区分可用/不可用。
 
-`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。
+`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。OpenAI/GPT apikey fallback 与 Claude apikey fallback 分别维护活动焦点和 failover，不会互相覆盖。
 
-如果上游 `apikey` 返回 401/403、429、5xx，或请求失败，Airouter 会把该配置项临时标记为不可用，并尝试切到下一个可用配置。
+`/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度和模型别名逻辑；仅该前缀会启用 CLIProxyAPI 风格的额外请求体规范化。
+
+业务接口的 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；`/admin/*`、`/health`、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑。上游 `apikey` 在响应提交给客户端前出现非 200 HTTP 状态、请求失败或响应体中断时，Airouter 会先在本次请求内排除当前配置并尝试切到下一个可用配置；如果没有可切换配置，才按当前上游错误返回给客户端。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。`apikey` 是否被临时标记为不可用仍由统计窗口决定：最近 30 分钟内最多 10 个已完成真实请求中累计 3 次失败后才会标记不可用。
 
 ## GET /health
 
@@ -114,6 +119,10 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 }
 ```
 
+当普通 `/v1/responses` 请求走 token/Codex 兼容链路时，Airouter 会保留 Responses 请求形状，包含 `instructions`、`input` 中的 `system` role、`top_p`、`service_tier` 和工具名等字段；仅会移除历史兼容所需的 `max_output_tokens`、`temperature`，并在 token 模式下强制 `store: false`。function tool 的 JSON Schema 会被规范化为 Codex 可接受的 schema 形状，包括给嵌套字段补齐缺失的 `type`，并把 object schema 的 `additionalProperties` 固定为 `false`。
+
+当使用 `/cpa/v1/responses` 时，会额外启用 CLIProxyAPI 风格规范化：原始 `instructions` 会转成 `input` 开头的 `developer` message，同时保留空字符串 `instructions` 字段；`input` 中的 `system` role 也会转成 `developer`。同时会移除当前 CPA/Codex 链路不支持的 `max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`truncation`、`context_management`、`user` 等字段，并把旧的 `web_search_preview` 工具名规范为 `web_search`。
+
 如果配置了 `responses.model_aliases`，`model` 会按大小写不敏感规则替换。例如配置：
 
 ```json
@@ -132,7 +141,9 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 
 Claude Messages 兼容入口。请求体使用 JSON。
 
-当存在 `support` 包含 `claude` 的 `apikey` 配置项时，Airouter 会优先把请求原样转发给该 Claude Messages 上游。没有可用 Claude 上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求。
+Airouter 会先使用可用的 `claude_token` 原样转发 Claude Messages 请求；没有可用 Claude token 时，才使用 `support` 包含 `claude` 的 `apikey` 原样转发。`claude_token` 用于 Claude Code OAuth 登录态：请求 Authorization 命中 `local_auth_token`、同一配置里的真实 `access_token`，或命中 `request_auth_token_sha256s` 哈希列表时，会绑定到该配置并替换为真实 Claude OAuth Bearer token 转发。共享 Claude Code 登录态时，客户端可用 `npm run claude:install-login -- --token <local_auth_token> --base-url <Airouter 地址>` 把 `local_auth_token` 写入 Claude Code 本地凭证，并补齐交互模式依赖的全局 onboarding 状态，使交互模式主请求也使用这枚本地 token；启动 Claude Code 的 shell 里不要残留 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，否则这些环境变量会覆盖本地登录态。没有可用 Claude 直转上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 OpenAI token 配置项；OpenAI token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
+
+`/cpa/v1/messages` 是同一入口的 CLIProxyAPI 风格前缀别名，调度行为与 `/v1/messages` 一致，但转换到 Responses 时会启用 CPA 风格请求体规范化。
 
 示例：
 
@@ -156,7 +167,7 @@ curl -sS http://localhost:3009/v1/messages \
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `model` | string | Claude Messages 模型名。原样转发时由上游决定；转换链路中可被 `claude_code.model` 覆盖 |
+| `model` | string | Claude Messages 模型名。原样转发时由上游决定；转换链路固定请求 `gpt-5.5` |
 | `max_tokens` | number | 最大输出 token。转换链路当前不向 Responses 传递该字段 |
 | `system` | string 或 array | 可选，系统提示词 |
 | `messages` | array | Claude Messages 消息列表 |
@@ -164,18 +175,21 @@ curl -sS http://localhost:3009/v1/messages \
 | `tool_choice` | string 或 object | 可选，工具选择策略 |
 | `stream` | boolean | 可选，是否流式返回 |
 
-token 转换链路受配置项影响：
+转换链路固定请求模型为 `gpt-5.5`，推理强度可通过配置调整：
 
 ```json
 {
   "claude_code": {
-    "model": "gpt-5.4",
     "reasoning_effort": "high"
   }
 }
 ```
 
-`claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 token 转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
+`/v1/messages` 的 Responses 转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 不再影响该链路。`claude_code.reasoning_effort` 只影响转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
+
+普通 `/v1/messages` 的 Responses 转换链路会把 Claude `system` 字段放入 Responses `instructions`，`messages` 按原角色转换为 `input`，并保持 `parallel_tool_calls: false` 和 `include: []`。
+
+`/cpa/v1/messages` 的 Responses 转换链路会按 CLIProxyAPI 风格把 Claude `system` 字段和 `messages[].role = "system"` 转成 Responses `input` 里的 `developer` message，并过滤 Claude Code 的 `x-anthropic-billing-header:` attribution 文本；原始系统提示不会作为 Responses `instructions` 发送，只保留空字符串 `instructions` 字段。
 
 ## POST /v1/images/generations
 
@@ -208,7 +222,7 @@ curl -sS http://localhost:3009/v1/images/generations \
 | `size` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
 | `quality` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
 
-token 模式下，Airouter 会通过 Codex Responses 的 `image_generation` 工具生成图片，并返回 OpenAI Images 风格 JSON：
+token 模式下，Airouter 会通过 Codex Responses 的 `image_generation` 工具生成图片，并返回 OpenAI Images 风格 JSON。token Responses 上游在响应提交给客户端前返回非 200 或请求失败时，会排除当前配置并尝试下一个可用配置；apikey 模式继续原生转发到上游 Images API：
 
 ```json
 {
@@ -332,7 +346,7 @@ curl -sS http://localhost:3009/v1/models \
 
 - token 配置项会走 Airouter 的 Codex 兼容链路；具体路径是否可用由当前账号对应的上游能力决定。
 - apikey 配置项会直连配置里的 `base_url`；具体路径是否可用由第三方上游决定。
-- 路径命中 `/responses` 时会应用 Responses 默认值和模型别名；其它路径一般保持请求体原样。
+- 路径命中 `/responses` 时会应用 Responses 默认值、模型别名和必要的 Codex 兼容规范化；只有 `/cpa/v1/*` 前缀会启用 CPA 风格转换。其它路径一般保持请求体原样。
 
 ## 状态码和错误格式
 

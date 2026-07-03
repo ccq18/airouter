@@ -4,10 +4,12 @@ const { PassThrough } = require('node:stream');
 
 const {
   applyResponsesFailoverRequestHeaders,
+  classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
   createResponsesEventStreamInspector,
   isInspectableResponsesEventStream,
   drainAbandonedResponse,
+  shouldMarkResponsesFailoverUnavailable,
 } = require('../app/responses-failover');
 
 test('classifyRetryableResponsesHttpError detects usage_limit_reached', () => {
@@ -41,6 +43,19 @@ test('classifyRetryableResponsesHttpError detects raw usage limit messages', () 
   });
 });
 
+test('classifyRetryableResponsesHttpError detects http-prefixed usage limit errors', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 429,
+    bodyText: '错误=http:usage_limit_reached',
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_usage_limit_reached',
+    retryKey: 'usage_limit_reached',
+    retrySource: 'http',
+  });
+});
+
 test('classifyRetryableResponsesHttpError falls back to usage limit messages when error type is unknown', () => {
   const result = classifyRetryableResponsesHttpError({
     statusCode: 429,
@@ -55,6 +70,24 @@ test('classifyRetryableResponsesHttpError falls back to usage limit messages whe
   assert.deepEqual(result, {
     reason: 'responses_usage_limit_reached',
     retryKey: 'usage_limit_reached',
+    retrySource: 'http',
+  });
+});
+
+test('classifyRetryableResponsesHttpError treats unknown 429 error types as failed', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 429,
+    bodyText: JSON.stringify({
+      error: {
+        type: 'rate_limit_error',
+        message: 'request is rate limited',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: 'rate_limit_error',
     retrySource: 'http',
   });
 });
@@ -122,17 +155,53 @@ test('classifyRetryableResponsesHttpError detects token_revoked in raw error tex
   });
 });
 
-test('classifyRetryableResponsesHttpError ignores non-retryable payloads', () => {
+test('classifyRetryableResponsesHttpError treats unknown auth failures as failed', () => {
   const result = classifyRetryableResponsesHttpError({
-    statusCode: 503,
+    statusCode: 401,
     bodyText: JSON.stringify({
       error: {
-        code: 'server_is_overloaded',
+        type: 'invalid_request_error',
+        message: 'authentication failed',
       },
     }),
   });
 
-  assert.equal(result, null);
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: '401',
+    retrySource: 'http',
+  });
+});
+
+test('classifyRetryableResponsesHttpError detects model capacity HTTP errors', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 503,
+    bodyText: JSON.stringify({
+      error: {
+        code: 'model_at_capacity',
+        message: 'Selected model is at capacity. Please try a different model.',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_model_at_capacity',
+    retryKey: 'model_at_capacity',
+    retrySource: 'http',
+  });
+});
+
+test('classifyRetryableResponsesHttpError treats non-200 success statuses as failed', () => {
+  const result = classifyRetryableResponsesHttpError({
+    statusCode: 201,
+    bodyText: '',
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_unknown_error',
+    retryKey: 'http_201',
+    retrySource: 'http',
+  });
 });
 
 test('createResponsesEventStreamInspector catches insufficient_quota failures', () => {
@@ -225,6 +294,73 @@ test('createResponsesEventStreamInspector falls back to usage limit messages whe
   });
 });
 
+test('createResponsesEventStreamInspector treats response.failed with unknown error code as failed', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'data: {"type":"response.failed","response":{"error":{"code":"model_overloaded","message":"model overloaded"}}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'model_overloaded',
+    retrySource: 'stream',
+  });
+});
+
+test('createResponsesEventStreamInspector retries model capacity stream failures', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'event: response.failed\n' +
+    'data: {"response":{"error":{"code":"model_at_capacity","message":"Selected model is at capacity. Please try a different model."}}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_model_at_capacity',
+    retryKey: 'model_at_capacity',
+    retrySource: 'stream',
+  });
+});
+
+test('createResponsesEventStreamInspector retries generic SSE error events', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'event: error\n' +
+    'data: {"error":{"code":"server_is_overloaded","message":"server overloaded"}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'server_is_overloaded',
+    retrySource: 'stream',
+  });
+});
+
+test('createResponsesEventStreamInspector retries malformed SSE events before forwarding', () => {
+  const inspector = createResponsesEventStreamInspector();
+
+  const result = inspector.push(Buffer.from(
+    'event: response.failed\n' +
+    'data: not-json\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_unknown_error',
+    retryKey: 'response.failed',
+    retrySource: 'stream',
+  });
+});
+
 test('createResponsesEventStreamInspector passes through on the first non-prelude event', () => {
   const inspector = createResponsesEventStreamInspector();
 
@@ -234,6 +370,83 @@ test('createResponsesEventStreamInspector passes through on the first non-prelud
   ));
 
   assert.deepEqual(result, { action: 'pass' });
+});
+
+test('classifyResponsesModelDowngrade retries non-mini requests downgraded to gpt-5.4-mini', () => {
+  assert.deepEqual(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  }), {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  });
+
+  assert.equal(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.4-mini',
+    responseModel: 'gpt-5.4-mini',
+  }), null);
+
+  assert.equal(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.4-mini',
+    responseModel: 'gpt-5.4-mini-2026-03-17',
+  }), null);
+
+  assert.deepEqual(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini-2026-03-17',
+  }), {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini-2026-03-17',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini-2026-03-17',
+  });
+
+  assert.deepEqual(classifyResponsesModelDowngrade({
+    requestedModel: 'gpt-5.4',
+    responseModel: 'gpt-5.4-mini',
+  }), {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.4->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.4',
+    responseModel: 'gpt-5.4-mini',
+  });
+});
+
+test('createResponsesEventStreamInspector retries downgraded response.created models', () => {
+  const inspector = createResponsesEventStreamInspector({
+    requestedModel: 'gpt-5.5',
+  });
+
+  const result = inspector.push(Buffer.from(
+    'data: {"type":"response.created","response":{"id":"resp_123","model":"gpt-5.4-mini"}}\n\n',
+    'utf8',
+  ));
+
+  assert.deepEqual(result, {
+    action: 'retry',
+    reason: 'responses_model_downgraded',
+    retryKey: 'gpt-5.5->gpt-5.4-mini',
+    retrySource: 'model',
+    requestedModel: 'gpt-5.5',
+    responseModel: 'gpt-5.4-mini',
+  });
+});
+
+test('shouldMarkResponsesFailoverUnavailable keeps model downgrades available', () => {
+  assert.equal(shouldMarkResponsesFailoverUnavailable({
+    reason: 'responses_model_downgraded',
+  }), false);
+  assert.equal(shouldMarkResponsesFailoverUnavailable({
+    reason: 'responses_usage_limit_reached',
+  }), true);
 });
 
 test('applyResponsesFailoverRequestHeaders forces identity encoding for responses requests', () => {

@@ -223,12 +223,106 @@
     }
   }
 
+  function parseLooseJsonValue(rawText, label) {
+    const text = String(rawText || '').trim();
+    const candidates = [
+      text,
+      text.replace(/,\s*([}\]])/g, '$1'),
+    ];
+
+    if (text.startsWith('[') && /},\s*$/.test(text)) {
+      candidates.push(`${text.replace(/,\s*$/, '')}]`);
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+
+      try {
+        return JSON.parse(candidate);
+      } catch (error) {
+        // Try the next tolerated paste shape before reporting a parse error.
+      }
+    }
+
+    return parseJsonValue(rawText, label);
+  }
+
+  function isOAuthExportItem(value) {
+    return Boolean(
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      value.credentials &&
+      typeof value.credentials === 'object' &&
+      !Array.isArray(value.credentials) &&
+      normalizeText(value.credentials.access_token)
+    );
+  }
+
+  function normalizeOAuthExportItem(item) {
+    const credentials = item.credentials || {};
+    const extra = item.extra && typeof item.extra === 'object' && !Array.isArray(item.extra)
+      ? item.extra
+      : {};
+    const accessToken = normalizeText(credentials.access_token);
+    const accountId = normalizeText(credentials.chatgpt_account_id) ||
+      normalizeText(credentials.account_id) ||
+      normalizeText(extra.chatgpt_account_id) ||
+      normalizeText(extra.account_id);
+
+    if (!accessToken || !accountId) {
+      throw new Error('OAuth 导出项必须包含 credentials.access_token 和 chatgpt_account_id');
+    }
+
+    const imported = {
+      description: normalizeText(credentials.email) || normalizeText(extra.email) || normalizeText(item.name) || accountId,
+      account_id: accountId,
+      access_token: accessToken,
+    };
+    const refreshToken = normalizeText(credentials.refresh_token);
+    const clientId = normalizeText(credentials.client_id);
+
+    if (refreshToken) {
+      imported.refresh_token = refreshToken;
+    }
+
+    if (clientId) {
+      imported.client_id = clientId;
+    }
+
+    return imported;
+  }
+
+  function normalizeOAuthExportInput(rawText) {
+    const parsed = parseLooseJsonValue(rawText, 'OAuth 导出 JSON');
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+
+    if (!items.every(isOAuthExportItem)) {
+      throw new Error('OAuth 导出 JSON 必须是包含 credentials.access_token 的对象或对象数组');
+    }
+
+    return items.map(normalizeOAuthExportItem);
+  }
+
   function buildConfigItemFromForm(values) {
     const formValues = values && typeof values === 'object' ? values : {};
     const mode = normalizeText(formValues.mode || 'token').toLowerCase();
 
     if (mode === 'token') {
-      const parsed = parseJsonValue(formValues.tokenRawJson, 'AuthSession JSON');
+      const rawTokenJson = formValues.tokenRawJson;
+      let parsed;
+      try {
+        parsed = parseJsonValue(rawTokenJson, 'AuthSession JSON');
+      } catch (error) {
+        return normalizeOAuthExportInput(rawTokenJson);
+      }
+      const parsedItems = Array.isArray(parsed) ? parsed : [parsed];
+      if (parsedItems.length > 0 && parsedItems.every(isOAuthExportItem)) {
+        return normalizeOAuthExportInput(rawTokenJson);
+      }
+
       if (Array.isArray(parsed)) {
         if (parsed.length === 0) {
           throw new Error('AuthSession JSON 数组不能为空');
@@ -275,12 +369,12 @@
       steps: [
         {
           title: '选择模式',
-          description: 'token 模式适合 ChatGPT Codex 登录态；apikey 模式适合 OpenAI 兼容或 Claude Messages 上游。先在右侧选一种模式。',
+          description: 'OpenAI token 是 Responses 主链路，Claude token 是 Messages 主链路，apikey 只作为对应链路的兜底上游。',
           actionText: '打开 ChatGPT',
           actionHref: 'https://chatgpt.com/',
         },
         {
-          title: 'Token 模式',
+          title: 'OpenAI token',
           description: '建议使用浏览器隐私模式登录 ChatGPT 后打开 AuthSession 页面，把返回的 AuthSession JSON 粘贴到文本框里。粘贴后不要退出该登录态，否则 token 会失效。',
           example: JSON.stringify({
             user: {
@@ -296,8 +390,8 @@
           actionCopyText: 'https://chatgpt.com/api/auth/session',
         },
         {
-          title: 'API Key 模式',
-          description: '直接用输入框填写 Base URL、API Key 和备注，再勾选这个上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务通常选 GPT；原样转发 Claude Messages API 时选 Claude。',
+          title: 'Fallback apikey',
+          description: '直接用输入框填写 Base URL、API Key 和备注，再选择这个兜底上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务选 GPT；Claude Messages 原样转发选 Claude。',
         },
       ],
       rawJsonPlaceholder: JSON.stringify({
@@ -315,10 +409,165 @@
 
   function hasApiKeyConfig(snapshot) {
     const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
-    return configs.some(item => {
+    const disabledConfigs = Array.isArray(snapshot && snapshot.disabled_configs) ? snapshot.disabled_configs : [];
+    return [...configs, ...disabledConfigs].some(item => {
       const configItem = item && item.item ? item.item : item;
-      return configItem && configItem.type === 'apikey';
+      return configItem && (configItem.type === 'apikey' || configItem.type === 'claude_token');
     });
+  }
+
+  function getConfigItem(item) {
+    return item && item.item ? item.item : item;
+  }
+
+  function getConfigType(item) {
+    const configItem = getConfigItem(item);
+    const type = normalizeText(configItem && configItem.type).toLowerCase();
+    return type || 'token';
+  }
+
+  function getApiKeySupport(item) {
+    const configItem = getConfigItem(item);
+    return normalizeSupport(configItem && configItem.support);
+  }
+
+  function configSupports(item, capability) {
+    return getApiKeySupport(item).includes(capability);
+  }
+
+  function getDispatchRoles(item) {
+    if (Array.isArray(item && item.dispatch_roles)) {
+      return item.dispatch_roles.filter(role => typeof role === 'string' && role);
+    }
+
+    return typeof item?.dispatch_role === 'string' && item.dispatch_role
+      ? [item.dispatch_role]
+      : [];
+  }
+
+  function hasDispatchRole(item, role) {
+    return getDispatchRoles(item).includes(role);
+  }
+
+  function getConfigRole(item) {
+    const type = getConfigType(item);
+    if (type === 'claude_token') {
+      return {
+        key: 'claude-token',
+        label: 'Claude token',
+        lane: 'Claude Messages',
+        priority: '主链路',
+        tone: 'active',
+      };
+    }
+
+    if (type === 'apikey') {
+      const support = getApiKeySupport(item);
+      const isOpenAiFocus = hasDispatchRole(item, 'openai_apikey_fallback_focus') ||
+        hasDispatchRole(item, 'apikey_fallback_focus');
+      const isClaudeFocus = hasDispatchRole(item, 'claude_apikey_fallback_focus') ||
+        hasDispatchRole(item, 'apikey_fallback_focus');
+      const focusPriority = isOpenAiFocus && isClaudeFocus
+        ? '双链路兜底焦点'
+        : isOpenAiFocus
+          ? 'OpenAI 兜底焦点'
+          : isClaudeFocus
+            ? 'Claude 兜底焦点'
+            : '兜底';
+      const tone = isOpenAiFocus || isClaudeFocus ? 'active' : 'muted';
+
+      if (support.includes('gpt') && support.includes('claude')) {
+        return {
+          key: 'fallback-both',
+          label: 'API key',
+          lane: '双链路 fallback',
+          priority: focusPriority,
+          tone,
+        };
+      }
+
+      if (support.includes('claude')) {
+        return {
+          key: 'fallback-claude',
+          label: 'API key',
+          lane: 'Claude fallback',
+          priority: focusPriority,
+          tone,
+        };
+      }
+
+      return {
+        key: 'fallback-gpt',
+        label: 'API key',
+        lane: 'Responses fallback',
+        priority: focusPriority,
+        tone,
+      };
+    }
+
+    return {
+      key: 'openai-token',
+      label: 'OpenAI token',
+      lane: 'Responses',
+      priority: '主链路',
+      tone: 'ok',
+    };
+  }
+
+  function getConfigCollection(snapshot, key) {
+    return Array.isArray(snapshot && snapshot[key]) ? snapshot[key] : [];
+  }
+
+  function getEnabledConfigsByRole(snapshot, predicate) {
+    return getConfigCollection(snapshot, 'configs').filter(item => predicate(item && item.item ? item.item : item));
+  }
+
+  function getFallbackConfigs(snapshot, capability) {
+    return getEnabledConfigsByRole(snapshot, item => getConfigType(item) === 'apikey' && configSupports(item, capability));
+  }
+
+  function getPrimaryConfigs(snapshot, type) {
+    return getEnabledConfigsByRole(snapshot, item => getConfigType(item) === type);
+  }
+
+  function getRouteLanes(snapshot) {
+    const openAiTokens = getPrimaryConfigs(snapshot, 'token');
+    const claudeTokens = getPrimaryConfigs(snapshot, 'claude_token');
+    const gptFallbacks = getFallbackConfigs(snapshot, 'gpt');
+    const claudeFallbacks = getFallbackConfigs(snapshot, 'claude');
+
+    return [
+      {
+        key: 'responses',
+        title: 'Responses 链路',
+        endpoint: '/v1/responses',
+        primaryLabel: 'OpenAI token',
+        fallbackLabel: 'GPT apikey',
+        primary: openAiTokens,
+        fallback: gptFallbacks,
+        description: 'OpenAI token 负责主请求；全部不可用时才使用 GPT apikey。',
+      },
+      {
+        key: 'messages',
+        title: 'Claude Messages 链路',
+        endpoint: '/v1/messages',
+        primaryLabel: 'Claude token',
+        fallbackLabel: 'Claude apikey',
+        primary: claudeTokens,
+        fallback: claudeFallbacks,
+        description: 'Claude token 负责原样转发；全部不可用时才使用 Claude apikey。',
+      },
+      {
+        key: 'converted-messages',
+        title: 'Messages 转换兜底',
+        endpoint: '/v1/messages -> /v1/responses',
+        primaryLabel: 'OpenAI token',
+        fallbackLabel: 'GPT apikey',
+        primary: openAiTokens,
+        fallback: gptFallbacks,
+        description: 'Claude 直转链路不可用时，才把 Messages 转成 Responses。',
+      },
+    ];
   }
 
   function getConfigIdentityColumnLabel(snapshot) {
@@ -335,6 +584,15 @@
       const apikey = configItem && configItem.apikey;
 
       return `${baseUrl} (${maskSecret(apikey)})`;
+    }
+
+    if (configItem && configItem.type === 'claude_token') {
+      const baseUrl = typeof configItem.base_url === 'string' && configItem.base_url.trim()
+        ? configItem.base_url.trim()
+        : 'https://api.anthropic.com';
+      const identity = configItem.local_auth_token || configItem.account_uuid || configItem.access_token;
+
+      return `${baseUrl} (${maskSecret(identity)})`;
     }
 
     const value = configItem && configItem.account_id;
@@ -359,14 +617,8 @@
   }
 
   function hasRuntimeProblem(runtime) {
-    const text = getRuntimeSummaryText(runtime).toLowerCase();
-
-    return text.includes('可用=否')
-      || text.includes('timeout')
-      || text.includes('401')
-      || text.includes('quota')
-      || text.includes('失败')
-      || text.includes('错误=');
+    return extractRuntimeStatusTags(runtime)
+      .some(tag => tag.label === '异常');
   }
 
   function getActiveConfigLabel(snapshot) {
@@ -403,20 +655,28 @@
     const dispatch = snapshot && snapshot.dispatch && typeof snapshot.dispatch === 'object'
       ? snapshot.dispatch
       : null;
-    if (dispatch && dispatch.mode === 'apikey_override') {
+    if (dispatch && dispatch.mode === 'apikey_fallback_focus') {
       return {
-        value: dispatch.label || 'API Key 覆盖',
+        value: dispatch.label || 'Fallback apikey 焦点',
         tone: 'active',
-        detail: dispatch.detail || '支持的流量会优先走当前 apikey',
+        detail: dispatch.detail || 'apikey 只在对应 token 链路不可用时兜底',
+      };
+    }
+
+    if (dispatch && dispatch.mode === 'claude_token_focus') {
+      return {
+        value: dispatch.label || 'Claude token 焦点',
+        tone: 'active',
+        detail: dispatch.detail || 'Claude token 负责 /v1/messages 主链路',
       };
     }
 
     if (dispatch && dispatch.mode === 'token_pool') {
       const observedDetail = formatObservedDispatchSession(dispatch.observed_session);
       return {
-        value: dispatch.label || 'Token 并发池',
+        value: dispatch.label || 'OpenAI token 池',
         tone: 'active',
-        detail: observedDetail || dispatch.detail || 'token 请求按会话调度',
+        detail: observedDetail || dispatch.detail || 'OpenAI token 负责 Responses 主链路',
       };
     }
 
@@ -424,24 +684,32 @@
     const active = configs.find(item => item && item.is_active);
     if (active && active.item && active.item.type === 'apikey') {
       return {
-        value: `API Key 覆盖: 配置 #${active.index + 1}`,
+        value: `Fallback apikey 焦点: 配置 #${active.index + 1}`,
         tone: 'active',
-        detail: '支持的流量会优先走当前 apikey',
+        detail: 'apikey 只在对应 token 链路不可用时兜底',
+      };
+    }
+
+    if (active && active.item && active.item.type === 'claude_token') {
+      return {
+        value: `Claude token 焦点: 配置 #${active.index + 1}`,
+        tone: 'active',
+        detail: 'Claude token 负责 /v1/messages 主链路',
       };
     }
 
     if (active) {
       return {
-        value: `Token 并发池: 锚点配置 #${active.index + 1}`,
+        value: `OpenAI token 池: 焦点配置 #${active.index + 1}`,
         tone: 'active',
-        detail: 'token 请求按会话调度',
+        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
       };
     }
 
     return {
       value: '无可用配置',
       tone: 'muted',
-      detail: '请先添加 token 或 apikey 配置',
+      detail: '请先添加 OpenAI token、Claude token 或 fallback apikey',
     };
   }
 
@@ -495,6 +763,34 @@
     };
   }
 
+  function normalizeModelName(value) {
+    return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : '';
+  }
+
+  function modelNameHasVersionPrefix(model, prefix) {
+    const normalizedModel = normalizeModelName(model);
+    const normalizedPrefix = normalizeModelName(prefix);
+    if (!normalizedModel || !normalizedPrefix) {
+      return false;
+    }
+
+    if (normalizedModel === normalizedPrefix) {
+      return true;
+    }
+
+    if (!normalizedModel.startsWith(normalizedPrefix)) {
+      return false;
+    }
+
+    const suffix = normalizedModel.slice(normalizedPrefix.length);
+    return /^-\d{4}-\d{2}-\d{2}(?:$|[-._])/.test(suffix);
+  }
+
+  function areResponseModelsConsistent(requestModel, responseModel) {
+    return modelNameHasVersionPrefix(responseModel, requestModel) ||
+      modelNameHasVersionPrefix(requestModel, responseModel);
+  }
+
   function formatResponseModelStatus(runtime) {
     const model = runtime && typeof runtime === 'object'
       ? runtime.response_model || runtime.responseModel
@@ -515,13 +811,24 @@
         : '';
     const statusCode = Number(model.status_code ?? model.statusCode);
     const active = Boolean(model.active);
+    const downgraded = Boolean(model.downgraded);
     const detailParts = [];
 
     if (active) {
       detailParts.push('进行中');
     }
 
-    if (requestModel && responseModel && requestModel !== responseModel) {
+    if (downgraded) {
+      detailParts.push('已降级');
+    }
+
+    const modelsDiffer = Boolean(
+      requestModel &&
+      responseModel &&
+      !areResponseModelsConsistent(requestModel, responseModel)
+    );
+
+    if (modelsDiffer) {
       detailParts.push(`请求 ${requestModel}`);
     }
 
@@ -534,7 +841,155 @@
       label: responseModel || requestModel || '等待响应',
       detail: detailParts.join(' · '),
       active,
-      tone: responseModel && requestModel && responseModel !== requestModel ? 'warn' : active ? 'active' : 'muted',
+      tone: modelsDiffer ? 'warn' : active ? 'active' : 'muted',
+    };
+  }
+
+  function moveConfigSnapshotItem(snapshot, fromIndex, toIndex = 0) {
+    const data = snapshot && typeof snapshot === 'object' ? snapshot : {};
+    const configs = Array.isArray(data.configs) ? data.configs.slice() : [];
+    const normalizedFromIndex = Number(fromIndex);
+    const normalizedToIndex = Number(toIndex);
+
+    if (
+      !Number.isInteger(normalizedFromIndex) ||
+      !Number.isInteger(normalizedToIndex) ||
+      normalizedFromIndex < 0 ||
+      normalizedToIndex < 0 ||
+      normalizedToIndex >= configs.length
+    ) {
+      return data;
+    }
+
+    const sourcePosition = configs.findIndex(item => Number(item && item.index) === normalizedFromIndex);
+    if (sourcePosition < 0) {
+      return data;
+    }
+
+    const [movedItem] = configs.splice(sourcePosition, 1);
+    configs.splice(Math.min(normalizedToIndex, configs.length), 0, movedItem);
+
+    const reindexedConfigs = configs.map((item, index) => {
+      const nextItem = {
+        ...item,
+        index,
+      };
+
+      if (item && item.runtime && typeof item.runtime === 'object') {
+        nextItem.runtime = {
+          ...item.runtime,
+          index,
+        };
+      }
+
+      return nextItem;
+    });
+    const activeConfig = reindexedConfigs.find(item => item && item.is_active);
+
+    return {
+      ...data,
+      active_config_index: activeConfig ? activeConfig.index : data.active_config_index,
+      configs: reindexedConfigs,
+    };
+  }
+
+  function formatProbeTime(value, options = {}) {
+    const timestamp = Number(value);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) {
+      return '';
+    }
+
+    const checkedAt = new Date(timestamp);
+    if (Number.isNaN(checkedAt.getTime())) {
+      return '';
+    }
+
+    const formatOptions = {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    };
+    if (options.timeZone) {
+      formatOptions.timeZone = options.timeZone;
+    }
+
+    return checkedAt.toLocaleTimeString(options.locale || 'zh-CN', formatOptions);
+  }
+
+  function formatProbeInterval(value) {
+    const intervalMs = Number(value);
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return '';
+    }
+
+    const minutes = Math.max(1, Math.round(intervalMs / 60000));
+    return `每 ${minutes} 分钟`;
+  }
+
+  function formatApiKeyRecoveryStatus(runtime, options = {}) {
+    const recovery = runtime && typeof runtime === 'object'
+      ? runtime.api_key_recovery || runtime.apiKeyRecovery
+      : null;
+    if (!recovery || typeof recovery !== 'object' || recovery.enabled === false) {
+      return null;
+    }
+
+    const result = normalizeText(recovery.result || 'never').toLowerCase();
+    const pending = Boolean(recovery.pending);
+    const checkedAt = formatProbeTime(recovery.last_checked_at ?? recovery.lastCheckedAt, options);
+    const model = normalizeText(recovery.model);
+    const statusCode = Number(recovery.status_code ?? recovery.statusCode);
+    const lastError = normalizeText(recovery.last_error ?? recovery.lastError);
+    const intervalText = formatProbeInterval(recovery.interval_ms ?? recovery.intervalMs);
+    const detailParts = [];
+
+    if (checkedAt) {
+      detailParts.push(`上次 ${checkedAt}`);
+    }
+
+    if (model) {
+      detailParts.push(`模型 ${model}`);
+    }
+
+    if (Number.isInteger(statusCode) && statusCode > 0) {
+      detailParts.push(`HTTP ${statusCode}`);
+    }
+
+    if (lastError) {
+      detailParts.push(lastError);
+    }
+
+    if (intervalText) {
+      detailParts.push(`仅不可用时${intervalText}恢复探测`);
+    }
+
+    if (result === 'success') {
+      return {
+        title: 'API Key 探测',
+        label: '恢复成功',
+        detail: detailParts.join(' · '),
+        active: false,
+        tone: 'ok',
+      };
+    }
+
+    if (result === 'failed' || result === 'error') {
+      return {
+        title: 'API Key 探测',
+        label: '仍不可用',
+        detail: detailParts.join(' · '),
+        active: false,
+        tone: 'danger',
+      };
+    }
+
+    return {
+      title: 'API Key 探测',
+      label: pending ? '等待探测' : '未触发',
+      detail: detailParts.join(' · '),
+      active: false,
+      tone: pending ? 'warn' : 'muted',
     };
   }
 
@@ -638,7 +1093,7 @@
 
   function buildHelloTestRequest(snapshot) {
     return {
-      model: 'gpt-5.5',
+      model: 'gpt-5.4-mini',
       instructions: '',
       input: [
         {
@@ -830,16 +1285,24 @@
     getPreferredApiKey,
     buildHelloTestHeaders,
     getConfigGuideContent,
+    getConfigRole,
+    getRouteLanes,
+    getConfigType,
+    configSupports,
     getConfigIdentityColumnLabel,
     getConfigIdentityValue,
     formatConfigItemCopyText,
     buildConfigItemFromForm,
+    normalizeOAuthExportInput,
     buildAdminStatusSummary,
     getDispatchModeSummary,
     formatDispatchSessionStatus,
     formatResponseModelStatus,
+    moveConfigSnapshotItem,
+    formatApiKeyRecoveryStatus,
     extractRuntimeStatusTags,
     getActiveConfigLabel,
+    hasRuntimeProblem,
     hasRefreshTokenConfig,
     buildHelloTestRequest,
     formatResponsesModelAliasesInput,

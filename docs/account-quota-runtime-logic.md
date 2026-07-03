@@ -4,7 +4,7 @@
 
 **Status:** Current
 
-本文档描述 `token` 配置项当前已经落地的账号额度刷新、可用性判定、请求级会话调度、活动账号选择，以及管理页强制刷新的真实行为。
+本文档描述 GPT 链路中 `token` 配置项当前已经落地的账号额度刷新、可用性判定、请求级会话调度、活动账号选择、`apikey` 失败窗口与恢复探测，以及管理页强制刷新的真实行为。
 
 适用代码：
 
@@ -13,22 +13,29 @@
 
 不适用范围：
 
-- `apikey` 配置项本身的普通 OpenAI 兼容转发
+- `support` 只包含 `claude` 的 apikey 原样转发细节
 - 历史设计文档中已经过时的轮询策略说明
 
 ## 1. 适用模式
 
-只有 `token` 配置项会启用账号额度管理和后台轮询。
+只有 `token` 配置项会启用账号额度管理和每分钟额度轮询。
 
 `apikey` 配置项：
 
 - 不参与账号额度轮询
 - 不参与 token 并发调度、一致性哈希或 `inFlight` 计数
-- 只有 token 不可用时，才按原有可用性/顺序语义作为 fallback
-- 直连上游收到 401/403、429 或 5xx 时，会被临时标记为不可用
-- 手动切换到某个 `apikey` 配置项时，会把该配置恢复为可用
+- 只有 token 不可用时，才按原有可用性/顺序语义作为 fallback；这也适用于 `/v1/messages` 的 GPT apikey Responses 转换路径
+- 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置
+- 普通 apikey 代理在响应提交给客户端时记录成功；响应提交后发生的传输中断不会再触发透明切换，也不会把本次请求记为失败
+- 最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败时，apikey 会被临时标记为不可用
+- 已被标记为不可用且是当前 OpenAI fallback 焦点、`support` 包含 `gpt` 时，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用
+- GPT apikey 恢复探测默认超时为 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；该超时独立于 token 额度检查的短超时
+- GPT apikey 恢复探测默认使用模型 `gpt-5.4-mini`，可通过配置项里的 `health.model` 覆盖
+- 管理页会显示当前 OpenAI fallback 焦点的 GPT apikey 恢复探测是否启用、是否待恢复、上次探测时间、结果、HTTP 状态/错误和探测模型
+- 只支持 `claude` 的 apikey 不做 `/v1/responses` 恢复探测
+- 管理页分别提供 OpenAI fallback 与 Claude fallback 两个 apikey 焦点开关；手动切换到某个 `apikey` 配置项时，只会调整对应链路的焦点，并把该配置恢复为可用
 
-后台每分钟轮询所有 `token` 配置项；所有 `token` 配置项每 10 分钟也会全量轮询一次，定时轮询中账号之间间隔 1 秒。
+后台每分钟轮询所有 `token` 配置项；每 3 分钟也会全量轮询所有 `token` 配置项，并额外探测已不可用的当前 OpenAI fallback 焦点。定时轮询中账号之间间隔 1 秒。
 
 ## 2. 运行时核心对象
 
@@ -43,12 +50,16 @@
 - `primaryRemainingPercent`
 - `secondaryRemainingPercent`
 - `inFlight`（仅 token 并发调度使用）
+- `quotaCheckFailures`（仅 token 额度检查失败保护使用）
+- `unavailableUntil`（仅 token 请求失败冷却使用）
+- `apiKeyRequestResults`（仅 apikey 最近请求窗口使用）
 
 其中：
 
 - `primary*` 表示主额度窗口
 - `secondary*` 表示辅助/周额度窗口
-- 对外汇总口径跟随主额度窗口；可用性同时检查主额度和周额度
+- 对外汇总口径跟随主额度窗口；周额度只展示，不参与可用性摘除
+- `unavailableUntil` 是毫秒时间戳；为空表示没有请求失败冷却
 
 ## 3. 账号可用性判定
 
@@ -56,59 +67,66 @@
 
 当 `/backend-api/wham/usage` 返回成功后，当前实现按以下顺序判定账号可用性：
 
-1. 订阅/会员显式失效
-   - 包括 `subscription.active === false`、`has_active_subscription === false`、`plan_type === "free"` 等形态
-   - 标记为不可用
-   - `reason = membership_expired`
-2. 主额度窗口存在但周额度窗口缺失，且没有明确的付费计划信号
-   - 作为会员过期/未订阅的兼容兜底
-   - 标记为不可用
-   - `reason = membership_expired`
-3. `rate_limit.allowed === false`
+额度接口成功返回可用状态时，会清空 token 的请求失败冷却字段 `unavailableUntil`。
+1. `rate_limit.allowed === false`
    - 标记为不可用
    - `reason = rate_limit_not_allowed`
-4. `rate_limit.limit_reached === true`
+2. `rate_limit.limit_reached === true`
    - 标记为不可用
    - `reason = rate_limit_reached`
-5. 主额度窗口剩余百分比 `< minRemainingPercent`
+3. 主额度窗口剩余百分比 `< minRemainingPercent`
    - 标记为不可用
    - `reason = remaining_below_3%`
-6. 周额度窗口剩余百分比 `<= minWeeklyRemainingPercent`
-   - 标记为不可用
-   - `reason = secondary_remaining_not_above_1%`
-7. 以上都不满足
+4. 以上都不满足
    - 标记为可用
    - `reason = ok`
 
 说明：
 
 - 当前主额度默认阈值为 `3%`
-- 当前周额度默认阈值为 `> 1%`
+- 当前不校验会员状态
+- 当前不校验周额度；周额度窗口缺失或周额度很低都不会直接标记 token 不可用
 - `remainingPercent` 的对外汇总口径跟随主额度窗口
-- `secondaryRemainingPercent` 用于展示，也参与周额度可用性判断
+- `secondaryRemainingPercent` 仅用于展示
 
 ### 3.2 额度接口失败时
 
 当额度检查请求超时、网络失败、返回非 2xx，或响应解析失败时：
 
-- 当前账号会直接被标记为不可用
-- `reason = quota_check_failed`
+- 当前 token 账号不会因为单次 quota 检查失败立即摘除
+- `quotaCheckFailures` 会连续累加，成功拿到额度 payload 后清零
+- 前 2 次连续失败保留原来的 `available` 与 `reason`
+- 第 3 次连续失败才标记为不可用
+- 第 3 次失败后 `reason = quota_check_failed`
 - `lastError` 记录原始错误信息
 
-这和早期实现不同。当前实现里，`quota_check_failed` 不再保留旧的 `available` 状态。
+这样可以避免短暂网络抖动把仍可转发的 token 账号过早摘除；连续失败达到阈值时，仍会进入正常不可用与切换流程。
+
+例外：额度接口返回 401 或缺少凭证时，如果配置带 `refresh_token` 但刷新失败，系统会立即把该 token 标记为不可用，`reason = token_refresh_failed`，不会继续显示为可用。
 
 ### 3.3 非额度查询场景下的主动失效
 
-当真实业务请求已经命中某个账号，但响应被识别为需要自动切号时，系统会直接把当前账号标记为不可用。
+当真实业务请求已经命中某个 token 账号，且响应被识别为额度错误或上游错误时，系统会直接把当前账号标记为不可用。请求非 `gpt-5.4-mini` 或它的日期版本后缀时，成功响应被降级成 `gpt-5.4-mini` 或同名日期版本只触发本次请求切走，不标记账号不可用；系统会在运行态模型观测里记录 `downgraded = true`。apikey 账号不会因单次上游错误立即摘除，而是记录最近 30 分钟内最多 10 个已完成真实请求结果；响应提交给客户端前的非 200 HTTP 状态、请求失败或响应体中断累计达到 3 次时，才把当前 apikey 标记为不可用。
 
 当前已接入的场景：
 
 - `/v1/responses` 自动切号
-- `apikey` 直连上游 401/403、429、5xx 或普通代理请求失败摘除
+- `/v1/messages` 业务请求自动切号
+- `/v1/images/generations` 和 `/v1/images/edits` 业务请求自动切号
+- `responses_model_downgraded` 模型降级请求级切换，不改变账号可用性
+- `responses_model_at_capacity` 模型容量不足会触发自动切号，并把当前 token 临时摘除
+- 普通 token 代理在响应提交前遇到上游非成功 HTTP 状态、请求异常或响应体异常时，也会临时摘除当前 token 并重放到下一个可用配置
+- `/v1/messages` 的 responses 兼容链路会把 `event: response.failed`、`event: error`、格式异常和流中断统一视为可切换异常
+- 图片兼容路径中，即使上游 HTTP 200，只要 Responses body 不能提取出有效图片结果，也会视为异常并切号
+- 同一个业务请求发现可切换错误后会找下一个可用配置重放，但最多重放 2 次；第 3 个配置仍失败时返回该次上游错误
+- `apikey` 直连上游最近 30 分钟内最多 10 个真实请求累计 3 次提交响应前的非 200 HTTP 状态、普通代理请求失败或响应体中断摘除
+- 每 3 分钟全量校正中的 GPT apikey 恢复探测
 
 此时会：
 
-- 调用 `markConfigUnavailable()`
+- token 额度错误或上游错误自动切号会调用 `markConfigUnavailable()`；`responses_model_downgraded` 不会调用该流程
+- 模型降级会写入 `response_model.downgraded = true`，用于管理页和运行态摘要展示
+- apikey 达到窗口阈值后也会进入不可用标记流程
 - 设置对应失败原因
 - 记录 `lastError`
 - token 请求按相同会话 key 在一致性哈希候选中排除失败账号，尝试切到下一个可用 token 账号
@@ -150,13 +168,15 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 
 ## 5. 活动账号选择逻辑
 
-活动账号仍然存在，主要用于管理页展示、手动切换、无可用账号时的兜底，以及额度刷新后的状态校正。活动账号选择由 `ensureActiveConfig(reason)` 负责，规则如下：
+活动账号仍然存在，主要用于管理页展示、手动切换、静态配置 fallback 顺序，以及额度刷新后的状态校正。活动账号选择由 `ensureActiveConfig(reason)` 负责，规则如下：
 
 管理页手动切换的语义是：
 
-- 切换到 token：回到 token 并发池，并把该 token 设为调度锚点
-- 切换到 apikey：进入 API Key 覆盖模式，该 apikey 支持的流量优先全量走它
-- apikey 覆盖中的账号失败后，会被临时摘除，再回到 token 并发池或其他可用 fallback
+- 切换到 OpenAI token：把该 token 设为 Responses 主链路的调度焦点
+- 切换到 Claude token：把该 token 设为 `/v1/messages` 原样转发主链路的焦点
+- 切换 OpenAI fallback apikey：只调整 Responses/OpenAI fallback 焦点；token 主链路可用时仍优先走 token
+- 切换 Claude fallback apikey：只调整 Claude Messages fallback 焦点；Claude token 主链路可用时仍优先走 Claude token
+- fallback apikey 失败后，会被临时摘除，再尝试同链路下一个 token 或 fallback 配置
 
 1. 如果当前活动配置符合当前路由能力且 `runtime.available = true`，继续保持当前配置。
 2. 如果当前活动配置不可用或不支持当前路由，按 `configs[]` 顺序从前到后扫描。
@@ -165,7 +185,7 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
    - 保留当前账号
    - 记录“没有可用账号，继续使用当前账号”日志
 
-配置顺序调整是例外：管理页“置顶”只改变 `configs[]` 顺序，并按配置身份保留当前活动配置，不会因为保存顺序而触发重新选路。
+配置顺序调整是例外：管理页“置顶”、“上移”、“下移”只改变 `configs[]` 顺序，并按配置身份保留当前活动配置，不会因为保存顺序而触发重新选路。
 
 补充说明：
 
@@ -174,11 +194,11 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 
 ## 6. 启动与热重载逻辑
 
-服务启动、配置热重载、管理页新增/删除配置项后，会进入一次刷新流程：
+服务启动、配置热重载、管理页新增/删除/停用/启用配置项后，会进入一次刷新流程：
 
 1. 创建或重建 `accountManager`
 2. 调用 `refreshQuotas(reason)`
-3. 全量刷新所有 token 账号额度
+3. 全量刷新 `configs[]` 中所有 token 账号额度
 4. 刷新完成后调用 `ensureActiveConfig(reason)`
 5. 启动后台额度轮询定时器
 
@@ -186,13 +206,14 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 
 - 启动时一定会做一次全量额度刷新
 - 热重载时也会重新做一次全量额度刷新
+- `disabled_configs[]` 是停用配置列表，不会参与运行时调度、额度刷新或 fallback；只有从管理页启用回 `configs[]` 后才会重新进入运行态
 
 ## 7. 后台轮询逻辑
 
 后台定时器分为两类：
 
 - 每分钟执行一次 `refreshQuotas('poll')`
-- 每 10 分钟执行一次 `refreshQuotas('all_poll')`
+- 每 3 分钟执行一次 `refreshQuotas('all_poll')`
 
 当前 `poll` 分支的行为是：
 
@@ -207,7 +228,7 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 - 账号失效不必等业务请求命中才发现
 - 恢复可用的账号会在下一轮分钟级轮询或管理页强制刷新中重新进入调度集合
 
-### 7.1 十分钟全量轮询
+### 7.1 三分钟全量轮询
 
 `all_poll` 分支的行为是：
 
@@ -219,7 +240,7 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 因此：
 
 - 全量刷新不会集中瞬间打满所有账号额度接口
-- 恢复可用的账号通常会在分钟级轮询中被发现；十分钟全量轮询保留为额外校正
+- 恢复可用的账号通常会在分钟级轮询中被发现；三分钟全量轮询保留为额外校正
 - 如果当前账号仍然可用，不会因为较早配置项恢复就主动切回
 
 ### 7.2 并发保护
@@ -244,7 +265,7 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 - 只返回当前内存中的配置与运行时状态
 - 不触发额度刷新
 - token 账号的运行态包含安全的 `dispatch_session` 观测；它只用于显示当前/最近命中的会话短 hash，不包含原始会话 ID
-- 账号运行态包含 `response_model` 观测；它记录最近一次请求模型和上游响应模型，用于管理页观察是否出现实际模型变化
+- 账号运行态包含 `response_model` 观测；它记录最近一次请求模型和上游响应模型，用于管理页观察是否出现实际模型变化；同名日期版本后缀会视为一致
 
 适用场景：
 
@@ -269,6 +290,12 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 
 - 不是“重新读一遍状态”
 - 而是“强制把所有账号额度实际刷新一遍，再显示最新结果”
+
+### 8.3 配置写入和排序
+
+管理页新增、删除、停用、启用和排序等写操作会写入配置文件并重载内存运行态，但不会触发额度刷新。批量新增会一次性追加所有配置项；新增和排序路径只解析当前请求并写文件，不会完整校验历史配置。新增项如果暂时无法构建运行态，会在管理页显示为不可用配置，不会阻塞保存。
+
+`POST /admin/api/configs/:index/move-up`、`POST /admin/api/configs/:index/move-previous` 和 `POST /admin/api/configs/:index/move-next` 只重排当前内存运行态和配置文件顺序，并返回 `ok`、`moved_from` 和 `moved_to` 等轻量确认字段；管理页收到确认后在本地快照中重排列表，避免排序时重新传输完整配置列表。
 
 ## 9. 实时额度更新入口
 
@@ -296,7 +323,7 @@ token 业务请求不再固定使用全局活动账号，而是先按请求级 l
 - `当前活动账号`
   - 本轮刷新后活动账号索引发生变化
 - `轮询额度`
-  - 每分钟轮询或 10 分钟全量轮询结束后输出当前活动账号摘要
+  - 每分钟轮询或 3 分钟全量轮询结束后输出当前活动账号摘要
 
 ## 11. 当前实现的关键结论
 

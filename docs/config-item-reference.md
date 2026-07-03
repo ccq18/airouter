@@ -10,7 +10,7 @@
   "auth_token": "",
   "port":3009,
   "claude_code": {
-    "model": "gpt-5.4",
+    "model": "gpt-5.5",
     "reasoning_effort": "high"
   },
   "responses": {
@@ -28,9 +28,24 @@
         "type": "apikey",
         "base_url": "https://api.example.com/v1",
         "apikey": "sk-xxx",
+        "support": ["gpt"],
+        "health": {
+          "model": "gpt-4.1-mini"
+        },
         "description": "third-party provider"
+      },
+      {
+        "type": "claude_token",
+        "access_token": "claude-oauth-access-token",
+        "refresh_token": "claude-oauth-refresh-token",
+        "expires_at": 1893456000000,
+        "account_uuid": "account-uuid",
+        "organization_uuid": "organization-uuid",
+        "local_auth_token": "airouter-oauth-local-token",
+        "description": "Claude OAuth account"
       }
-    ]
+    ],
+  "disabled_configs": []
 }
 
 ```
@@ -59,20 +74,28 @@
 - `apikeys` 为空时，不校验入口请求；只要数组非空，请求就必须命中其中一个 key
 - `auth_token` 为管理后台访问令牌；配置页必须通过 `.../admin/configs?auth_token=<token>` 访问
 - `auth_token` 为空或缺失时，服务启动后会自动生成并写回配置文件
-- `claude_code.model` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时上游实际使用的模型
-- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` token 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
-- 以上 `claude_code` 配置只作用于 `/v1/messages` 的 token 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
+- `configs` 是启用配置列表，只有这里的配置会进入运行时请求调度、额度刷新和 fallback
+- `disabled_configs` 是停用配置列表。管理页点“停用”会把配置从 `configs` 移到这里；停用配置对服务不可见，后续请求不会读取它。管理页点“启用”会把它移回 `configs`
+- `disabled_configs[]` 中的配置项会额外记录 `disabled_status` 文本字段，用来保存停用瞬间的运行态摘要，例如 `可用=否 | 额度=99% | ...`；启用回 `configs[]` 时会移除该字段
+- 管理页“删除”仍是永久删除；停用不是删除，只是从服务可见列表中移出。现在管理页支持对启用配置批量停用、对停用配置批量启用，并支持对启用配置、停用配置和入口 apikey 勾选多项后批量删除，语义与单项操作一致
+- `/v1/messages` Responses 兼容转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 会保留在配置中但不再影响该链路
+- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` Responses 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
+- `claude_code.reasoning_effort` 只作用于 `/v1/messages` 的 Responses 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
 - `responses.model_aliases` 用来给 `/v1/responses` 请求里的 `model` 做别名替换，键和值都必须是非空字符串
 - `responses.model_aliases` 的键比较时忽略大小写，例如配置 `GPT-5.2` 也会匹配请求里的 `gpt-5.2`
 - 默认示例配置里包含 `gpt-5.2 -> gpt-5.5`
 - 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
-- `/v1/messages` 优先使用 `support` 包含 `claude` 的 `apikey` 原样转发；没有可用 Claude apikey 时使用 `token` 配置项走 responses 兼容转换
+- `/v1/messages` 优先使用 `claude_token` 或 `support` 包含 `claude` 的 `apikey` 原样转发；如果请求里的本地 fake auth token 匹配某个 `claude_token.local_auth_token`，会严格绑定到该配置，不会透明切到其它 Claude 登录态。交互式 Claude Code 主请求如果改用本机 Keychain 中同一登录态的真实 Claude OAuth access token，Airouter 也会识别为这条 `claude_token` 配置。`airouter-oauth-` 前缀的本地 fake token 如果没有绑定到可用 `claude_token`，也不会 fallback 到 OpenAI/GPT 上游。没有命中 Claude fake token 绑定且没有可用 Claude 直转配置时，优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
+- `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
 - 每分钟额度轮询会检查所有 `token` 配置项
-- token 请求调度：有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择
+- 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
+- `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换；最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用
+- 每 3 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.4-mini`，可通过该配置项的 `health.model` 覆盖
+- token 请求调度：OpenAI token 和 Claude token 不再依赖手动“切换”焦点，只按运行态可用/不可用参与对应链路选择。OpenAI token 有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择。Claude token 按配置顺序选择当前可用账号，绑定本地 fake token 的请求只会使用绑定且可用的 Claude token
 - 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
 - 没有会话 key 时，token 请求按当前内存 `inFlight` 数做轻量分摊
 - `apikey` 配置项不参与 token 并发调度、一致性哈希或 `inFlight` 计数
-- 管理页切换到 token 时，会把该 token 设为并发池锚点；切换到 `apikey` 时，会进入该 `apikey` 支持流量的覆盖模式
+- `apikey` fallback 焦点按能力拆分：`support` 包含 `gpt` 的 OpenAI 兼容 fallback 与 `support` 包含 `claude` 的 Claude Messages 原样转发 fallback 各自维护焦点和 failover，不会互相抢占。手动切换到同时支持两种能力的 `apikey` 会同时更新两个 fallback 焦点；token 主链路可用时仍优先走 token
 - 管理页“调度模式”和 token 行会显示当前/最近命中的会话短 hash，用于观察实际调度账号；原始会话 ID 不会持久化或返回页面
 - 管理页账号行会显示最近一次响应模型观测，包括请求模型和上游响应模型
 - 手动切换到 `apikey` 配置项时，会把该 `apikey` 的运行态恢复为可用
@@ -113,6 +136,9 @@
   "base_url": "https://api.openai.com/v1",
   "apikey": "sk-xxx",
   "support": ["gpt"],
+  "health": {
+    "model": "gpt-4.1-mini"
+  },
   "description": "primary key"
 }
 ```
@@ -130,14 +156,56 @@
 - `support`
   - 可选，字符串数组，只支持 `gpt` 和 `claude`
   - 不填写时默认是 `["gpt"]`
-  - 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，包括 `/v1/responses`
+  - 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，包括 `/v1/responses`，也可作为 `/v1/messages` 的 Responses 转换上游
   - 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路
+- `health`
+  - 可选对象，目前只支持 `model`
+  - 只影响已不可用 GPT apikey 的 3 分钟恢复探测请求
+  - 未配置时恢复探测默认发送 `model: "gpt-5.4-mini"`、`input: "hello"`、`stream: false`
+  - 如果第三方上游需要使用其它轻量模型，可以配置为上游可用的模型，例如 `"health": {"model": "gpt-4.1-mini"}`
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
-- `apikey` 配置项在直连上游时收到 401/403、429 或 5xx，会被临时标记为不可用；普通 `/v1/*` 链路会尝试切到下一个可用配置
+- `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；如果没有可切换配置，才透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。是否临时标记为不可用仍按最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败判断
+- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
+
+## claude_token 配置项
+
+`type` 为 `claude_token` 时，配置项格式如下：
+
+```json
+{
+  "type": "claude_token",
+  "access_token": "claude-oauth-access-token",
+  "refresh_token": "claude-oauth-refresh-token",
+  "expires_at": 1893456000000,
+  "account_uuid": "account-uuid",
+  "organization_uuid": "organization-uuid",
+  "local_auth_token": "airouter-oauth-local-token",
+  "request_auth_token_sha256s": [
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "description": "Claude OAuth account"
+}
+```
+
+字段说明：
+
+- 推荐通过 `npm run claude:login` 生成，不要手工复制真实 Claude OAuth token
+- 如果在远程服务器运行登录脚本、本地浏览器授权，浏览器跳到 `localhost` 回调失败时，可以把地址栏里的完整回调 URL 或 `/callback?...` 路径粘贴回脚本终端并回车
+- `access_token` 是 Airouter 转发到 Anthropic 时使用的真实 OAuth Bearer token
+- `refresh_token` 和 `expires_at` 由登录脚本保存，供后续 token 刷新能力复用
+- `local_auth_token` 是 Airouter 分配给 Claude Code 使用的本地 fake auth token；脚本会同步写入顶层 `apikeys`
+- 推荐共享登录态路径：服务端运行 `npm run claude:login` 生成 `local_auth_token` 后，在每台客户端运行 `npm run claude:install-login -- --token <local_auth_token> --base-url http://localhost:<port>`，把这枚本地 token 写入 Claude Code 本地凭证，并同步补齐 Claude 交互模式依赖的全局 onboarding 状态；安装前会自动备份原登录态，可用 `npm run claude:install-login -- --restore <backup-file>` 恢复
+- 也可以临时使用环境变量：`CLAUDE_CODE_OAUTH_TOKEN=<local_auth_token>`，并设置 `ANTHROPIC_BASE_URL=http://localhost:<port>`；但部分 Claude Code 交互式主请求可能优先读取本机登录态，因此共享登录态建议使用 `claude:install-login`
+- `request_auth_token_sha256s` 是可选入站鉴权哈希列表，仅用于兼容 Claude Code 交互式主请求从本机 Keychain 读取另一枚同登录态 OAuth token 的情况；共享登录态主路径不依赖它
+- 使用该模式时不要同时设置 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，否则 Claude Code 可能切回外部 API key/auth token 分支，或让旧的 OAuth 环境变量覆盖已安装的共享登录态
+- 请求中的 `local_auth_token` 命中该配置时，Airouter 只会替换为这一条配置里的真实 `access_token`
+- 顶层 `apikeys` 开启本地入口校验时，`/v1/messages` 还会接受已配置 `claude_token.access_token` 或命中 `request_auth_token_sha256s` 的入站 token，用于兼容 Claude Code 交互式主请求从 Keychain 读取真实 OAuth token 的情况；普通 `/v1/*` OpenAI 兼容入口不接受该扩展鉴权
+- `airouter-oauth-` 前缀的本地 fake token 专用于 Claude OAuth；如果配置中没有对应可用 `claude_token`，请求会失败，不会进入 OpenAI/GPT 兼容转换链路
+- `claude_token` 只参与 `/v1/messages` 原样转发，不参与 `/v1/responses`、Images 或 Codex backend-api 转换链路
 
 ## Claude Messages apikey 示例
 
@@ -157,7 +225,7 @@
 
 ## 安全说明
 
-- `access_token`、`apikey` 都属于敏感信息
+- `access_token`、`refresh_token`、`apikey` 都属于敏感信息
 - 顶层 `apikeys`、`auth_token` 也属于敏感信息
 - 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
 - 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效

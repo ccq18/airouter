@@ -74,8 +74,10 @@ function createManager(configs, overrides = {}) {
     initialActiveConfigIndex: overrides.initialActiveConfigIndex,
     quotaCheckPath: '/backend-api/wham/usage',
     quotaCheckTimeoutMs: overrides.quotaCheckTimeoutMs ?? 10 * 1000,
+    apiKeyRecoveryTimeoutMs: overrides.apiKeyRecoveryTimeoutMs,
+    tokenUnavailableCooldownMs: overrides.tokenUnavailableCooldownMs,
     quotaCheckIntervalMs: overrides.quotaCheckIntervalMs ?? 60 * 1000,
-    allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 10 * 60 * 1000,
+    allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 3 * 60 * 1000,
     allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
     minRemainingPercent: 3,
     buildAuthHeadersForConfig: config => ({
@@ -95,7 +97,7 @@ function createManager(configs, overrides = {}) {
     clearIntervalFn: overrides.clearIntervalFn,
     log: (...args) => logs.push(args.join(' ')),
     warn: (...args) => warnings.push(args.join(' ')),
-    now: () => 1713337200000,
+    now: overrides.now || (() => 1713337200000),
   });
 
   return { manager, logs, warnings };
@@ -114,6 +116,23 @@ test('createAccountManager honors the initial active config index', () => {
   const { manager } = createManager(configs, { initialActiveConfigIndex: 2 });
 
   assert.equal(manager.getActiveConfig(), configs[2]);
+});
+
+test('findConfig returns a matching config without switching the active account', () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }, {
+      type: 'claude_token',
+      access_token: 'claude-access-token',
+      local_auth_token: 'airouter-oauth-local-token',
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  const found = manager.findConfig(config => config.local_auth_token === 'airouter-oauth-local-token');
+
+  assert.equal(found, configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
 test('ensureActiveConfig keeps the current account when it is still available', () => {
@@ -292,6 +311,122 @@ test('ensureActiveConfig can prefer configs matching a route-specific predicate'
   assert.equal(manager.getActiveConfig(), configs[1]);
 });
 
+test('ensureActiveStaticConfig keeps OpenAI and Claude apikey focus separate', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-primary.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude-primary.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude-1',
+      support: ['claude'],
+    }),
+    createConfig(2, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-backup.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-2',
+      support: ['gpt'],
+    }),
+    createConfig(3, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude-backup.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude-2',
+      support: ['claude'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+  const isClaudeApiKey = config => config.type === 'apikey' && config.support.includes('claude');
+
+  const openAiPrimary = manager.ensureActiveStaticConfig('openai_apikey', 'openai_request', isGptApiKey);
+  const claudePrimary = manager.ensureActiveStaticConfig('claude_apikey', 'claude_request', isClaudeApiKey);
+
+  assert.equal(openAiPrimary, configs[0]);
+  assert.equal(claudePrimary, configs[1]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+  assert.equal(manager.getActiveStaticConfig('claude_apikey', isClaudeApiKey), configs[1]);
+
+  for (let index = 0; index < 3; index += 1) {
+    manager.recordApiKeyRequestResult(configs[1], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  const claudeBackup = manager.ensureActiveStaticConfig('claude_apikey', 'claude_direct_failover', isClaudeApiKey);
+
+  assert.equal(claudeBackup, configs[3]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
+test('activateStaticConfig changes only the selected apikey fallback pool', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://shared.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-shared',
+      support: ['gpt', 'claude'],
+    }),
+    createConfig(1, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai',
+      support: ['gpt'],
+    }),
+    createConfig(2, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+  const isClaudeApiKey = config => config.type === 'apikey' && config.support.includes('claude');
+
+  manager.ensureActiveStaticConfig('openai_apikey', 'startup', isGptApiKey);
+  manager.ensureActiveStaticConfig('claude_apikey', 'startup', isClaudeApiKey);
+  const selected = manager.activateStaticConfig('claude_apikey', 2, 'admin_manual_activate');
+
+  assert.equal(selected, configs[2]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+  assert.equal(manager.getActiveStaticConfig('claude_apikey', isClaudeApiKey), configs[2]);
+  assert.equal(manager.getActiveStaticConfigIndex('openai_apikey'), 0);
+  assert.equal(manager.getActiveStaticConfigIndex('claude_apikey'), 2);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
+test('activateStaticConfig rejects apikeys outside the selected fallback capability', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  assert.throws(() => {
+    manager.activateStaticConfig('openai_apikey', 0, 'admin_manual_activate');
+  }, /配置项不支持 OpenAI fallback/);
+});
+
 test('account manager does not expose internal helper methods', () => {
   const { manager } = createManager([createConfig(0)]);
 
@@ -430,6 +565,75 @@ test('acquireConfig can disable unavailable fallback for failover selection', ()
   assert.equal(lease, null);
 });
 
+test('acquireConfig skips a token that is still cooling down after a responses failure', () => {
+  let nowMs = 1713337200000;
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs, {
+    now: () => nowMs,
+    tokenUnavailableCooldownMs: 60 * 1000,
+  });
+
+  const selected = manager.markConfigUnavailable(configs[0], 'responses_usage_limit_reached', {
+    allowSwitch: false,
+    lastError: 'stream:usage_limit_reached',
+  });
+
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.unavailableUntil, 1713337260000);
+  assert.equal(manager.getAccountStatus(configs[0]).unavailableUntil, 1713337260000);
+
+  const coolingLease = manager.acquireConfig('proxy_request', () => true, {
+    sessionKey: 'cooldown-session',
+  });
+
+  assert.equal(coolingLease.config, configs[1]);
+  coolingLease.release();
+
+  nowMs = 1713337260000;
+  const retryLease = manager.acquireConfig('proxy_request', config => config.index === 0, {
+    sessionKey: 'cooldown-session',
+  });
+
+  assert.equal(retryLease.config, configs[0]);
+  assert.equal(retryLease.fallback, true);
+  retryLease.release();
+});
+
+test('applyQuotaPayload clears token cooldown when quota check recovers the account', () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'responses_usage_limit_reached',
+      unavailableUntil: 1713337260000,
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  manager.applyQuotaPayload(configs[0], {
+    plan_type: 'plus',
+    rate_limit: {
+      primary_window: {
+        used_percent: 5,
+        reset_at: 1713340000,
+      },
+      secondary_window: {
+        used_percent: 10,
+        reset_at: 1713940000,
+      },
+    },
+  }, {
+    allowSwitch: false,
+  });
+
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.unavailableUntil, null);
+});
+
 test('acquireConfig ignores apikey configs because concurrent dispatch is token-only', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
@@ -507,6 +711,7 @@ test('observeResponseModel records requested and upstream response models', () =
   manager.observeResponseModel(config, {
     responseModel: 'gpt-5.4-mini',
     statusCode: 200,
+    downgraded: true,
   });
   manager.observeResponseModel(config, {
     active: false,
@@ -517,6 +722,24 @@ test('observeResponseModel records requested and upstream response models', () =
     requestModel: 'gpt-5.5',
     responseModel: 'gpt-5.4-mini',
     active: false,
+    source: 'proxy_request',
+    statusCode: 200,
+    observedAt: 1713337200000,
+    lastSeenAt: 1713337200000,
+    downgraded: true,
+  });
+
+  manager.observeResponseModel(config, {
+    requestModel: 'gpt-5.5',
+    active: true,
+    source: 'proxy_request',
+  });
+
+  status = manager.getAccountStatus(config);
+  assert.deepEqual(status.responseModel, {
+    requestModel: 'gpt-5.5',
+    responseModel: null,
+    active: true,
     source: 'proxy_request',
     statusCode: 200,
     observedAt: 1713337200000,
@@ -576,6 +799,46 @@ test('getAccountStatus returns the view model used by callers', () => {
   assert.equal(status.dispatchSession, null);
   assert.equal(status.responseModel, null);
   assert.equal(status.summaryLine, `${status.label} | ${status.runtimeSummary}`);
+});
+
+test('getAccountStatus exposes token quota failure and apikey request window summaries', () => {
+  const tokenConfig = createConfig(0, {
+    quotaCheckFailures: 2,
+  });
+  const apiKeyConfig = createConfig(1, {
+    reason: 'apikey',
+    apiKeyRequestResults: [
+      { ok: false, at: 1713337200000, reason: 'apikey_rate_limited', lastError: 'http:429' },
+      { ok: true, at: 1713337200000 },
+    ],
+  }, {
+    type: 'apikey',
+    baseUrl: 'https://api.example.com/v1',
+    apiBasePath: '',
+    apiKey: 'sk-1',
+    support: ['gpt'],
+  });
+  const { manager } = createManager([tokenConfig, apiKeyConfig]);
+
+  assert.equal(manager.getAccountStatus(tokenConfig).quotaCheckFailures, 2);
+  assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRequestWindow, {
+    failureCount: 1,
+    sampleSize: 2,
+    failureThreshold: 3,
+    windowSize: 10,
+    sampleTtlMs: 30 * 60 * 1000,
+  });
+  assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRecovery, {
+    enabled: true,
+    pending: false,
+    intervalMs: 3 * 60 * 1000,
+    lastCheckedAt: null,
+    result: 'never',
+    statusCode: null,
+    reason: null,
+    lastError: null,
+    model: 'gpt-5.4-mini',
+  });
 });
 
 test('ensureActiveConfig keeps the current account when no account is marked available', () => {
@@ -707,7 +970,7 @@ test('applyQuotaPayload keeps the account available when weekly quota remains ab
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
-test('applyQuotaPayload marks the account unavailable when weekly quota is not above 1%', () => {
+test('applyQuotaPayload keeps the account available when weekly quota is not above 1%', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -723,16 +986,16 @@ test('applyQuotaPayload marks the account unavailable when weekly quota is not a
     },
   });
 
-  assert.equal(selected, configs[1]);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'secondary_remaining_not_above_1%');
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.remainingPercent, 50);
   assert.equal(configs[0].runtime.primaryRemainingPercent, 50);
   assert.equal(configs[0].runtime.secondaryRemainingPercent, 1);
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
-test('applyQuotaPayload marks an explicit free plan as membership expired', () => {
+test('applyQuotaPayload keeps the account available when membership fields look expired', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -741,6 +1004,7 @@ test('applyQuotaPayload marks an explicit free plan as membership expired', () =
 
   const selected = manager.applyQuotaPayload(configs[0], {
     plan_type: 'free',
+    subscription: { active: false, status: 'expired' },
     rate_limit: {
       allowed: true,
       limit_reached: false,
@@ -749,15 +1013,15 @@ test('applyQuotaPayload marks an explicit free plan as membership expired', () =
     },
   });
 
-  assert.equal(selected, configs[1]);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'membership_expired');
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.primaryRemainingPercent, 97);
   assert.equal(configs[0].runtime.secondaryRemainingPercent, 90);
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
-test('applyQuotaPayload marks missing weekly quota on a token account as membership expired', () => {
+test('applyQuotaPayload keeps a token account available when weekly quota is missing but primary quota remains', () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -772,14 +1036,14 @@ test('applyQuotaPayload marks missing weekly quota on a token account as members
     },
   });
 
-  assert.equal(selected, configs[1]);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'membership_expired');
+  assert.equal(selected, configs[0]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.remainingPercent, 97);
   assert.equal(configs[0].runtime.primaryRemainingPercent, 97);
   assert.equal(configs[0].runtime.secondaryRemainingPercent, null);
   assert.equal(configs[0].runtime.secondaryResetAt, null);
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
 test('applyQuotaPayload switches away from the active account when it becomes unavailable', () => {
@@ -841,6 +1105,176 @@ test('markConfigUnavailable keeps the current account when no alternative is ava
   assert.equal(configs[0].runtime.lastError, 'insufficient_quota');
   assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
   assert.match(warnings[0], /没有可用账号，继续使用当前账号 #1 account-1 \(responses_failover\)/);
+});
+
+test('recordApiKeyRequestResult marks apikey unavailable when recent failures reach three in a ten-request window', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager, warnings } = createManager(configs);
+
+  for (let index = 0; index < 2; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+  for (let index = 0; index < 6; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: true,
+    });
+  }
+
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+  assert.equal(manager.getActiveConfig(), configs[0]);
+
+  const result = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_rate_limited',
+    lastError: 'http:429',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(result.unavailable, true);
+  assert.equal(result.failureCount, 3);
+  assert.equal(result.sampleSize, 9);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'apikey_rate_limited');
+  assert.equal(configs[0].runtime.lastError, 'http:429');
+  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(apikey_upstream_failover\)/.test(line)), true);
+});
+
+test('recordApiKeyRequestResult marks apikey unavailable after three consecutive failed requests even before the window is full', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_upstream_5xx',
+    lastError: 'http:500',
+    switchReason: 'apikey_upstream_failover',
+  });
+  manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_upstream_5xx',
+    lastError: 'http:500',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+
+  const result = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_upstream_5xx',
+    lastError: 'http:500',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(result.unavailable, true);
+  assert.equal(result.failureCount, 3);
+  assert.equal(result.sampleSize, 3);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'apikey_upstream_5xx');
+  assert.equal(manager.getActiveConfig(), configs[1]);
+});
+
+test('recordApiKeyRequestResult only counts failures in the latest ten apikey requests', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  for (let index = 0; index < 2; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+  for (let index = 0; index < 9; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: true,
+    });
+  }
+
+  const result = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_rate_limited',
+    lastError: 'http:429',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(result.unavailable, false);
+  assert.equal(result.failureCount, 1);
+  assert.equal(result.sampleSize, 10);
+  assert.equal(configs[0].runtime.available, true);
+});
+
+test('recordApiKeyRequestResult expires old apikey failures outside the TTL window', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  let currentTime = 1713337200000;
+  const { manager } = createManager(configs, {
+    now: () => currentTime,
+  });
+
+  for (let index = 0; index < 2; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  currentTime += 31 * 60 * 1000;
+  const result = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_rate_limited',
+    lastError: 'http:429',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(result.unavailable, false);
+  assert.equal(result.failureCount, 1);
+  assert.equal(result.sampleSize, 1);
+  assert.equal(configs[0].runtime.available, true);
 });
 
 test('activateConfig restores an unavailable apikey config before switching to it', () => {
@@ -906,7 +1340,57 @@ test('refreshQuotas refreshes every token account during a minute poll', async (
   assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
 });
 
-test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls', async () => {
+test('refreshQuotas marks token unavailable only after three consecutive quota check failures', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  let callCount = 0;
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => {
+      callCount += 1;
+      if (callCount <= 3) {
+        throw new Error('temporary network failure');
+      }
+
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 20, reset_at: 1713350000 },
+            secondary_window: { used_percent: 30, reset_at: 1713360000 },
+          },
+        }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('poll', { refreshAll: false });
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
+
+  await manager.refreshQuotas('poll', { refreshAll: false });
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 2);
+
+  await manager.refreshQuotas('poll', { refreshAll: false });
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'quota_check_failed');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 3);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+
+  manager.activateConfig(0, 'admin_manual_activate');
+  await manager.refreshQuotas('poll', { refreshAll: false });
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 0);
+});
+
+test('startQuotaMonitor schedules minute and three-minute spaced all-account polls', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -952,7 +1436,7 @@ test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls
   const { manager } = createManager(configs, {
     requestBufferedFn: quotaResponses.requestBuffered,
     quotaCheckIntervalMs: 60 * 1000,
-    allQuotaCheckIntervalMs: 10 * 60 * 1000,
+    allQuotaCheckIntervalMs: 3 * 60 * 1000,
     allQuotaCheckDelayMs: 1000,
     sleepFn: async ms => {
       delayCalls.push(ms);
@@ -969,7 +1453,7 @@ test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls
 
   manager.startQuotaMonitor();
 
-  assert.deepEqual(intervalMs, [60 * 1000, 10 * 60 * 1000]);
+  assert.deepEqual(intervalMs, [60 * 1000, 3 * 60 * 1000]);
 
   intervalCallbacks[0]();
   await flushAsyncWork();
@@ -992,6 +1476,164 @@ test('startQuotaMonitor schedules minute and ten-minute spaced all-account polls
   manager.stopQuotaMonitor();
 
   assert.deepEqual(clearedTimers, ['timer-1', 'timer-2']);
+});
+
+test('startQuotaMonitor schedules three-minute apikey recovery when no token configs exist', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+  ];
+  const intervalCallbacks = [];
+  const intervalMs = [];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ id: 'resp_1' }),
+      };
+    },
+    setIntervalFn: (callback, ms) => {
+      intervalCallbacks.push(callback);
+      intervalMs.push(ms);
+      return `timer-${intervalCallbacks.length}`;
+    },
+  });
+
+  manager.startQuotaMonitor();
+
+  assert.deepEqual(intervalMs, [60 * 1000, 3 * 60 * 1000]);
+
+  intervalCallbacks[0]();
+  await flushAsyncWork();
+
+  assert.equal(calls.length, 0);
+  assert.equal(configs[0].runtime.available, false);
+
+  intervalCallbacks[1]();
+  await flushAsyncWork();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].targetUrl, 'https://recover.example.com/v1/responses');
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+});
+
+test('refreshQuotas uses configured apikey health model during GPT recovery probes', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+      health: {
+        model: 'gpt-4.1-mini',
+      },
+    }),
+  ];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ id: 'resp_1' }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].body.toString('utf8')), {
+    model: 'gpt-4.1-mini',
+    input: 'hello',
+    stream: false,
+  });
+  assert.equal(configs[0].runtime.available, true);
+});
+
+test('refreshQuotas gives apikey recovery probes an AI request timeout', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+  ];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    quotaCheckTimeoutMs: 10 * 1000,
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ id: 'resp_1' }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].timeoutMs, 10 * 60 * 1000);
+});
+
+test('refreshQuotas treats non-200 apikey recovery statuses as failed', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => ({
+      statusCode: 201,
+      bodyText: JSON.stringify({ id: 'resp_created' }),
+    }),
+  });
+
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'apikey_upstream_error');
+  assert.equal(configs[0].runtime.lastError, 'http:201');
+  assert.deepEqual(configs[0].runtime.apiKeyRecovery, {
+    lastCheckedAt: 1713337200000,
+    result: 'failed',
+    statusCode: 201,
+    reason: 'apikey_upstream_error',
+    lastError: 'http:201',
+    model: 'gpt-5.4-mini',
+  });
 });
 
 test('refreshQuotas switches to the next available account when the polled account becomes unavailable', async () => {
@@ -1073,15 +1715,16 @@ test('refreshQuotas refreshes and can recover non-active accounts during a minut
     calls.map(call => call.headers['chatgpt-account-id']),
     ['account-0', 'account-1'],
   );
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'quota_check_failed');
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
   assert.equal(configs[1].runtime.available, true);
   assert.equal(configs[1].runtime.reason, 'ok');
-  assert.equal(manager.getActiveConfig(), configs[1]);
-  assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(quota_check_failed: network down\)/.test(line)), true);
+  assert.equal(manager.getActiveConfig(), configs[0]);
+  assert.equal(warnings.some(line => /账号不可用: #1 account-1 \(quota_check_failed: network down\)/.test(line)), false);
   assert.equal(warnings.some(line => /账号恢复可用: #2 account-2/.test(line)), true);
-  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), true);
-  assert.match(logs[0], /轮询额度: #2 account-2 \| 可用=是/);
+  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(poll\)/.test(line)), false);
+  assert.match(logs[0], /轮询额度: #1 account-1 \| 可用=是/);
 });
 
 test('refreshQuotas refreshes an expired token with refresh_token and retries quota check', async () => {
@@ -1207,6 +1850,41 @@ test('refreshQuotas refreshes token on quota check 401 even when payload is not 
   assert.equal(configs[0].runtime.remainingPercent, 85);
 });
 
+test('refreshQuotas marks token unavailable immediately when refresh_token fails', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      access_token: 'expired-access-token',
+      refresh_token: 'expired-refresh-token',
+    }),
+    createConfig(1, { available: true, reason: 'ok' }, {
+      access_token: 'backup-access-token',
+      account_id: 'backup-account',
+    }),
+  ];
+  let refreshCalled = false;
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => ({
+      statusCode: 401,
+      bodyText: JSON.stringify({
+        detail: 'Unauthorized',
+      }),
+    }),
+    refreshTokenFn: async () => {
+      refreshCalled = true;
+      throw new Error('OpenAI token refresh failed: invalid_grant: refresh token expired');
+    },
+  });
+
+  await manager.refreshQuotas('poll', { refreshAll: false });
+
+  assert.equal(refreshCalled, true);
+  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.reason, 'token_refresh_failed');
+  assert.equal(configs[0].runtime.lastError, 'OpenAI token refresh failed: invalid_grant: refresh token expired');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 3);
+  assert.equal(manager.getActiveConfig(), configs[1]);
+});
+
 test('refreshQuotas keeps missing_credentials when refresh_token is unavailable', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
@@ -1230,6 +1908,65 @@ test('refreshQuotas keeps missing_credentials when refresh_token is unavailable'
   assert.equal(refreshCalled, false);
   assert.equal(configs[0].runtime.available, false);
   assert.equal(configs[0].runtime.reason, 'missing_credentials');
+});
+
+test('all-account polls probe only the active GPT apikey fallback focus', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-primary.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: false, reason: 'apikey_rate_limited' }, {
+      type: 'apikey',
+      baseUrl: 'https://openai-backup.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-openai-2',
+      support: ['gpt'],
+    }),
+    createConfig(2, { available: false, reason: 'apikey_rate_limited' }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const calls = [];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({ id: 'response-ok' }),
+      };
+    },
+  });
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+
+  assert.equal(manager.ensureActiveStaticConfig('openai_apikey', 'startup', isGptApiKey), configs[0]);
+  await manager.refreshQuotas('all_poll');
+  assert.equal(calls.length, 0);
+
+  for (let index = 0; index < 3; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  assert.equal(manager.ensureActiveStaticConfig('openai_apikey', 'openai_failover', isGptApiKey), configs[0]);
+  await manager.refreshQuotas('all_poll');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].targetUrl, 'https://openai-primary.example.com/v1/responses');
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[1].runtime.available, false);
+  assert.equal(configs[2].runtime.available, false);
 });
 
 test('refreshQuotas still checks all accounts during startup', async () => {
@@ -1344,6 +2081,107 @@ test('refreshQuotas skips apikey configs during poll', async () => {
   assert.equal(configs[0].runtime.available, true);
   assert.equal(configs[0].runtime.reason, 'apikey');
   assert.equal(configs[0].runtime.lastCheckedAt, null);
+});
+
+test('refreshQuotas recovers only the active unavailable GPT apikey focus during an all-account poll', async () => {
+  const configs = [
+    createConfig(0, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://recover.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-recover',
+      support: ['gpt'],
+    }),
+    createConfig(1, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://other.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-other',
+      support: ['gpt'],
+    }),
+    createConfig(2, {
+      available: false,
+      reason: 'apikey_auth_failed',
+      lastError: 'http:401',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://blocked.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-blocked',
+      support: ['gpt'],
+    }),
+    createConfig(3, {
+      available: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+    }, {
+      type: 'apikey',
+      baseUrl: 'https://claude.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-claude',
+      support: ['claude'],
+    }),
+  ];
+  const calls = [];
+  const { manager, warnings } = createManager(configs, {
+    requestBufferedFn: async requestOptions => {
+      calls.push(requestOptions);
+      return {
+        statusCode: calls.length === 1 ? 200 : 429,
+        bodyText: JSON.stringify({ id: 'resp_1', output_text: 'hello' }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('all_poll');
+
+  assert.deepEqual(
+    calls.map(call => call.targetUrl),
+    [
+      'https://recover.example.com/v1/responses',
+    ],
+  );
+  assert.deepEqual(
+    calls.map(call => call.headers.authorization),
+    ['Bearer sk-recover'],
+  );
+  assert.deepEqual(
+    calls.map(call => JSON.parse(call.body.toString('utf8'))),
+    [
+      { model: 'gpt-5.4-mini', input: 'hello', stream: false },
+    ],
+  );
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+  assert.equal(configs[0].runtime.lastError, null);
+  assert.equal(configs[0].runtime.lastCheckedAt, 1713337200000);
+  assert.deepEqual(manager.getAccountStatus(configs[0]).apiKeyRecovery, {
+    enabled: true,
+    pending: false,
+    intervalMs: 3 * 60 * 1000,
+    lastCheckedAt: 1713337200000,
+    result: 'success',
+    statusCode: 200,
+    reason: 'apikey',
+    lastError: null,
+    model: 'gpt-5.4-mini',
+  });
+  assert.equal(configs[1].runtime.available, false);
+  assert.equal(configs[1].runtime.lastCheckedAt, null);
+  assert.equal(configs[2].runtime.available, false);
+  assert.equal(configs[2].runtime.lastCheckedAt, null);
+  assert.equal(configs[3].runtime.available, false);
+  assert.equal(configs[3].runtime.lastCheckedAt, null);
+  assert.equal(manager.getAccountStatus(configs[3]).apiKeyRecovery.enabled, false);
+  assert.equal(warnings.some(line => /API Key 恢复可用: #1 account-1/.test(line)), true);
 });
 
 test('ensureActiveConfig keeps an earlier apikey ahead of a later token config', () => {
@@ -1551,8 +2389,9 @@ test('refreshQuotas releases the monitor lock after a quota timeout', async () =
 
   await manager.refreshQuotas('poll');
 
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'quota_check_failed');
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'ok');
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
   assert.match(configs[0].runtime.lastError, /quota check timeout after 30ms/);
   assert.equal(calls[0].timeoutMs, 30);
 
@@ -1562,4 +2401,5 @@ test('refreshQuotas releases the monitor lock after a quota timeout', async () =
   assert.equal(calls.length, 2);
   assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.quotaCheckFailures, 0);
 });

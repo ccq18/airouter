@@ -37,6 +37,20 @@ function createTokenConfig(index, runtimeOverrides = {}, overrides = {}) {
     };
 }
 
+function createApiKeyConfig(index, runtimeOverrides = {}, overrides = {}) {
+    return {
+        type: 'apikey',
+        index,
+        description: `apikey-${index + 1}`,
+        baseUrl: 'https://api.example.com/v1',
+        apiBasePath: '',
+        apiKey: `sk-${index}`,
+        support: ['gpt'],
+        runtime: createRuntime(runtimeOverrides),
+        ...overrides,
+    };
+}
+
 test('getRuntimeConfigIdentity includes the token credentials for token configs', () => {
     const config = createTokenConfig(0);
 
@@ -103,6 +117,35 @@ test('reconcileRuntimeConfigs does not carry active request runtime across reloa
         responseModel: 'gpt-5.4-mini',
         active: false,
     });
+});
+
+test('reconcileRuntimeConfigs preserves apikey request window without sharing the array reference', () => {
+    const previousConfigs = [
+        createApiKeyConfig(0, {
+            reason: 'apikey',
+            apiKeyRequestResults: [
+                { ok: false, at: 1713337200000, reason: 'apikey_rate_limited', lastError: 'http:429' },
+                { ok: true, at: 1713337210000, reason: null, lastError: null },
+                false,
+            ],
+        }),
+    ];
+    const nextConfigs = [
+        createApiKeyConfig(0),
+    ];
+
+    reconcileRuntimeConfigs(previousConfigs, nextConfigs, {
+        previousActiveConfig: previousConfigs[0],
+        previousActiveIndex: 0,
+    });
+
+    assert.deepEqual(nextConfigs[0].runtime.apiKeyRequestResults, [
+        { ok: false, at: 1713337200000, reason: 'apikey_rate_limited', lastError: 'http:429' },
+        { ok: true, at: 1713337210000, reason: null, lastError: null },
+        false,
+    ]);
+    assert.notEqual(nextConfigs[0].runtime.apiKeyRequestResults, previousConfigs[0].runtime.apiKeyRequestResults);
+    assert.notEqual(nextConfigs[0].runtime.apiKeyRequestResults[0], previousConfigs[0].runtime.apiKeyRequestResults[0]);
 });
 
 test('reconcileRuntimeConfigs prefers runtime overrides for newly added configs', () => {

@@ -32,6 +32,10 @@
 
     * { box-sizing: border-box; }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       margin: 0;
       min-height: 100vh;
@@ -43,10 +47,32 @@
     }
 
     .page {
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 28px 24px 48px;
+      display: grid;
+      grid-template-columns: 248px minmax(0, 1fr);
+      min-height: 100vh;
+      margin: 0;
       overflow-x: hidden;
+    }
+
+    .admin-sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 22px 16px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.92);
+      overflow-y: auto;
+    }
+
+    .sidebar-brand {
+      margin-bottom: 16px;
+      padding: 0 8px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .admin-workspace {
+      min-width: 0;
+      padding: 24px;
     }
 
     .mono {
@@ -59,7 +85,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 18px;
-      margin-bottom: 16px;
+      margin-bottom: 18px;
     }
 
     .page-title {
@@ -86,6 +112,36 @@
       max-width: 100%;
     }
 
+    .admin-nav {
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      padding: 0;
+    }
+
+    .admin-nav a {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .admin-nav a.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .admin-page[hidden] {
+      display: none;
+    }
+
     .panel,
     .table-wrap {
       background: var(--surface);
@@ -108,6 +164,19 @@
       min-width: 0;
     }
 
+    .section-stack {
+      display: grid;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+
     .panel {
       padding: 18px;
     }
@@ -123,6 +192,10 @@
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 14px;
+    }
+
+    .panel-head.compact {
+      margin-top: 18px;
     }
 
     .panel-title {
@@ -144,6 +217,73 @@
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 10px;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .metric-card {
+      min-height: 104px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 10px 28px rgba(22, 33, 43, 0.05);
+    }
+
+    .metric-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .metric-value {
+      margin-top: 12px;
+      font-size: 24px;
+      line-height: 1.1;
+      font-weight: 900;
+    }
+
+    .metric-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .batch-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 0 0 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-muted);
+    }
+
+    .batch-toolbar-left,
+    .batch-toolbar-right {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .batch-toolbar .count {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
     }
 
     .runtime-sync {
@@ -224,6 +364,124 @@
       color: var(--danger);
     }
 
+    .update-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(22, 33, 43, 0.32);
+    }
+
+    .update-dialog {
+      width: min(620px, 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .update-dialog-head,
+    .update-dialog-actions,
+    .update-progress-line {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .update-dialog h2 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    .update-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 0;
+    }
+
+    .update-meta div,
+    .update-notes,
+    .update-progress-panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px;
+      background: var(--surface-muted);
+    }
+
+    .update-meta dt {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .update-meta dd {
+      margin: 5px 0 0;
+      font-size: 14px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .update-notes {
+      max-height: 220px;
+      margin-top: 12px;
+      overflow: auto;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+    }
+
+    .update-progress-panel {
+      margin-top: 12px;
+    }
+
+    .update-progress-line {
+      align-items: center;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .update-progress-track {
+      height: 8px;
+      margin-top: 10px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--surface-strong);
+    }
+
+    .update-progress-fill {
+      display: block;
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--active);
+      transition: width 160ms ease;
+    }
+
+    .update-progress-track.indeterminate .update-progress-fill {
+      width: 42%;
+      animation: update-slide 1.2s ease-in-out infinite;
+    }
+
+    .update-dialog-actions {
+      align-items: center;
+      justify-content: flex-end;
+      margin-top: 14px;
+    }
+
+    @keyframes update-slide {
+      0% { transform: translateX(-110%); }
+      55%, 100% { transform: translateX(240%); }
+    }
+
     input,
     textarea {
       width: 100%;
@@ -267,8 +525,8 @@
     button {
       appearance: none;
       border: none;
-      border-radius: 999px;
-      padding: 11px 16px;
+      border-radius: 8px;
+      padding: 10px 14px;
       font: inherit;
       font-weight: 700;
       cursor: pointer;
@@ -384,6 +642,116 @@
       color: var(--muted);
       font-size: 12px;
       line-height: 1.5;
+    }
+
+    .route-lanes {
+      display: grid;
+      gap: 12px;
+    }
+
+    .route-lane {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.78fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: stretch;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-muted);
+    }
+
+    .route-lane-head {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .route-lane-title {
+      font-weight: 900;
+      line-height: 1.25;
+    }
+
+    .route-lane-endpoint {
+      color: var(--accent);
+      word-break: break-all;
+    }
+
+    .route-lane-note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .route-slot {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .route-slot-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .route-slot-items {
+      display: grid;
+      gap: 6px;
+    }
+
+    .route-chip {
+      display: grid;
+      gap: 4px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: var(--surface-muted);
+      border: 1px solid var(--line);
+    }
+
+    .route-chip-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .route-chip-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .role-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--surface-strong);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .role-badge.primary {
+      background: var(--active-soft);
+      color: var(--active);
+    }
+
+    .role-badge.fallback {
+      background: var(--warning-soft);
+      color: var(--warning);
     }
 
     .mode-switch {
@@ -503,6 +871,12 @@
       white-space: nowrap;
     }
 
+    .selection-col {
+      width: 56px;
+      min-width: 56px;
+      text-align: center;
+    }
+
     tbody td {
       padding: 16px;
       border-bottom: 1px solid var(--line);
@@ -513,6 +887,16 @@
 
     tbody tr:last-child td {
       border-bottom: none;
+    }
+
+    .group-row td {
+      padding: 9px 16px;
+      background: var(--surface-strong);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
     }
 
     .config-col,
@@ -626,6 +1010,12 @@
       font-weight: 700;
     }
 
+    .dispatch-session.danger {
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-weight: 700;
+    }
+
     .dispatch-session .session-value {
       color: inherit;
       font-weight: 800;
@@ -637,16 +1027,165 @@
     }
 
     .action-cell {
-      width: 280px;
-      white-space: nowrap;
+      width: 360px;
+      min-width: 360px;
+      white-space: normal;
+    }
+
+    .action-stack {
+      display: grid;
+      gap: 6px;
+    }
+
+    .action-row {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 6px;
     }
 
     .action-cell button {
-      padding: 8px 12px;
+      padding: 8px 10px;
     }
 
     .action-cell button + button {
-      margin-left: 6px;
+      margin-left: 0;
+    }
+
+    .selection-cell {
+      text-align: center;
+      vertical-align: middle;
+      width: 56px;
+    }
+
+    .selection-cell input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+    }
+
+    .config-group-list,
+    .config-card-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .config-group {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-muted);
+    }
+
+    .config-group-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .config-card {
+      display: grid;
+      grid-template-columns: minmax(160px, 0.72fr) minmax(180px, 1fr) minmax(260px, 1.35fr) minmax(250px, auto);
+      gap: 14px;
+      align-items: start;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .config-card.with-selection {
+      grid-template-columns: 28px minmax(160px, 0.72fr) minmax(180px, 1fr) minmax(260px, 1.35fr) minmax(250px, auto);
+    }
+
+    .config-card-select {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding-top: 4px;
+    }
+
+    .config-card-main {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .config-card-title {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      font-weight: 900;
+      line-height: 1.35;
+    }
+
+    .config-card-meta,
+    .config-card-field {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .config-card-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .config-card-value {
+      font-size: 13px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .config-card-summary {
+      min-width: 0;
+    }
+
+    .config-card-actions {
+      display: grid;
+      gap: 8px;
+      justify-items: end;
+      min-width: 0;
+    }
+
+    .config-card-actions .action-row {
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .config-card-actions button {
+      padding: 8px 10px;
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .selection-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--surface-strong);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .selection-chip.active {
+      background: var(--active-soft);
+      color: var(--active);
+    }
+
+    .disabled-configs {
+      margin-top: 18px;
     }
 
     .empty {
@@ -659,6 +1198,21 @@
     }
 
     @media (max-width: 980px) {
+      .page {
+        display: block;
+      }
+
+      .admin-sidebar {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .admin-workspace {
+        padding: 18px;
+      }
+
       .topbar,
       .panel-head {
         align-items: stretch;
@@ -670,6 +1224,11 @@
       }
 
       .console-grid,
+      .settings-grid,
+      .metrics-grid,
+      .config-card,
+      .config-card.with-selection,
+      .route-lane,
       .form-grid,
       .port-grid,
       .mode-switch {
@@ -678,7 +1237,8 @@
     }
 
     @media (max-width: 520px) {
-      .page {
+      .admin-sidebar,
+      .admin-workspace {
         padding: 18px 12px 36px;
       }
 
@@ -703,9 +1263,14 @@
       .toolbar button,
       .panel-tools button,
       .key-toolbar button,
-      .actions button {
+      .actions button,
+      .config-card-actions button {
         min-width: 0;
         width: 100%;
+      }
+
+      .config-card-actions {
+        justify-items: stretch;
       }
     }
 
@@ -713,54 +1278,121 @@
 </head>
   <body>
   <main class="page">
-    <header class="topbar">
-      <div>
+    <aside class="admin-sidebar">
+      <div class="sidebar-brand">
         <h1 class="page-title">Airouter 管理控制台</h1>
-        <p class="page-subtitle">管理入口 apikey、上游账号和当前运行态。</p>
+        <p class="page-subtitle">token 默认主链路，apikey 仅兜底。按页面管理对应配置。</p>
       </div>
-      <div class="toolbar">
-        <button class="secondary" type="button" id="refreshButton">刷新</button>
-        <button class="secondary" type="button" id="testResponseButton">测试请求</button>
-      </div>
-    </header>
+
+      <nav class="admin-nav" aria-label="管理页面">
+        <a href="/admin/configs/upstreams" data-page-link="upstreams">上游配置</a>
+        <a href="/admin/configs/openai" data-page-link="openai">OpenAI token</a>
+        <a href="/admin/configs/claude" data-page-link="claude">Claude token</a>
+        <a href="/admin/configs/fallbacks" data-page-link="fallbacks">Fallback apikey</a>
+        <a href="/admin/configs/settings" data-page-link="settings">系统设置</a>
+      </nav>
+    </aside>
+
+    <section class="admin-workspace">
+      <header class="topbar">
+        <div>
+          <h1 class="page-title" id="currentPageTitle">上游配置</h1>
+          <p class="page-subtitle" id="currentPageSubtitle">默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。</p>
+        </div>
+        <div class="toolbar">
+          <button class="secondary" type="button" id="desktopUpdateButton" hidden>检查更新</button>
+          <button class="secondary" type="button" id="refreshButton">刷新</button>
+          <button class="secondary" type="button" id="testResponseButton">测试请求</button>
+        </div>
+      </header>
 
     <div id="message" class="message" role="status" aria-live="polite"></div>
+    <div class="update-modal" id="desktopUpdateDialog" role="dialog" aria-modal="true" aria-labelledby="desktopUpdateTitle" hidden>
+      <section class="update-dialog">
+        <div class="update-dialog-head">
+          <div>
+            <p class="panel-note">应用更新</p>
+            <h2 id="desktopUpdateTitle">发现新版本</h2>
+            <p class="panel-note">确认后会下载并安装更新，完成后自动重启 Airouter。</p>
+          </div>
+          <button class="secondary" id="desktopUpdateCloseButton" type="button">关闭</button>
+        </div>
+        <dl class="update-meta">
+          <div>
+            <dt>版本</dt>
+            <dd id="desktopUpdateVersionText">-</dd>
+          </div>
+          <div id="desktopUpdateDateRow" hidden>
+            <dt>发布日期</dt>
+            <dd id="desktopUpdateDateText">-</dd>
+          </div>
+        </dl>
+        <div class="update-notes" id="desktopUpdateNotes">暂无更新说明。</div>
+        <div class="update-progress-panel" id="desktopUpdateProgressPanel" hidden>
+          <div class="update-progress-line">
+            <span id="desktopUpdateProgressMessage">准备下载更新</span>
+            <strong id="desktopUpdateProgressPercent"></strong>
+          </div>
+          <div class="update-progress-track" id="desktopUpdateProgressTrack" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100">
+            <span class="update-progress-fill" id="desktopUpdateProgressFill"></span>
+          </div>
+        </div>
+        <div class="update-dialog-actions">
+          <button class="secondary" id="desktopUpdateLaterButton" type="button">稍后</button>
+          <button class="primary" id="desktopUpdateInstallButton" type="button">安装更新</button>
+        </div>
+      </section>
+    </div>
 
-    <section class="panel list-panel">
+    <section class="admin-page" data-page="upstreams">
+      <div id="upstreamMetrics" class="metrics-grid"></div>
+      <div class="panel list-panel">
       <div class="panel-head">
         <div>
           <h2 class="panel-title">上游配置</h2>
-          <p class="panel-note">查看运行态、手动切换当前配置，或删除不再使用的上游。</p>
+          <p class="panel-note">按 OpenAI token、Claude token、Fallback apikey 分组展示；组内顺序就是调度优先级。</p>
         </div>
         <div class="panel-tools">
           <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
         </div>
       </div>
+      <div id="batchToolbar" class="batch-toolbar">
+        <div class="batch-toolbar-left">
+          <span id="batchSelectionSummary" class="count">已选择 0 项</span>
+          <button class="secondary" type="button" id="batchSelectProblemConfigsButton" data-action="batch-select-problem-configs">选择异常配置</button>
+        </div>
+        <div class="batch-toolbar-right">
+          <button class="secondary" type="button" id="batchEnableSelectedButton" data-action="batch-enable-selected" disabled>批量启用所选</button>
+          <button class="secondary" type="button" id="batchDisableSelectedButton" data-action="batch-disable-selected" disabled>批量停用所选</button>
+          <button class="danger" type="button" id="batchDeleteSelectedButton" data-action="batch-delete-selected" disabled>批量删除所选</button>
+        </div>
+      </div>
       <section id="cards"></section>
+      </div>
     </section>
 
-    <section class="console-grid">
+    <section class="section-stack admin-page" data-page="openai">
       <div class="panel">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">新增配置项</h2>
-            <p class="panel-note">Token 适合 ChatGPT Codex 登录态；API Key 适合兼容上游或 Claude Messages。</p>
+            <h2 class="panel-title">新增 OpenAI token</h2>
+            <p class="panel-note">OpenAI token 默认参与 Responses / Codex 兼容主链路；列表顺序影响调度优先级。</p>
           </div>
         </div>
 
-        <div class="mode-switch" role="radiogroup" aria-label="配置模式">
+        <div class="mode-switch" role="radiogroup" aria-label="配置模式" hidden>
           <label class="mode-option">
             <input type="radio" name="configMode" value="token" checked>
             <span>
-              <span class="mode-name">Token 模式</span>
+              <span class="mode-name">OpenAI token</span>
               <span class="mode-note">粘贴 ChatGPT AuthSession JSON，适合 Codex 登录态账号。</span>
             </span>
           </label>
           <label class="mode-option">
             <input type="radio" name="configMode" value="apikey">
             <span>
-              <span class="mode-name">API Key 模式</span>
-              <span class="mode-note">填写第三方上游地址和 API Key，再选择 GPT 或 Claude。</span>
+              <span class="mode-name">Fallback apikey</span>
+              <span class="mode-note">填写第三方上游地址和 API Key，作为 token 不可用后的兜底。</span>
             </span>
           </label>
         </div>
@@ -805,69 +1437,123 @@
                   <span>Claude</span>
                 </label>
               </div>
-              <p class="field-hint">GPT 用于 OpenAI 兼容 `/v1/*`；Claude 用于原样转发 `/v1/messages`。</p>
+              <p class="field-hint">GPT 用于 OpenAI 兼容 `/v1/*`，也可作为 `/v1/messages` 转换上游；Claude 用于原样转发 `/v1/messages`。</p>
             </div>
           </div>
         </div>
 
         <div class="actions">
-          <button class="primary" type="button" id="addButton">新增配置项</button>
+          <button class="primary" type="button" id="addButton">新增 OpenAI token</button>
         </div>
       </div>
 
-      <div class="side-stack">
-        <aside class="panel">
-          <div class="panel-head">
-            <div>
-              <h2 class="panel-title">访问控制</h2>
-              <p class="panel-note">入口 apikey 为空时，请求不会校验 apikey。</p>
-            </div>
-            <div class="panel-tools">
-              <span id="apiKeyStatusBadge" class="badge note">未读取</span>
-            </div>
+      <div class="panel list-panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">当前 OpenAI token 配置</h2>
+            <p class="panel-note">token 默认启用，不需要手动切换；使用排序按钮调整组内优先级。</p>
           </div>
-          <div class="key-toolbar">
-            <button class="primary" type="button" id="addApiKeyButton">新增随机 apikey</button>
-          </div>
-          <div id="apiKeysList" class="key-list"></div>
-        </aside>
-
-        <aside class="panel" id="proxySettingsPanel">
-          <div class="panel-head">
-            <div>
-              <h2 class="panel-title">代理入口</h2>
-              <p class="panel-note">配置本地服务端口和访问上游时使用的本地代理端口。</p>
-            </div>
-          </div>
-          <div class="port-grid">
-            <div class="field">
-              <label class="field-label" for="servicePortInput">服务端口</label>
-              <input id="servicePortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="3009">
-            </div>
-            <div class="field">
-              <label class="field-label" for="proxyPortInput">代理端口</label>
-              <input id="proxyPortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="留空不用代理">
-            </div>
-          </div>
-          <div class="endpoint-card">
-            <div class="endpoint-label">代理访问地址</div>
-            <code class="mono endpoint-value" id="proxyV1Url">http://localhost:3009/v1</code>
-            <div class="endpoint-meta" id="proxyEndpointMeta">Responses: http://localhost:3009/v1/responses</div>
-          </div>
-          <div class="actions">
-            <button class="primary" type="button" id="saveProxySettingsButton">保存端口配置</button>
-          </div>
-          <p class="field-hint">保存后立即生效；服务端口变化时页面会自动跳转到新地址。</p>
-        </aside>
+        </div>
+        <div id="openAiConfigs"></div>
       </div>
     </section>
 
-    <div id="responsesSettingsSection" class="hidden-settings" hidden>
-      <div class="panel">
+    <section class="admin-page panel list-panel" data-page="claude">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">Claude token</h2>
+          <p class="panel-note">Claude token 默认参与 `/v1/messages` 主链路。上方是登录命令，下方是当前配置列表。</p>
+        </div>
+      </div>
+      <div class="endpoint-card">
+        <div class="endpoint-label">登录命令</div>
+        <code class="mono endpoint-value">npm run claude:login</code>
+        <div class="endpoint-meta">服务端脚本会生成可共享的本地 fake auth token，并写入 Airouter 配置。</div>
+      </div>
+      <div class="endpoint-card">
+        <div class="endpoint-label">客户端安装共享登录态</div>
+        <code class="mono endpoint-value">npm run claude:install-login -- --token airouter-oauth-xxx --base-url http://localhost:3009</code>
+        <div class="endpoint-meta">把本地 fake token 写入 Claude Code 本地凭证，并补齐交互模式需要的全局 onboarding 状态；安装前会自动备份原登录态。</div>
+      </div>
+      <div class="panel-head compact">
+        <div>
+          <h3 class="panel-title">当前 Claude token 配置</h3>
+          <p class="panel-note">token 默认启用，不需要手动切换；使用排序按钮调整组内优先级。</p>
+        </div>
+      </div>
+      <div id="claudeConfigs"></div>
+    </section>
+
+    <section class="admin-page panel list-panel" data-page="fallbacks">
+      <div class="panel-head">
+        <div>
+          <h2 class="panel-title">Fallback apikey</h2>
+          <p class="panel-note">上方新增 fallback apikey，下方查看当前 fallback。apikey 只在对应 token 链路不可用时兜底。</p>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label class="field-label" for="fallbackBaseUrlInput">Base URL</label>
+          <input id="fallbackBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
+          <p class="field-hint">GPT 兜底通常填写 OpenAI 兼容 `/v1`；Claude 兜底填写 Claude Messages API 的 `/v1`。</p>
+        </div>
+        <div class="field">
+          <label class="field-label" for="fallbackApiKeyInput">API Key</label>
+          <input id="fallbackApiKeyInput" type="password" autocomplete="off" placeholder="sk-...">
+        </div>
+        <div class="field">
+          <label class="field-label" for="fallbackDescriptionInput">备注</label>
+          <input id="fallbackDescriptionInput" type="text" placeholder="例如：GPT 备用上游">
+        </div>
+        <div class="field">
+          <span class="field-label">兜底能力</span>
+          <div class="support-options">
+            <label class="support-option">
+              <input type="checkbox" name="fallbackSupport" value="gpt" checked>
+              <span>GPT fallback</span>
+            </label>
+            <label class="support-option">
+              <input type="checkbox" name="fallbackSupport" value="claude">
+              <span>Claude fallback</span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" type="button" id="addFallbackButton">新增 fallback apikey</button>
+      </div>
+      <div class="panel-head compact">
+        <div>
+          <h3 class="panel-title">当前 fallback apikey 配置</h3>
+          <p class="panel-note">apikey 可以设为兜底焦点；使用排序按钮调整组内优先级。</p>
+        </div>
+      </div>
+      <div id="fallbackConfigs"></div>
+    </section>
+
+    <section class="admin-page settings-grid" data-page="settings">
+      <div class="side-stack">
+      <aside class="panel">
         <div class="panel-head">
           <div>
-            <h2 class="panel-title">Responses 设置</h2>
-            <p class="panel-note">这里可以配置 `/v1/responses` 的模型别名映射。键匹配时忽略大小写，保存后会立即热重载。</p>
+            <h2 class="panel-title">入口 apikey</h2>
+            <p class="panel-note">入口 apikey 为空时，请求不会校验 apikey。</p>
+          </div>
+          <div class="panel-tools">
+            <span id="apiKeyStatusBadge" class="badge note">未读取</span>
+          </div>
+        </div>
+        <div class="key-toolbar">
+          <button class="primary" type="button" id="addApiKeyButton">新增随机 apikey</button>
+        </div>
+        <div id="apiKeysList" class="key-list"></div>
+      </aside>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">Responses 高级设置</h2>
+            <p class="panel-note">模型别名和测试请求只作用于 OpenAI token 主链路。</p>
           </div>
         </div>
         <div class="field">
@@ -879,14 +1565,53 @@
         <div class="actions">
           <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
         </div>
+      </aside>
       </div>
-    </div>
+
+      <aside class="panel" id="proxySettingsPanel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">服务端口 / 代理端口</h2>
+            <p class="panel-note">配置本地服务端口和访问上游时使用的本地代理端口。</p>
+          </div>
+        </div>
+        <div class="port-grid">
+          <div class="field">
+            <label class="field-label" for="servicePortInput">服务端口</label>
+            <input id="servicePortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="3009">
+          </div>
+          <div class="field">
+            <label class="field-label" for="proxyPortInput">代理端口</label>
+            <input id="proxyPortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="留空不用代理">
+          </div>
+        </div>
+        <div class="endpoint-card">
+          <div class="endpoint-label">代理访问地址</div>
+          <code class="mono endpoint-value" id="proxyV1Url">http://localhost:3009/v1</code>
+          <div class="endpoint-meta" id="proxyEndpointMeta">Responses: http://localhost:3009/v1/responses</div>
+        </div>
+        <div class="actions">
+          <button class="primary" type="button" id="saveProxySettingsButton">保存端口配置</button>
+        </div>
+        <p class="field-hint">保存后立即生效；服务端口变化时页面会自动跳转到新地址。</p>
+      </aside>
+    </section>
+
+    <div id="responsesSettingsSection" class="hidden-settings" hidden></div>
+    </section>
   </main>
 
   <script src="/config-admin.js"></script>
   <script>
     const cardsEl = document.getElementById('cards');
+    const upstreamMetricsEl = document.getElementById('upstreamMetrics');
+    const openAiConfigsEl = document.getElementById('openAiConfigs');
+    const routeLanesEl = document.getElementById('routeLanes');
+    const claudeConfigsEl = document.getElementById('claudeConfigs');
+    const fallbackConfigsEl = document.getElementById('fallbackConfigs');
     const messageEl = document.getElementById('message');
+    const batchToolbarEl = document.getElementById('batchToolbar');
+    const batchSelectionSummaryEl = document.getElementById('batchSelectionSummary');
     const rawJsonInput = document.getElementById('rawJsonInput');
     let desktopAuthSessionActions = null;
     let autoAuthSessionButton = null;
@@ -895,18 +1620,42 @@
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
     const apiKeyInput = document.getElementById('apiKeyInput');
     const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
+    const fallbackBaseUrlInput = document.getElementById('fallbackBaseUrlInput');
+    const fallbackApiKeyInput = document.getElementById('fallbackApiKeyInput');
+    const fallbackDescriptionInput = document.getElementById('fallbackDescriptionInput');
     const addButton = document.getElementById('addButton');
+    const addFallbackButton = document.getElementById('addFallbackButton');
     const refreshButton = document.getElementById('refreshButton');
     const testResponseButton = document.getElementById('testResponseButton');
+    const desktopUpdateButton = document.getElementById('desktopUpdateButton');
+    const desktopUpdateDialog = document.getElementById('desktopUpdateDialog');
+    const desktopUpdateCloseButton = document.getElementById('desktopUpdateCloseButton');
+    const desktopUpdateLaterButton = document.getElementById('desktopUpdateLaterButton');
+    const desktopUpdateInstallButton = document.getElementById('desktopUpdateInstallButton');
+    const desktopUpdateVersionText = document.getElementById('desktopUpdateVersionText');
+    const desktopUpdateDateRow = document.getElementById('desktopUpdateDateRow');
+    const desktopUpdateDateText = document.getElementById('desktopUpdateDateText');
+    const desktopUpdateNotes = document.getElementById('desktopUpdateNotes');
+    const desktopUpdateProgressPanel = document.getElementById('desktopUpdateProgressPanel');
+    const desktopUpdateProgressMessage = document.getElementById('desktopUpdateProgressMessage');
+    const desktopUpdateProgressPercent = document.getElementById('desktopUpdateProgressPercent');
+    const desktopUpdateProgressTrack = document.getElementById('desktopUpdateProgressTrack');
+    const desktopUpdateProgressFill = document.getElementById('desktopUpdateProgressFill');
     const addApiKeyButton = document.getElementById('addApiKeyButton');
     const saveResponsesSettingsButton = document.getElementById('saveResponsesSettingsButton');
     const saveProxySettingsButton = document.getElementById('saveProxySettingsButton');
+    const batchSelectProblemConfigsButton = document.getElementById('batchSelectProblemConfigsButton');
+    const batchEnableSelectedButton = document.getElementById('batchEnableSelectedButton');
+    const batchDisableSelectedButton = document.getElementById('batchDisableSelectedButton');
+    const batchDeleteSelectedButton = document.getElementById('batchDeleteSelectedButton');
     const apiKeysListEl = document.getElementById('apiKeysList');
     const apiKeyStatusBadge = document.getElementById('apiKeyStatusBadge');
     const servicePortInput = document.getElementById('servicePortInput');
     const proxyPortInput = document.getElementById('proxyPortInput');
     const proxyV1Url = document.getElementById('proxyV1Url');
     const proxyEndpointMeta = document.getElementById('proxyEndpointMeta');
+    const currentPageTitle = document.getElementById('currentPageTitle');
+    const currentPageSubtitle = document.getElementById('currentPageSubtitle');
     const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
     const RUNTIME_SYNC_INTERVAL_MS = 10000;
@@ -915,6 +1664,9 @@
     const pageParams = new URLSearchParams(window.location.search);
     const adminAuthToken = pageParams.get('auth_token') || '';
     const isDesktopApp = pageParams.get('desktop_app') === '1';
+    const tauriCore = window.__TAURI__ && window.__TAURI__.core;
+    const tauriEvent = window.__TAURI__ && window.__TAURI__.event;
+    let desktopUpdateBusy = false;
     const {
       buildConfigSnapshotRequest,
       buildJsonRequestOptions,
@@ -932,10 +1684,17 @@
       getConfigIdentityValue,
       formatConfigItemCopyText,
       buildConfigItemFromForm,
+      getConfigRole,
+      getRouteLanes,
+      getConfigType,
+      configSupports,
       extractRuntimeStatusTags,
       formatDispatchSessionStatus,
       formatResponseModelStatus,
+      moveConfigSnapshotItem,
+      formatApiKeyRecoveryStatus,
       hasRefreshTokenConfig,
+      hasRuntimeProblem,
       normalizePortValue,
       buildProxyAccessInfo,
       buildRuntimeSyncText,
@@ -944,6 +1703,63 @@
     let snapshot = null;
     let runtimeSyncTimer = null;
     let runtimeSyncInFlight = false;
+    const selectedState = {
+      configs: new Set(),
+      disabled_configs: new Set(),
+      apikeys: new Set(),
+    };
+    const pageMap = {
+      '/admin/configs': 'upstreams',
+      '/admin/configs/': 'upstreams',
+      '/admin/configs/upstreams': 'upstreams',
+      '/admin/configs/routes': 'upstreams',
+      '/admin/configs/openai': 'openai',
+      '/admin/configs/claude': 'claude',
+      '/admin/configs/fallbacks': 'fallbacks',
+      '/admin/configs/settings': 'settings',
+      '/admin/configs/access': 'settings',
+    };
+    const pageTitles = {
+      upstreams: {
+        title: '上游配置',
+        subtitle: '默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。',
+      },
+      openai: {
+        title: 'OpenAI token',
+        subtitle: '上面新增 OpenAI token；下面查看当前 token 配置。',
+      },
+      claude: {
+        title: 'Claude token',
+        subtitle: '上面查看登录命令；下面查看当前 Claude token 配置。',
+      },
+      fallbacks: {
+        title: 'Fallback apikey',
+        subtitle: '上面新增 fallback apikey；下面查看当前 fallback 配置。',
+      },
+      settings: {
+        title: '系统设置',
+        subtitle: '管理入口 apikey、Responses 高级设置、服务端口和代理端口。',
+      },
+    };
+
+    function getCurrentAdminPage() {
+      return pageMap[window.location.pathname] || 'upstreams';
+    }
+
+    function setupPageNavigation() {
+      const currentPage = getCurrentAdminPage();
+      const pageTitle = pageTitles[currentPage] || pageTitles.upstreams;
+      currentPageTitle.textContent = pageTitle.title;
+      currentPageSubtitle.textContent = pageTitle.subtitle;
+      document.querySelectorAll('[data-page]').forEach(section => {
+        section.hidden = section.dataset.page !== currentPage;
+      });
+      document.querySelectorAll('[data-page-link]').forEach(link => {
+        const targetPage = link.dataset.pageLink;
+        link.classList.toggle('active', targetPage === currentPage);
+        link.href = withAuthToken(link.getAttribute('href'));
+      });
+    }
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -971,6 +1787,227 @@
         state,
         ...options,
       });
+    }
+
+    function setDesktopUpdateBusy(nextBusy) {
+      desktopUpdateBusy = nextBusy;
+      desktopUpdateButton.disabled = nextBusy;
+      desktopUpdateCloseButton.disabled = nextBusy;
+      desktopUpdateLaterButton.disabled = nextBusy;
+      desktopUpdateInstallButton.disabled = nextBusy;
+    }
+
+    function formatDesktopUpdateDate(value) {
+      if (!value) {
+        return '';
+      }
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString();
+    }
+
+    function resetDesktopUpdateProgress() {
+      desktopUpdateProgressPanel.hidden = true;
+      desktopUpdateProgressMessage.textContent = '准备下载更新';
+      desktopUpdateProgressPercent.textContent = '';
+      desktopUpdateProgressFill.style.width = '0%';
+      desktopUpdateProgressTrack.classList.remove('indeterminate');
+      desktopUpdateProgressTrack.removeAttribute('aria-valuenow');
+    }
+
+    function renderDesktopUpdateProgress(payload = {}) {
+      desktopUpdateProgressPanel.hidden = false;
+      desktopUpdateProgressMessage.textContent = payload.message || '正在更新';
+      if (Number.isFinite(payload.percent)) {
+        const percent = Math.max(0, Math.min(100, Number(payload.percent)));
+        desktopUpdateProgressPercent.textContent = `${percent}%`;
+        desktopUpdateProgressFill.style.width = `${percent}%`;
+        desktopUpdateProgressTrack.classList.remove('indeterminate');
+        desktopUpdateProgressTrack.setAttribute('aria-valuenow', String(percent));
+      } else {
+        desktopUpdateProgressPercent.textContent = '';
+        desktopUpdateProgressFill.style.width = '0%';
+        desktopUpdateProgressTrack.classList.add('indeterminate');
+        desktopUpdateProgressTrack.removeAttribute('aria-valuenow');
+      }
+    }
+
+    function openDesktopUpdateDialog(update) {
+      desktopUpdateVersionText.textContent = update.version || '-';
+      const formattedDate = formatDesktopUpdateDate(update.date);
+      desktopUpdateDateRow.hidden = !formattedDate;
+      desktopUpdateDateText.textContent = formattedDate || '-';
+      desktopUpdateNotes.textContent = (update.body || '').trim() || '暂无更新说明。';
+      resetDesktopUpdateProgress();
+      desktopUpdateDialog.hidden = false;
+    }
+
+    function closeDesktopUpdateDialog() {
+      if (desktopUpdateBusy) {
+        return;
+      }
+      desktopUpdateDialog.hidden = true;
+      resetDesktopUpdateProgress();
+    }
+
+    async function checkDesktopUpdates() {
+      if (!tauriCore || desktopUpdateBusy) {
+        return;
+      }
+
+      try {
+        setDesktopUpdateBusy(true);
+        desktopUpdateButton.textContent = '检查中';
+        const update = await tauriCore.invoke('check_for_updates');
+        if (update && update.available) {
+          openDesktopUpdateDialog(update);
+        } else {
+          setMessage('info', '当前已是最新版本。');
+        }
+      } catch (error) {
+        setMessage('error', `检查更新失败：${error.message || error}`);
+      } finally {
+        desktopUpdateButton.textContent = '检查更新';
+        setDesktopUpdateBusy(false);
+      }
+    }
+
+    async function installDesktopUpdate() {
+      if (!tauriCore || desktopUpdateBusy) {
+        return;
+      }
+
+      try {
+        setDesktopUpdateBusy(true);
+        renderDesktopUpdateProgress({ message: '准备下载更新' });
+        await tauriCore.invoke('install_update');
+      } catch (error) {
+        setMessage('error', `安装更新失败：${error.message || error}`);
+        renderDesktopUpdateProgress({ message: error.message || String(error) });
+        setDesktopUpdateBusy(false);
+      }
+    }
+
+    function initializeDesktopUpdater() {
+      if (!isDesktopApp || !tauriCore) {
+        return;
+      }
+
+      desktopUpdateButton.hidden = false;
+      desktopUpdateButton.addEventListener('click', checkDesktopUpdates);
+      desktopUpdateCloseButton.addEventListener('click', closeDesktopUpdateDialog);
+      desktopUpdateLaterButton.addEventListener('click', closeDesktopUpdateDialog);
+      desktopUpdateInstallButton.addEventListener('click', installDesktopUpdate);
+      if (tauriEvent && tauriEvent.listen) {
+        tauriEvent.listen('airouter-update-progress', (event) => renderDesktopUpdateProgress(event.payload));
+      }
+    }
+
+    function normalizeSelectionIndex(value) {
+      const index = Number(value);
+      return Number.isInteger(index) && index >= 0 ? index : null;
+    }
+
+    function getSelectedIndexes(type) {
+      return [...selectedState[type]].sort((a, b) => a - b);
+    }
+
+    function getTotalSelectedCount() {
+      return selectedState.configs.size + selectedState.disabled_configs.size + selectedState.apikeys.size;
+    }
+
+    function getSnapshotIndexes(type) {
+      if (type === 'apikeys') {
+        const apikeys = Array.isArray(snapshot && snapshot.apikeys) ? snapshot.apikeys : [];
+        return apikeys.map((_, index) => index);
+      }
+
+      const items = Array.isArray(snapshot && snapshot[type]) ? snapshot[type] : [];
+      return items
+        .map(item => normalizeSelectionIndex(item && item.index))
+        .filter(index => index !== null);
+    }
+
+    function getProblemConfigIndexes(data = snapshot) {
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      return configs
+        .filter(item => item && hasRuntimeProblem(item.runtime))
+        .map(item => normalizeSelectionIndex(item.index))
+        .filter(index => index !== null);
+    }
+
+    function pruneSelections() {
+      ['configs', 'disabled_configs', 'apikeys'].forEach(type => {
+        const available = new Set(getSnapshotIndexes(type));
+        selectedState[type].forEach(index => {
+          if (!available.has(index)) {
+            selectedState[type].delete(index);
+          }
+        });
+      });
+    }
+
+    function updateBatchToolbar() {
+      pruneSelections();
+      const counts = {
+        configs: selectedState.configs.size,
+        disabled_configs: selectedState.disabled_configs.size,
+        apikeys: selectedState.apikeys.size,
+      };
+      const problemIndexes = getProblemConfigIndexes();
+      const total = getTotalSelectedCount();
+      const parts = [];
+
+      if (counts.configs) {
+        parts.push(`启用配置 ${counts.configs}`);
+      }
+      if (counts.disabled_configs) {
+        parts.push(`停用配置 ${counts.disabled_configs}`);
+      }
+      if (counts.apikeys) {
+        parts.push(`apikey ${counts.apikeys}`);
+      }
+
+      batchToolbarEl.hidden = false;
+      batchSelectionSummaryEl.textContent = total > 0 ? `已选择 ${parts.join('、')}` : '已选择 0 项';
+      batchSelectProblemConfigsButton.disabled = problemIndexes.length === 0;
+      batchEnableSelectedButton.disabled = counts.disabled_configs === 0;
+      batchDisableSelectedButton.disabled = counts.configs === 0;
+      batchDeleteSelectedButton.disabled = total === 0;
+    }
+
+    function setSelectedIndex(type, value, checked) {
+      const index = normalizeSelectionIndex(value);
+      if (index === null) {
+        return;
+      }
+
+      if (checked) {
+        selectedState[type].add(index);
+      } else {
+        selectedState[type].delete(index);
+      }
+
+      updateBatchToolbar();
+    }
+
+    function clearSelectedIndexes(type, indexes) {
+      indexes.forEach(index => selectedState[type].delete(index));
+      updateBatchToolbar();
+    }
+
+    function selectProblemConfigs() {
+      const indexes = getProblemConfigIndexes();
+      selectedState.configs.clear();
+      selectedState.disabled_configs.clear();
+      selectedState.apikeys.clear();
+      indexes.forEach(index => selectedState.configs.add(index));
+      renderCards(snapshot || {});
+
+      if (indexes.length) {
+        setMessage('success', `已选择 ${indexes.length} 个异常启用配置。`);
+      } else {
+        setMessage('error', '当前没有可选择的异常启用配置。');
+      }
     }
 
     function renderProxySettings(data) {
@@ -1012,7 +2049,10 @@
       if (options.refreshStatic !== false) {
         renderHeader(data);
       }
+      renderUpstreamMetrics(data);
+      renderRolePages(data);
       renderCards(data);
+      setupPageNavigation();
     }
 
     function getSelectedConfigMode() {
@@ -1064,7 +2104,7 @@
         rawJsonInput.value = JSON.stringify(payload.session, null, 2);
         rawJsonInput.focus();
         autoAuthSessionButton.disabled = false;
-        setMessage('info', '已自动获取 AuthSession JSON，请确认后点击“新增配置项”。');
+        setMessage('info', '已自动获取 AuthSession JSON，请确认后点击“新增 OpenAI token”。');
         return;
       }
 
@@ -1143,6 +2183,11 @@
         .map(input => input.value);
     }
 
+    function getSelectedFallbackSupport() {
+      return [...document.querySelectorAll('input[name="fallbackSupport"]:checked')]
+        .map(input => input.value);
+    }
+
     function buildConfigItemFromInputs() {
       return buildConfigItemFromForm({
         mode: getSelectedConfigMode(),
@@ -1151,6 +2196,16 @@
         baseUrl: apiKeyBaseUrlInput.value,
         description: apiKeyDescriptionInput.value,
         support: getSelectedApiKeySupport(),
+      });
+    }
+
+    function buildFallbackConfigItemFromInputs() {
+      return buildConfigItemFromForm({
+        mode: 'apikey',
+        apiKey: fallbackApiKeyInput.value,
+        baseUrl: fallbackBaseUrlInput.value,
+        description: fallbackDescriptionInput.value,
+        support: getSelectedFallbackSupport(),
       });
     }
 
@@ -1164,9 +2219,19 @@
       });
     }
 
+    function clearFallbackForm() {
+      fallbackApiKeyInput.value = '';
+      fallbackBaseUrlInput.value = '';
+      fallbackDescriptionInput.value = '';
+      document.querySelectorAll('input[name="fallbackSupport"]').forEach(input => {
+        input.checked = input.value === 'gpt';
+      });
+    }
+
     function renderApiKeys(apikeys) {
       if (!apikeys.length) {
         apiKeysListEl.innerHTML = '<div class="empty">当前没有代理 apikey，请求不会校验 apikey。</div>';
+        updateBatchToolbar();
         return;
       }
 
@@ -1176,22 +2241,45 @@
             <div class="key-meta">apikey #${index + 1}</div>
             <div class="mono key-value">${escapeHtml(apikey)}</div>
           </div>
-          <button class="danger" type="button" data-action="delete-apikey" data-index="${index}">删除</button>
+          <div class="batch-toolbar-right">
+            <label class="selection-chip ${selectedState.apikeys.has(index) ? 'active' : ''}">
+              <input type="checkbox" data-action="toggle-select-apikey" data-index="${index}" ${selectedState.apikeys.has(index) ? 'checked' : ''}>
+              <span>选择</span>
+            </label>
+            <button class="danger" type="button" data-action="delete-apikey" data-index="${index}">删除</button>
+          </div>
         </div>
       `).join('');
+      updateBatchToolbar();
     }
 
     function runtimeBadges(item) {
       const tags = [];
+      const roles = Array.isArray(item.dispatch_roles)
+        ? item.dispatch_roles
+        : (item.dispatch_role ? [item.dispatch_role] : []);
+      const hasRole = role => roles.includes(role);
 
-      if (item.dispatch_role === 'token_anchor') {
-        tags.push('<span class="badge active">锚点</span>');
-      } else if (item.dispatch_role === 'token_dispatch') {
-        tags.push('<span class="badge ok">池中</span>');
-      } else if (item.dispatch_role === 'apikey_override') {
-        tags.push('<span class="badge active">覆盖中</span>');
-      } else if (item.dispatch_role === 'apikey_fallback') {
-        tags.push('<span class="badge muted">fallback</span>');
+      if (hasRole('openai_token_focus')) {
+        tags.push('<span class="badge ok">OpenAI 主链路</span>');
+      } else if (hasRole('openai_token')) {
+        tags.push('<span class="badge ok">OpenAI 主链路</span>');
+      } else if (hasRole('claude_token_focus')) {
+        tags.push('<span class="badge ok">Claude 主链路</span>');
+      } else if (hasRole('claude_token')) {
+        tags.push('<span class="badge ok">Claude 主链路</span>');
+      }
+
+      if (hasRole('openai_apikey_fallback_focus') || hasRole('apikey_fallback_focus')) {
+        tags.push('<span class="badge active">OpenAI 兜底焦点</span>');
+      } else if (hasRole('openai_apikey_fallback') || item.item && getConfigType(item) === 'apikey' && configSupports(item, 'gpt')) {
+        tags.push('<span class="badge muted">OpenAI 兜底</span>');
+      }
+
+      if (hasRole('claude_apikey_fallback_focus') || hasRole('apikey_fallback_focus')) {
+        tags.push('<span class="badge active">Claude 兜底焦点</span>');
+      } else if (hasRole('claude_apikey_fallback') || item.item && getConfigType(item) === 'apikey' && configSupports(item, 'claude')) {
+        tags.push('<span class="badge muted">Claude 兜底</span>');
       } else if (item.is_active) {
         tags.push('<span class="badge active">当前</span>');
       }
@@ -1203,16 +2291,31 @@
       return tags.join('');
     }
 
-    function getActivateButtonText(item) {
-      if (item.dispatch_role === 'token_anchor') {
-        return '当前锚点';
+    function isFallbackFocus(item, capability) {
+      const roles = Array.isArray(item.dispatch_roles)
+        ? item.dispatch_roles
+        : (item.dispatch_role ? [item.dispatch_role] : []);
+      if (capability === 'gpt') {
+        return roles.includes('openai_apikey_fallback_focus') || roles.includes('apikey_fallback_focus');
       }
 
-      if (item.dispatch_role === 'apikey_override') {
-        return '覆盖中';
+      if (capability === 'claude') {
+        return roles.includes('claude_apikey_fallback_focus') || roles.includes('apikey_fallback_focus');
       }
 
-      return item.item && item.item.type === 'apikey' ? '全量切换' : '设为锚点';
+      return false;
+    }
+
+    function getActivateButtonText(item, capability) {
+      if (capability === 'gpt') {
+        return isFallbackFocus(item, 'gpt') ? 'OpenAI 兜底焦点' : '设为 OpenAI 兜底';
+      }
+
+      if (capability === 'claude') {
+        return isFallbackFocus(item, 'claude') ? 'Claude 兜底焦点' : '设为 Claude 兜底';
+      }
+
+      return '默认主链路';
     }
 
     function renderRuntimeTags(runtime) {
@@ -1255,6 +2358,21 @@
       `;
     }
 
+    function renderApiKeyRecovery(runtime) {
+      const recovery = formatApiKeyRecoveryStatus(runtime);
+      if (!recovery) {
+        return '';
+      }
+
+      return `
+        <div class="dispatch-session ${recovery.tone === 'danger' ? 'danger' : recovery.tone === 'warn' ? 'warn' : recovery.active ? 'active' : ''}">
+          <span>${escapeHtml(recovery.title)}</span>
+          <span class="session-value">${escapeHtml(recovery.label)}</span>
+          <span class="session-detail">${escapeHtml(recovery.detail)}</span>
+        </div>
+      `;
+    }
+
     function renderSummary(runtime) {
       const summaryText = runtime && runtime.runtime_summary ? runtime.runtime_summary : '暂无运行态数据';
 
@@ -1263,53 +2381,352 @@
           ${renderRuntimeTags(runtime)}
           ${renderDispatchSession(runtime)}
           ${renderResponseModel(runtime)}
+          ${renderApiKeyRecovery(runtime)}
           <div class="summary-raw">${escapeHtml(summaryText)}</div>
         </div>
       `;
     }
 
+    function renderRouteChip(item) {
+      const role = getConfigRole(item);
+      const description = item.item && item.item.description ? item.item.description : `配置 #${item.index + 1}`;
+      const runtimeTags = extractRuntimeStatusTags(item.runtime || {});
+
+      return `
+        <div class="route-chip">
+          <div class="route-chip-title">
+            <span>${escapeHtml(description)}</span>
+            <span class="role-badge ${role.priority === '主链路' ? 'primary' : 'fallback'}">${escapeHtml(role.priority)}</span>
+          </div>
+          <div class="route-chip-meta mono">${escapeHtml(getConfigIdentityValue(snapshot || {}, item))}</div>
+          <div class="runtime-tags">
+            ${runtimeTags.slice(0, 3).map(tag => `
+              <span class="tag ${escapeHtml(tag.tone)}">${escapeHtml(tag.label)}</span>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRouteSlot(label, items, emptyText) {
+      return `
+        <div class="route-slot">
+          <div class="route-slot-label">
+            <span>${escapeHtml(label)}</span>
+            <span>${items.length} 个</span>
+          </div>
+          <div class="route-slot-items">
+            ${items.length ? items.map(renderRouteChip).join('') : `<div class="empty">${escapeHtml(emptyText)}</div>`}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderRouteLanes(data) {
+      if (!routeLanesEl) {
+        return;
+      }
+
+      const lanes = getRouteLanes(data || {});
+      routeLanesEl.innerHTML = lanes.map(lane => `
+        <div class="route-lane">
+          <div class="route-lane-head">
+            <div class="route-lane-title">${escapeHtml(lane.title)}</div>
+            <div class="mono route-lane-endpoint">${escapeHtml(lane.endpoint)}</div>
+            <div class="route-lane-note">${escapeHtml(lane.description)}</div>
+          </div>
+          ${renderRouteSlot(lane.primaryLabel, lane.primary, `没有可用 ${lane.primaryLabel}`)}
+          ${renderRouteSlot(lane.fallbackLabel, lane.fallback, `没有配置 ${lane.fallbackLabel} 兜底`)}
+        </div>
+      `).join('');
+    }
+
+    function getConfigDisplayGroup(item) {
+      const type = getConfigType(item);
+      if (type === 'token') {
+        return {
+          key: 'openai-token',
+          order: 0,
+          label: 'OpenAI token（默认启用，优先走 token）',
+        };
+      }
+
+      if (type === 'claude_token') {
+        return {
+          key: 'claude-token',
+          order: 1,
+          label: 'Claude token（默认启用，负责 /v1/messages 主链路）',
+        };
+      }
+
+      if (type === 'apikey') {
+        return {
+          key: 'fallback-apikey',
+          order: 2,
+          label: 'Fallback apikey（token 不可用时兜底，可设置兜底焦点）',
+        };
+      }
+
+      return {
+        key: 'other',
+        order: 3,
+        label: '其他配置',
+      };
+    }
+
+    function sortConfigsByTypeThenOrder(configs) {
+      return [...configs].sort((left, right) => {
+        const leftGroup = getConfigDisplayGroup(left);
+        const rightGroup = getConfigDisplayGroup(right);
+        if (leftGroup.order !== rightGroup.order) {
+          return leftGroup.order - rightGroup.order;
+        }
+
+        return left.index - right.index;
+      });
+    }
+
+    function renderGroupedConfigRows(configs, renderRow) {
+      let currentGroupKey = '';
+      return sortConfigsByTypeThenOrder(configs).map(item => {
+        const group = getConfigDisplayGroup(item);
+        const groupHeader = group.key === currentGroupKey
+          ? ''
+          : `<tr class="group-row"><td colspan="6">${escapeHtml(group.label)}</td></tr>`;
+        currentGroupKey = group.key;
+        return `${groupHeader}${renderRow(item)}`;
+      }).join('');
+    }
+
+    function renderGroupedConfigCards(data, configs, renderCard) {
+      let currentGroupKey = '';
+      return `<div class="config-group-list">${sortConfigsByTypeThenOrder(configs).map(item => {
+        const group = getConfigDisplayGroup(item);
+        const groupHeader = group.key === currentGroupKey
+          ? ''
+          : `${currentGroupKey ? '</div></section>' : ''}<section class="config-group"><div class="config-group-title">${escapeHtml(group.label)}</div><div class="config-card-list">`;
+        currentGroupKey = group.key;
+        return `${groupHeader}${renderCard(item, data)}`;
+      }).join('')}${currentGroupKey ? '</div></section>' : ''}</div>`;
+    }
+
+    function renderConfigActions(item, allConfigs, options = {}) {
+      const includeActivate = options.includeActivate !== false && getConfigType(item) === 'apikey';
+      const canMovePrevious = item.index > 0;
+      const canMoveNext = item.index < allConfigs.length - 1;
+      const fallbackButtons = includeActivate
+        ? [
+          configSupports(item, 'gpt')
+            ? `<button class="secondary" type="button" data-action="activate" data-capability="gpt" data-index="${item.index}" ${isFallbackFocus(item, 'gpt') ? 'disabled' : ''}>${getActivateButtonText(item, 'gpt')}</button>`
+            : '',
+          configSupports(item, 'claude')
+            ? `<button class="secondary" type="button" data-action="activate" data-capability="claude" data-index="${item.index}" ${isFallbackFocus(item, 'claude') ? 'disabled' : ''}>${getActivateButtonText(item, 'claude')}</button>`
+            : '',
+        ].join('')
+        : '';
+
+      return `
+        <div class="config-card-actions">
+          <div class="action-row action-row-sort">
+            <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
+            <button class="secondary" type="button" data-action="move-previous" data-index="${item.index}" ${canMovePrevious ? '' : 'disabled'}>上移</button>
+            <button class="secondary" type="button" data-action="move-next" data-index="${item.index}" ${canMoveNext ? '' : 'disabled'}>下移</button>
+            <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${canMovePrevious ? '' : 'disabled'}>置顶</button>
+          </div>
+          <div class="action-row action-row-state">
+            ${fallbackButtons}
+            <button class="secondary" type="button" data-action="disable" data-index="${item.index}">停用</button>
+            <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderConfigCard(data, item, allConfigs, options = {}) {
+      const role = getConfigRole(item);
+      const selectionHtml = options.selectionAction
+        ? `<div class="config-card-select"><input type="checkbox" data-action="${options.selectionAction}" data-index="${item.index}" ${options.selected ? 'checked' : ''}></div>`
+        : '';
+      const description = item.item && item.item.description ? item.item.description : '-';
+
+      return `
+        <article class="config-card${selectionHtml ? ' with-selection' : ''}">
+          ${selectionHtml}
+          <div class="config-card-main">
+            <div class="config-card-title">
+              <span>配置 #${item.index + 1}</span>
+              <span class="badge ${role.tone === 'ok' || role.tone === 'active' ? 'ok' : 'muted'}">${escapeHtml(role.lane)}</span>
+            </div>
+            <div>${runtimeBadges(item)}</div>
+          </div>
+          <div class="config-card-meta">
+            <div class="config-card-label">${escapeHtml(getConfigIdentityColumnLabel(data))}</div>
+            <div class="config-card-value mono">${escapeHtml(getConfigIdentityValue(data, item))}</div>
+            <div class="config-card-label">description</div>
+            <div class="config-card-value">${escapeHtml(description)}</div>
+          </div>
+          <div class="config-card-summary">
+            <div class="config-card-label">运行态</div>
+            ${renderSummary(item.runtime)}
+          </div>
+          ${renderConfigActions(item, allConfigs, options)}
+        </article>
+      `;
+    }
+
+    function renderUpstreamMetrics(data) {
+      if (!upstreamMetricsEl) {
+        return;
+      }
+
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      const openAiCount = configs.filter(item => getConfigType(item) === 'token').length;
+      const claudeCount = configs.filter(item => getConfigType(item) === 'claude_token').length;
+      const fallbackCount = configs.filter(item => getConfigType(item) === 'apikey').length;
+      const problemCount = configs.filter(item => hasRuntimeProblem(item && item.runtime)).length;
+
+      upstreamMetricsEl.innerHTML = `
+        <div class="metric-card">
+          <div class="metric-label"><span>OpenAI token</span><span>MAIN</span></div>
+          <div class="metric-value">${openAiCount}</div>
+          <div class="metric-note">默认启用，优先走 token。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label"><span>Claude token</span><span>MAIN</span></div>
+          <div class="metric-value">${claudeCount}</div>
+          <div class="metric-note">负责 /v1/messages 主链路。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label"><span>Fallback apikey</span><span>FALLBACK</span></div>
+          <div class="metric-value">${fallbackCount}</div>
+          <div class="metric-note">只在 token 不可用时兜底。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label"><span>运行态异常</span><span>SYNC</span></div>
+          <div class="metric-value">${problemCount}</div>
+          <div class="metric-note">可选择异常配置后批量处理。</div>
+        </div>
+      `;
+    }
+
+    function renderEnabledConfigs(data) {
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      if (!configs.length) {
+        updateBatchToolbar();
+        return '<div class="empty">当前没有启用配置项。</div>';
+      }
+
+      return renderGroupedConfigCards(data, configs, item => renderConfigCard(data, item, configs, {
+        selectionAction: 'toggle-select-config',
+        selected: selectedState.configs.has(item.index),
+      }));
+    }
+
+    function renderDisabledConfigs(data) {
+      const disabledConfigs = Array.isArray(data && data.disabled_configs) ? data.disabled_configs : [];
+      if (!disabledConfigs.length) {
+        updateBatchToolbar();
+        return '';
+      }
+
+      return `
+        <div class="disabled-configs">
+          <div class="panel-head compact">
+            <div>
+              <h3 class="panel-title">停用配置</h3>
+              <p class="panel-note">停用配置不会参与请求调度、额度刷新或 fallback，只保留在配置文件里。</p>
+            </div>
+          </div>
+          <div class="config-card-list">
+            ${disabledConfigs.map(item => `
+              <article class="config-card with-selection">
+                <div class="config-card-select">
+                  <input type="checkbox" data-action="toggle-select-disabled-config" data-index="${item.index}" ${selectedState.disabled_configs.has(item.index) ? 'checked' : ''}>
+                </div>
+                <div class="config-card-main">
+                  <div class="config-card-title">
+                    <span>停用 #${item.index + 1}</span>
+                    <span class="badge note">已停用</span>
+                  </div>
+                </div>
+                <div class="config-card-meta">
+                  <div class="config-card-label">${escapeHtml(getConfigIdentityColumnLabel(data))}</div>
+                  <div class="config-card-value mono">${escapeHtml(getConfigIdentityValue(data, item))}</div>
+                  <div class="config-card-label">description</div>
+                  <div class="config-card-value">${escapeHtml(item.item.description || '-')}</div>
+                </div>
+                <div class="config-card-field">
+                  <div class="config-card-label">状态</div>
+                  <div class="config-card-value">${escapeHtml(item.item.disabled_status || '服务不可见')}</div>
+                </div>
+                <div class="config-card-actions">
+                  <div class="action-row action-row-state">
+                    <button class="secondary" type="button" data-action="enable" data-index="${item.index}">启用</button>
+                    <button class="danger" type="button" data-action="delete-disabled" data-index="${item.index}">删除</button>
+                  </div>
+                </div>
+              </article>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
     function renderCards(data) {
-      if (!data.configs.length) {
+      const configs = Array.isArray(data && data.configs) ? data.configs : [];
+      const disabledConfigs = Array.isArray(data && data.disabled_configs) ? data.disabled_configs : [];
+      if (!configs.length && !disabledConfigs.length) {
         cardsEl.innerHTML = '<div class="empty">当前没有配置项。</div>';
+        updateBatchToolbar();
         return;
       }
 
       cardsEl.innerHTML = `
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th class="config-col">配置</th>
-                <th class="account-id-col">${escapeHtml(getConfigIdentityColumnLabel(data))}</th>
-                <th>description</th>
-                <th>摘要</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${data.configs.map(item => `
-                <tr>
-                  <td>
-                    <div class="config-name">
-                      <div>配置 #${item.index + 1}</div>
-                      <div>${runtimeBadges(item)}</div>
-                    </div>
-                  </td>
-                  <td class="account-id-cell mono">${escapeHtml(getConfigIdentityValue(data, item))}</td>
-                  <td class="cell-text">${escapeHtml(item.item.description || '-')}</td>
-                  <td>${renderSummary(item.runtime)}</td>
-                  <td class="action-cell">
-                    <button class="secondary" type="button" data-action="copy-config" data-index="${item.index}">复制</button>
-                    <button class="secondary" type="button" data-action="move-up" data-index="${item.index}" ${item.index === 0 ? 'disabled' : ''}>置顶</button>
-                    <button class="secondary" type="button" data-action="activate" data-index="${item.index}" ${item.is_active ? 'disabled' : ''}>${getActivateButtonText(item)}</button>
-                    <button class="danger" type="button" data-action="delete" data-index="${item.index}">删除</button>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
+        ${renderEnabledConfigs(data)}
+        ${renderDisabledConfigs(data)}
+      `;
+      updateBatchToolbar();
+    }
+
+    function renderFilteredConfigs(targetEl, data, predicate, emptyText) {
+      if (!targetEl) {
+        return;
+      }
+
+      const allConfigs = Array.isArray(data && data.configs) ? data.configs : [];
+      const configs = allConfigs.filter(item => predicate(item && item.item ? item.item : item));
+      if (!configs.length) {
+        targetEl.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
+        return;
+      }
+
+      targetEl.innerHTML = `
+        <div class="config-card-list">
+          ${configs.map(item => renderConfigCard(data, item, allConfigs)).join('')}
         </div>
       `;
+    }
+
+    function renderRolePages(data) {
+      renderRouteLanes(data);
+      renderFilteredConfigs(
+        openAiConfigsEl,
+        data,
+        item => getConfigType(item) === 'token',
+        '当前没有 OpenAI token。请先粘贴 AuthSession JSON 新增配置。'
+      );
+      renderFilteredConfigs(
+        claudeConfigsEl,
+        data,
+        item => getConfigType(item) === 'claude_token',
+        '当前没有 Claude token。请运行 npm run claude:login 追加登录态。'
+      );
+      renderFilteredConfigs(
+        fallbackConfigsEl,
+        data,
+        item => getConfigType(item) === 'apikey',
+        '当前没有 fallback apikey。'
+      );
     }
 
     function withAuthToken(url) {
@@ -1335,7 +2752,7 @@
       return payload;
     }
 
-    function armDeleteButton(button, message) {
+    function armDeleteButton(button, message, confirmText = '确认删除', fallbackText = '删除') {
       if (button.dataset.confirm === 'true') {
         window.clearTimeout(Number(button.dataset.confirmTimer || 0));
         delete button.dataset.confirm;
@@ -1346,7 +2763,7 @@
 
       button.dataset.confirm = 'true';
       button.dataset.originalText = button.textContent;
-      button.textContent = '确认删除';
+      button.textContent = confirmText;
       button.classList.add('confirming');
       setMessage('info', message);
 
@@ -1354,7 +2771,7 @@
         delete button.dataset.confirm;
         delete button.dataset.confirmTimer;
         button.classList.remove('confirming');
-        button.textContent = button.dataset.originalText || '删除';
+        button.textContent = button.dataset.originalText || fallbackText;
         delete button.dataset.originalText;
       }, 5000);
       button.dataset.confirmTimer = String(timer);
@@ -1479,6 +2896,25 @@
       setMessage('info', configCount > 1 ? `已写入 ${configCount} 个配置项。` : '配置项已写入配置文件。');
     }
 
+    async function addFallbackConfig() {
+      const configItem = buildFallbackConfigItemFromInputs();
+      const result = await requestJson('/admin/api/configs', {
+        method: 'POST',
+        body: JSON.stringify({
+          config_type: 'apikey',
+          raw_json: JSON.stringify(configItem),
+        }),
+      });
+
+      snapshot = result;
+      clearFallbackForm();
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', 'fallback apikey 已写入配置文件。');
+    }
+
     async function addApiKey() {
       const result = await requestJson('/admin/api/apikeys', {
         method: 'POST',
@@ -1561,6 +2997,7 @@
       });
 
       snapshot = result;
+      clearSelectedIndexes('apikeys', [Number(index)]);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
@@ -1568,9 +3005,143 @@
       setMessage('info', 'apikey 已删除。');
     }
 
-    async function activateConfig(index) {
+    function buildSelectedDeletePlan() {
+      return [
+        {
+          type: 'configs',
+          label: '启用配置项',
+          indexes: getSelectedIndexes('configs'),
+          url: '/admin/api/configs/batch-delete',
+        },
+        {
+          type: 'disabled_configs',
+          label: '停用配置项',
+          indexes: getSelectedIndexes('disabled_configs'),
+          url: '/admin/api/disabled-configs/batch-delete',
+        },
+        {
+          type: 'apikeys',
+          label: 'apikey',
+          indexes: getSelectedIndexes('apikeys'),
+          url: '/admin/api/apikeys/batch-delete',
+        },
+      ].filter(entry => entry.indexes.length > 0);
+    }
+
+    function formatSelectedDeletePlan(plan) {
+      return plan.map(entry => `${entry.indexes.length} 个${entry.label}`).join('、');
+    }
+
+    function buildSelectedDisablePlan() {
+      const indexes = getSelectedIndexes('configs');
+      return indexes.length ? [{
+        type: 'configs',
+        label: '启用配置项',
+        indexes,
+        url: '/admin/api/configs/batch-disable',
+      }] : [];
+    }
+
+    function buildSelectedEnablePlan() {
+      const indexes = getSelectedIndexes('disabled_configs');
+      return indexes.length ? [{
+        type: 'disabled_configs',
+        label: '停用配置项',
+        indexes,
+        url: '/admin/api/disabled-configs/batch-enable',
+      }] : [];
+    }
+
+    function formatSelectedMovePlan(plan) {
+      return plan.map(entry => `${entry.indexes.length} 个${entry.label}`).join('、');
+    }
+
+    async function batchMoveSelected(plan, options) {
+      if (!plan.length) {
+        throw new Error(options.emptyMessage);
+      }
+
+      const movedParts = [];
+      let changed = false;
+
+      try {
+        for (const entry of plan) {
+          const result = await requestJson(entry.url, {
+            method: 'POST',
+            body: JSON.stringify({ indexes: entry.indexes }),
+          });
+
+          snapshot = result;
+          entry.indexes.forEach(index => selectedState[entry.type].delete(index));
+          movedParts.push(`${entry.indexes.length} 个${entry.label}`);
+          changed = true;
+        }
+      } finally {
+        if (changed) {
+          renderSnapshot(snapshot);
+          setRuntimeSyncState('synced', {
+            syncedAt: new Date(),
+          });
+        }
+      }
+
+      setMessage('info', `${options.donePrefix}${movedParts.join('、')}。`);
+    }
+
+    async function batchDisableSelected() {
+      await batchMoveSelected(buildSelectedDisablePlan(), {
+        emptyMessage: '请先选择要停用的启用配置项',
+        donePrefix: '已批量停用 ',
+      });
+    }
+
+    async function batchEnableSelected() {
+      await batchMoveSelected(buildSelectedEnablePlan(), {
+        emptyMessage: '请先选择要启用的停用配置项',
+        donePrefix: '已批量启用 ',
+      });
+    }
+
+    async function batchDeleteSelected() {
+      const plan = buildSelectedDeletePlan();
+      if (!plan.length) {
+        throw new Error('请先选择要删除的项目');
+      }
+
+      const deletedParts = [];
+      let changed = false;
+
+      try {
+        for (const entry of plan) {
+          const result = await requestJson(entry.url, {
+            method: 'DELETE',
+            body: JSON.stringify({ indexes: entry.indexes }),
+          });
+
+          snapshot = result;
+          entry.indexes.forEach(index => selectedState[entry.type].delete(index));
+          deletedParts.push(`${entry.indexes.length} 个${entry.label}`);
+          changed = true;
+        }
+      } finally {
+        if (changed) {
+          renderSnapshot(snapshot);
+          setRuntimeSyncState('synced', {
+            syncedAt: new Date(),
+          });
+        }
+      }
+
+      setMessage('info', `已批量删除 ${deletedParts.join('、')}。`);
+    }
+
+    async function activateConfig(index, capability = '') {
+      const numericIndex = Number(index);
       const result = await requestJson(`/admin/api/configs/${index}/activate`, {
         method: 'POST',
+        body: capability ? JSON.stringify({
+          fallback_capability: capability,
+        }) : undefined,
       });
 
       snapshot = result;
@@ -1578,18 +3149,22 @@
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
-      const activated = Array.isArray(result.configs) ? result.configs.find(item => item && item.index === index) : null;
-      setMessage('info', activated && activated.item && activated.item.type === 'apikey'
-        ? '已进入 API Key 覆盖模式。'
-        : '已设置 token 调度锚点。');
+      const activated = Array.isArray(result.configs) ? result.configs.find(item => item && item.index === numericIndex) : null;
+      const activatedType = activated && activated.item ? activated.item.type : '';
+      const fallbackMessage = capability === 'claude'
+        ? '已设为 Claude fallback apikey 焦点；token 可用时仍优先走 token。'
+        : '已设为 OpenAI fallback apikey 焦点；token 可用时仍优先走 token。';
+      setMessage('info', activatedType === 'apikey'
+        ? fallbackMessage
+        : 'token 主链路默认启用，无需手动切换。');
     }
 
     async function moveConfigUp(index) {
-      const result = await requestJson(`/admin/api/configs/${index}/move-up`, {
+      await requestJson(`/admin/api/configs/${index}/move-up`, {
         method: 'POST',
       });
 
-      snapshot = result;
+      snapshot = moveConfigSnapshotItem(snapshot, index, 0);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
@@ -1597,11 +3172,30 @@
       setMessage('info', '配置项已置顶，当前使用账号未改变。');
     }
 
-    async function copyConfigItemJson(index) {
-      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
-        throw new Error('当前浏览器不支持剪贴板写入');
-      }
+    async function moveConfigAdjacent(index, direction) {
+      const numericIndex = Number(index);
+      const isPrevious = direction === 'previous';
+      const fallbackToIndex = isPrevious ? numericIndex - 1 : numericIndex + 1;
+      const requestUrl = isPrevious
+        ? `/admin/api/configs/${index}/move-previous`
+        : `/admin/api/configs/${index}/move-next`;
+      const result = await requestJson(requestUrl, {
+        method: 'POST',
+      });
+      const movedTo = Number(result && result.moved_to);
+      const targetIndex = Number.isInteger(movedTo) ? movedTo : fallbackToIndex;
 
+      snapshot = moveConfigSnapshotItem(snapshot, numericIndex, targetIndex);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', isPrevious
+        ? '配置项已上移，当前使用账号未改变。'
+        : '配置项已下移，当前使用账号未改变。');
+    }
+
+    async function copyConfigItemJson(index) {
       const numericIndex = Number(index);
       const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
       const config = configs.find(item => item && item.index === numericIndex);
@@ -1609,8 +3203,34 @@
         throw new Error('配置项不存在，请刷新后重试');
       }
 
-      await navigator.clipboard.writeText(formatConfigItemCopyText(config));
+      await copyTextToClipboard(formatConfigItemCopyText(config));
       setMessage('info', `配置 #${numericIndex + 1} JSON 已复制到剪贴板。`);
+    }
+
+    async function disableConfig(index) {
+      const result = await requestJson(`/admin/api/configs/${index}/disable`, {
+        method: 'POST',
+      });
+
+      snapshot = result;
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '配置项已停用并热重载。');
+    }
+
+    async function enableConfig(index) {
+      const result = await requestJson(`/admin/api/disabled-configs/${index}/enable`, {
+        method: 'POST',
+      });
+
+      snapshot = result;
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '配置项已启用并热重载。');
     }
 
     async function deleteConfig(index) {
@@ -1619,11 +3239,26 @@
       });
 
       snapshot = result;
+      clearSelectedIndexes('configs', [Number(index)]);
       renderSnapshot(snapshot);
       setRuntimeSyncState('synced', {
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已删除并热重载。');
+    }
+
+    async function deleteDisabledConfig(index) {
+      const result = await requestJson(`/admin/api/disabled-configs/${index}`, {
+        method: 'DELETE',
+      });
+
+      snapshot = result;
+      clearSelectedIndexes('disabled_configs', [Number(index)]);
+      renderSnapshot(snapshot);
+      setRuntimeSyncState('synced', {
+        syncedAt: new Date(),
+      });
+      setMessage('info', '停用配置项已删除。');
     }
 
     async function sendHelloTestRequest() {
@@ -1658,6 +3293,19 @@
         setMessage('error', error.message);
       } finally {
         addButton.disabled = false;
+      }
+    });
+
+    addFallbackButton.addEventListener('click', async () => {
+      addFallbackButton.disabled = true;
+      try {
+        setMessage('info', '正在写入 fallback apikey...');
+        await new Promise(resolve => window.requestAnimationFrame(resolve));
+        await addFallbackConfig();
+      } catch (error) {
+        setMessage('error', error.message);
+      } finally {
+        addFallbackButton.disabled = false;
       }
     });
 
@@ -1723,13 +3371,40 @@
     document.querySelectorAll('input[name="configMode"]').forEach(input => {
       input.addEventListener('change', updateConfigMode);
     });
-    initializeDesktopAuthSessionImport();
 
     document.addEventListener('click', async event => {
       const externalLink = event.target.closest('a[data-open-external]');
       if (externalLink) {
         event.preventDefault();
         await openExternalLink(externalLink.href);
+        return;
+      }
+
+      const batchSelectProblemConfigsButtonEl = event.target.closest('[data-action="batch-select-problem-configs"]');
+      if (batchSelectProblemConfigsButtonEl) {
+        event.preventDefault();
+        selectProblemConfigs();
+        return;
+      }
+
+      const toggleSelectConfig = event.target.closest('[data-action="toggle-select-config"]');
+      if (toggleSelectConfig) {
+        setSelectedIndex('configs', toggleSelectConfig.dataset.index, toggleSelectConfig.checked);
+        renderCards(snapshot || {});
+        return;
+      }
+
+      const toggleSelectDisabledConfig = event.target.closest('[data-action="toggle-select-disabled-config"]');
+      if (toggleSelectDisabledConfig) {
+        setSelectedIndex('disabled_configs', toggleSelectDisabledConfig.dataset.index, toggleSelectDisabledConfig.checked);
+        renderCards(snapshot || {});
+        return;
+      }
+
+      const toggleSelectApiKey = event.target.closest('[data-action="toggle-select-apikey"]');
+      if (toggleSelectApiKey) {
+        setSelectedIndex('apikeys', toggleSelectApiKey.dataset.index, toggleSelectApiKey.checked);
+        renderCards(snapshot || {});
         return;
       }
 
@@ -1755,6 +3430,55 @@
             copyUrlButton.textContent = copyUrlButton.dataset.originalText || originalText;
             delete copyUrlButton.dataset.originalText;
           }, 1600);
+        }
+        return;
+      }
+
+      const batchEnableSelectedButtonEl = event.target.closest('[data-action="batch-enable-selected"]');
+      if (batchEnableSelectedButtonEl) {
+        batchEnableSelectedButtonEl.disabled = true;
+        try {
+          await batchEnableSelected();
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          batchEnableSelectedButtonEl.disabled = false;
+        }
+        return;
+      }
+
+      const batchDisableSelectedButtonEl = event.target.closest('[data-action="batch-disable-selected"]');
+      if (batchDisableSelectedButtonEl) {
+        const disablePlan = buildSelectedDisablePlan();
+        const disableSummary = formatSelectedMovePlan(disablePlan);
+        if (!armDeleteButton(batchDisableSelectedButtonEl, `再次点击确认停用已选择的 ${disableSummary}。`, '确认停用', '批量停用所选')) {
+          return;
+        }
+        batchDisableSelectedButtonEl.disabled = true;
+        try {
+          await batchDisableSelected();
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          batchDisableSelectedButtonEl.disabled = false;
+        }
+        return;
+      }
+
+      const batchDeleteSelectedButtonEl = event.target.closest('[data-action="batch-delete-selected"]');
+      if (batchDeleteSelectedButtonEl) {
+        const deletePlan = buildSelectedDeletePlan();
+        const deleteSummary = formatSelectedDeletePlan(deletePlan);
+        if (!armDeleteButton(batchDeleteSelectedButtonEl, `再次点击确认删除已选择的 ${deleteSummary}。`)) {
+          return;
+        }
+        batchDeleteSelectedButtonEl.disabled = true;
+        try {
+          await batchDeleteSelected();
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          batchDeleteSelectedButtonEl.disabled = false;
         }
         return;
       }
@@ -1792,7 +3516,7 @@
       if (activateButton) {
         activateButton.disabled = true;
         try {
-          await activateConfig(activateButton.dataset.index);
+          await activateConfig(activateButton.dataset.index, activateButton.dataset.capability || '');
         } catch (error) {
           setMessage('error', error.message);
         } finally {
@@ -1810,6 +3534,77 @@
           setMessage('error', error.message);
         } finally {
           moveUpButton.disabled = false;
+        }
+        return;
+      }
+
+      const movePreviousButton = event.target.closest('[data-action="move-previous"]');
+      if (movePreviousButton) {
+        movePreviousButton.disabled = true;
+        try {
+          await moveConfigAdjacent(movePreviousButton.dataset.index, 'previous');
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          movePreviousButton.disabled = false;
+        }
+        return;
+      }
+
+      const moveNextButton = event.target.closest('[data-action="move-next"]');
+      if (moveNextButton) {
+        moveNextButton.disabled = true;
+        try {
+          await moveConfigAdjacent(moveNextButton.dataset.index, 'next');
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          moveNextButton.disabled = false;
+        }
+        return;
+      }
+
+      const disableButton = event.target.closest('[data-action="disable"]');
+      if (disableButton) {
+        if (!armDeleteButton(disableButton, '再次点击确认停用这个配置项。', '确认停用', '停用')) {
+          return;
+        }
+        disableButton.disabled = true;
+        try {
+          await disableConfig(disableButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          disableButton.disabled = false;
+        }
+        return;
+      }
+
+      const enableButton = event.target.closest('[data-action="enable"]');
+      if (enableButton) {
+        enableButton.disabled = true;
+        try {
+          await enableConfig(enableButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          enableButton.disabled = false;
+        }
+        return;
+      }
+
+      const deleteDisabledButton = event.target.closest('[data-action="delete-disabled"]');
+      if (deleteDisabledButton) {
+        if (!armDeleteButton(deleteDisabledButton, '再次点击确认删除这个停用配置项。')) {
+          return;
+        }
+        deleteDisabledButton.disabled = true;
+        try {
+          await deleteDisabledConfig(deleteDisabledButton.dataset.index);
+        } catch (error) {
+          setMessage('error', error.message);
+        } finally {
+          deleteDisabledButton.disabled = false;
         }
         return;
       }
@@ -1832,7 +3627,10 @@
       }
     });
 
+    setupPageNavigation();
     updateConfigMode();
+    initializeDesktopAuthSessionImport();
+    initializeDesktopUpdater();
     loadSnapshot();
     startRuntimeSyncPolling();
   </script>

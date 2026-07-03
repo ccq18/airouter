@@ -24,11 +24,11 @@ function createBaseConfig(extra = {}) {
   };
 }
 
-test('resolveClaudeCodeOptions falls back to gpt-5.4 and high', () => {
+test('resolveClaudeCodeOptions falls back to gpt-5.5 and high', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify(createBaseConfig()));
 
   assert.deepEqual(resolveClaudeCodeOptions(parsed), {
-    model: 'gpt-5.4',
+    model: 'gpt-5.5',
     reasoningEffort: 'high',
   });
 });
@@ -123,6 +123,124 @@ test('transformClaudeMessagesRequest force overrides client model and reasoning 
     effort: 'high',
   });
   assert.equal(transformed.instructions, 'system instruction');
+  assert.equal(transformed.parallel_tool_calls, false);
+  assert.deepEqual(transformed.include, []);
+  assert.deepEqual(transformed.input[0], {
+    type: 'message',
+    role: 'user',
+    content: [
+      {
+        type: 'input_text',
+        text: 'hello',
+      },
+    ],
+  });
+});
+
+test('transformClaudeMessagesRequest uses CPA style system and parallel tool conversion', () => {
+  const requestBody = {
+    model: 'claude-sonnet-4',
+    system: [
+      {
+        type: 'text',
+        text: 'x-anthropic-billing-header: tenant-123',
+      },
+      {
+        type: 'text',
+        text: 'project instruction',
+      },
+    ],
+    tool_choice: {
+      type: 'auto',
+      disable_parallel_tool_use: true,
+    },
+    messages: [
+      {
+        role: 'system',
+        content: 'message system instruction',
+      },
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+    stream: true,
+  };
+
+  const transformed = transformClaudeMessagesRequest(requestBody, {
+    model: 'gpt-5.5',
+    stream: true,
+    includeMaxOutputTokens: false,
+    cpaStyleCompatibility: true,
+  });
+
+  assert.equal(transformed.instructions, '');
+  assert.equal(transformed.parallel_tool_calls, false);
+  assert.deepEqual(transformed.include, ['reasoning.encrypted_content']);
+  assert.deepEqual(transformed.input.slice(0, 3), [
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: 'project instruction',
+        },
+      ],
+    },
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: 'message system instruction',
+        },
+      ],
+    },
+    {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: 'hello',
+        },
+      ],
+    },
+  ]);
+});
+
+test('transformClaudeMessagesRequest fills missing nested tool schema types', () => {
+  const transformed = transformClaudeMessagesRequest({
+    model: 'claude-sonnet-4',
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+    tools: [
+      {
+        name: 'Workflow',
+        description: 'Run a workflow',
+        input_schema: {
+          type: 'object',
+          properties: {
+            args: {
+              description: 'Workflow arguments',
+            },
+          },
+        },
+      },
+    ],
+  }, {
+    model: 'gpt-5.5',
+    stream: true,
+    includeMaxOutputTokens: false,
+  });
+
+  assert.equal(transformed.tools[0].parameters.properties.args.type, 'object');
 });
 
 test('createRuntimeConfigs defaults config items to token type', () => {
@@ -178,6 +296,72 @@ test('createRuntimeConfigs supports item-level apikey configs', () => {
   assert.deepEqual(runtimeConfigs[1].support, ['gpt', 'claude']);
 });
 
+test('createRuntimeConfigs preserves configured GPT apikey health model', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        type: 'apikey',
+        base_url: 'https://api.example.com/v1',
+        apikey: 'sk-1',
+        support: ['gpt'],
+        health: {
+          model: '  gpt-4.1-mini  ',
+        },
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.deepEqual(runtimeConfigs[0].health, {
+    model: 'gpt-4.1-mini',
+  });
+});
+
+test('createRuntimeConfigs ignores disabled_configs', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        access_token: 'token-active',
+        account_id: 'account-active',
+        description: 'active token',
+      },
+    ],
+    disabled_configs: [
+      {
+        type: 'apikey',
+        base_url: 'https://api.disabled.example/v1',
+        apikey: 'sk-disabled',
+        description: 'disabled key',
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.equal(runtimeConfigs.length, 1);
+  assert.equal(runtimeConfigs[0].description, 'active token');
+  assert.equal(parsed.disabled_configs[0].description, 'disabled key');
+});
+
+test('parseOpenAiConfigFile rejects invalid disabled_configs entries', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify({
+      configs: [],
+      disabled_configs: [
+        {
+          type: 'apikey',
+          support: ['chat'],
+        },
+      ],
+    }));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /disabled_configs\[0\]/);
+    return true;
+  });
+});
+
 test('createRuntimeConfigs supports apikey configs that only support Claude messages', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify({
     configs: [
@@ -202,6 +386,35 @@ test('createRuntimeConfigs supports apikey configs that only support Claude mess
   assert.equal(runtimeConfigs[0].runtime.reason, 'apikey');
 });
 
+test('createRuntimeConfigs supports claude_token configs for Claude OAuth passthrough', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        type: 'claude_token',
+        access_token: 'claude-access-token',
+        refresh_token: 'claude-refresh-token',
+        request_auth_token_sha256s: ['A'.repeat(64), 'invalid-hash'],
+        expires_at: 1893456000000,
+        account_uuid: 'account-uuid-example',
+        description: 'Claude OAuth account',
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.equal(runtimeConfigs.length, 1);
+  assert.equal(runtimeConfigs[0].type, 'claude_token');
+  assert.equal(runtimeConfigs[0].baseUrl, 'https://api.anthropic.com');
+  assert.equal(runtimeConfigs[0].access_token, 'claude-access-token');
+  assert.equal(runtimeConfigs[0].refresh_token, 'claude-refresh-token');
+  assert.deepEqual(runtimeConfigs[0].request_auth_token_sha256s, ['a'.repeat(64)]);
+  assert.equal(runtimeConfigs[0].expires_at, 1893456000000);
+  assert.equal(runtimeConfigs[0].account_uuid, 'account-uuid-example');
+  assert.equal(runtimeConfigs[0].description, 'Claude OAuth account');
+  assert.equal(runtimeConfigs[0].runtime.reason, 'claude_token');
+});
+
 test('parseOpenAiConfigFile rejects unsupported apikey support values', () => {
   assert.throws(() => {
     parseOpenAiConfigFile(JSON.stringify({
@@ -217,6 +430,27 @@ test('parseOpenAiConfigFile rejects unsupported apikey support values', () => {
   }, err => {
     assert.equal(err instanceof Error, true);
     assert.match(err.message, /support 仅支持 gpt 或 claude/);
+    return true;
+  });
+});
+
+test('parseOpenAiConfigFile rejects invalid apikey health model values', () => {
+  assert.throws(() => {
+    parseOpenAiConfigFile(JSON.stringify({
+      configs: [
+        {
+          type: 'apikey',
+          base_url: 'https://api.example.com/v1',
+          apikey: 'sk-1',
+          health: {
+            model: '',
+          },
+        },
+      ],
+    }));
+  }, err => {
+    assert.equal(err instanceof Error, true);
+    assert.match(err.message, /health\.model 必须是非空字符串/);
     return true;
   });
 });

@@ -72,7 +72,7 @@ npm run build:windows
 - token 配置项默认优先于 apikey 配置项；只有 token 不可用时才落到 apikey。
 - `apikey.support` 只支持 `gpt` 和 `claude`；默认是 `["gpt"]`。
 - `/v1/messages` 只注册在 `/v1/messages`，不要新增旧式 `/claude/v1/messages` 兼容路径，除非需求明确。
-- `/v1/responses` 自动切号当前只针对 token-backed responses 请求，且同一请求最多重试一次。
+- `/v1/responses` 自动切号当前只针对 token-backed responses 请求；同一请求会排除已失败账号继续尝试剩余可用 token 账号。
 - Hop-by-hop headers 和本地鉴权头不要转发给上游；相关边界已有测试覆盖。
 - 对流式响应和压缩响应的处理要优先保持现有 failover/透传语义，避免提前消费客户端需要的流。
 

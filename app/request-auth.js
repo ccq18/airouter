@@ -18,6 +18,21 @@ function normalizeStringArray(values) {
         .filter(Boolean);
 }
 
+function sha256Hex(value) {
+    const normalizedValue = normalizeString(value);
+    if (!normalizedValue) {
+        return '';
+    }
+
+    return crypto.createHash('sha256').update(normalizedValue).digest('hex');
+}
+
+function normalizeSha256HexArray(values) {
+    return normalizeStringArray(values)
+        .map(value => value.toLowerCase())
+        .filter(value => /^[0-9a-f]{64}$/.test(value));
+}
+
 function generateRandomSecret(prefix) {
     return `${prefix}${crypto.randomBytes(18).toString('hex')}`;
 }
@@ -40,6 +55,49 @@ function getConfiguredAuthToken(parsedConfig) {
     }
 
     return normalizeString(parsedConfig.auth_token);
+}
+
+function getConfiguredClaudeTokenRequestAuthTokens(parsedConfig) {
+    if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+        return [];
+    }
+
+    if (!Array.isArray(parsedConfig.configs)) {
+        return [];
+    }
+
+    const tokens = [];
+    for (const item of parsedConfig.configs) {
+        if (!item || item.type !== 'claude_token') {
+            continue;
+        }
+
+        tokens.push(item.local_auth_token);
+        tokens.push(item.access_token);
+    }
+
+    return normalizeStringArray(tokens);
+}
+
+function getConfiguredClaudeTokenRequestAuthTokenHashes(parsedConfig) {
+    if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+        return [];
+    }
+
+    if (!Array.isArray(parsedConfig.configs)) {
+        return [];
+    }
+
+    const tokenHashes = [];
+    for (const item of parsedConfig.configs) {
+        if (!item || item.type !== 'claude_token') {
+            continue;
+        }
+
+        tokenHashes.push(...normalizeSha256HexArray(item.request_auth_token_sha256s));
+    }
+
+    return tokenHashes;
 }
 
 function getHeaderValue(headers, headerName) {
@@ -106,6 +164,25 @@ function isAuthorizedRequest(headers, configuredApiKeys) {
     return expectedApiKeys.some(expectedApiKey => secureEquals(requestApiKey, expectedApiKey));
 }
 
+function isAuthorizedRequestWithTokenHashes(headers, configuredApiKeys, configuredTokenHashes) {
+    if (isAuthorizedRequest(headers, configuredApiKeys)) {
+        return true;
+    }
+
+    const expectedTokenHashes = normalizeSha256HexArray(configuredTokenHashes);
+    if (expectedTokenHashes.length === 0) {
+        return false;
+    }
+
+    const requestApiKey = extractRequestApiKey(headers);
+    if (!requestApiKey) {
+        return false;
+    }
+
+    const requestTokenHash = sha256Hex(requestApiKey);
+    return expectedTokenHashes.some(expectedTokenHash => secureEquals(requestTokenHash, expectedTokenHash));
+}
+
 function isAuthorizedAdminRequest(authToken, configuredAuthToken) {
     const normalizedConfiguredToken = normalizeString(configuredAuthToken);
     if (!normalizedConfiguredToken) {
@@ -123,11 +200,16 @@ function isAuthorizedAdminRequest(authToken, configuredAuthToken) {
 module.exports = {
     generateRandomSecret,
     getConfiguredApiKeys,
+    getConfiguredClaudeTokenRequestAuthTokenHashes,
+    getConfiguredClaudeTokenRequestAuthTokens,
     hasConfiguredApiKeys,
     getConfiguredAuthToken,
     normalizeString,
     normalizeStringArray,
+    normalizeSha256HexArray,
+    sha256Hex,
     extractRequestApiKey,
     isAuthorizedRequest,
+    isAuthorizedRequestWithTokenHashes,
     isAuthorizedAdminRequest,
 };
