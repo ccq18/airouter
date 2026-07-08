@@ -55,6 +55,37 @@ function normalizeStringArray(values) {
         .filter(Boolean);
 }
 
+function hasOwnField(value, field) {
+    return Object.prototype.hasOwnProperty.call(value, field);
+}
+
+function normalizeApiKeyConfigAliases(item) {
+    const normalized = { ...item };
+
+    if (!hasOwnField(normalized, 'apikey')) {
+        if (hasOwnField(normalized, 'apiKey')) {
+            normalized.apikey = normalized.apiKey;
+        } else if (hasOwnField(normalized, 'api_key')) {
+            normalized.apikey = normalized.api_key;
+        }
+    }
+
+    if (!hasOwnField(normalized, 'base_url')) {
+        if (hasOwnField(normalized, 'baseUrl')) {
+            normalized.base_url = normalized.baseUrl;
+        } else if (hasOwnField(normalized, 'baseURL')) {
+            normalized.base_url = normalized.baseURL;
+        }
+    }
+
+    delete normalized.apiKey;
+    delete normalized.api_key;
+    delete normalized.baseUrl;
+    delete normalized.baseURL;
+
+    return normalized;
+}
+
 function normalizeResponsesModelAliases(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         throw new ConfigEditorError('配置设置 responses.model_aliases 必须是对象');
@@ -165,18 +196,23 @@ function readParsedConfigFile(configFile, options = {}) {
 function normalizeConfigItem(item, existingItem = {}) {
     assertPlainObject(item, '配置项必须是对象');
 
-    const nextItem = {
+    const typeProbe = {
         ...(existingItem && typeof existingItem === 'object' && !Array.isArray(existingItem) ? existingItem : {}),
         ...item,
     };
-    const type = getConfigItemType(nextItem);
+    const type = getConfigItemType(typeProbe);
+    const normalizedItem = type === 'apikey' ? normalizeApiKeyConfigAliases(item) : item;
+    const nextItem = {
+        ...(existingItem && typeof existingItem === 'object' && !Array.isArray(existingItem) ? existingItem : {}),
+        ...normalizedItem,
+    };
 
     for (const field of getEditableFields(type)) {
         if (field === 'support') {
             continue;
         }
 
-        nextItem[field] = normalizeString(item[field]);
+        nextItem[field] = normalizeString(normalizedItem[field]);
     }
 
     if (type === 'token' && !nextItem.type) {
@@ -190,8 +226,8 @@ function normalizeConfigItem(item, existingItem = {}) {
     if (type === 'apikey') {
         nextItem.type = 'apikey';
         nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
-        if (Object.prototype.hasOwnProperty.call(item, 'support')) {
-            nextItem.support = normalizeApiKeySupport(item.support);
+        if (Object.prototype.hasOwnProperty.call(normalizedItem, 'support')) {
+            nextItem.support = normalizeApiKeySupport(normalizedItem.support);
         }
     }
 

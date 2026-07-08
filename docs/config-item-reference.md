@@ -30,7 +30,7 @@
         "apikey": "sk-xxx",
         "support": ["gpt"],
         "health": {
-          "model": "gpt-4.1-mini"
+          "model": "gpt-5.4-mini"
         },
         "description": "third-party provider"
       },
@@ -137,7 +137,7 @@
   "apikey": "sk-xxx",
   "support": ["gpt"],
   "health": {
-    "model": "gpt-4.1-mini"
+    "model": "gpt-5.4-mini"
   },
   "description": "primary key"
 }
@@ -162,7 +162,7 @@
   - 可选对象，目前只支持 `model`
   - 只影响已不可用 GPT apikey 的 3 分钟恢复探测请求
   - 未配置时恢复探测默认发送 `model: "gpt-5.4-mini"`、`input: "hello"`、`stream: false`
-  - 如果第三方上游需要使用其它轻量模型，可以配置为上游可用的模型，例如 `"health": {"model": "gpt-4.1-mini"}`
+  - 管理页新增 fallback apikey 时可选择 `gpt-5.4-mini` 或 `gpt-5.4`，默认 `gpt-5.4-mini`
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询

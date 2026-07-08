@@ -1,4 +1,10 @@
 (function attachConfigAdmin(globalScope) {
+  const DEFAULT_APIKEY_HEALTH_MODEL = 'gpt-5.4-mini';
+  const APIKEY_HEALTH_MODELS = new Set([
+    DEFAULT_APIKEY_HEALTH_MODEL,
+    'gpt-5.4',
+  ]);
+
   function parseSseChunk(rawEvent) {
     const lines = String(rawEvent || '').split('\n');
     let eventName = '';
@@ -180,7 +186,8 @@
       return '***';
     }
 
-    return `${text.slice(0, 3)}-...${text.slice(-4)}`;
+    const prefix = text.slice(0, 3);
+    return `${prefix}${prefix.endsWith('-') ? '...' : '-...'}${text.slice(-4)}`;
   }
 
   function normalizeText(value) {
@@ -203,6 +210,15 @@
     }
 
     return normalized.length ? normalized : ['gpt'];
+  }
+
+  function normalizeApiKeyHealthModel(value) {
+    const model = normalizeText(value) || DEFAULT_APIKEY_HEALTH_MODEL;
+    if (!APIKEY_HEALTH_MODELS.has(model)) {
+      throw new Error('apikey 可用性测试模型仅支持 gpt-5.4-mini 或 gpt-5.4');
+    }
+
+    return model;
   }
 
   function parseJsonObject(rawText, label) {
@@ -361,6 +377,9 @@
       base_url: baseUrl,
       description: normalizeText(formValues.description),
       support: normalizeSupport(formValues.support),
+      health: {
+        model: normalizeApiKeyHealthModel(formValues.healthModel),
+      },
     };
   }
 

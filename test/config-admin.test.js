@@ -216,6 +216,12 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.match(html, /name="configMode" value="apikey"/);
   assert.match(html, /name="apiKeySupport" value="gpt"/);
   assert.match(html, /name="apiKeySupport" value="claude"/);
+  assert.match(html, /id="apiKeyHealthModelSelect"/);
+  assert.match(html, /id="fallbackHealthModelSelect"/);
+  assert.match(html, /name="apiKeyHealthModel"/);
+  assert.match(html, /name="fallbackHealthModel"/);
+  assert.match(html, /value="gpt-5\.4-mini" selected/);
+  assert.match(html, /value="gpt-5\.4"/);
   assert.match(html, /data-action="activate"/);
   assert.match(html, /data-action="move-up"/);
   assert.match(html, /data-action="move-previous"/);
@@ -800,6 +806,7 @@ test('buildConfigItemFromForm builds an apikey config from normal form fields', 
       baseUrl: ' https://api.example.com/v1/ ',
       description: ' backup provider ',
       support: ['gpt', 'claude'],
+      healthModel: 'gpt-5.4',
     }),
     {
       type: 'apikey',
@@ -807,11 +814,14 @@ test('buildConfigItemFromForm builds an apikey config from normal form fields', 
       base_url: 'https://api.example.com/v1',
       description: 'backup provider',
       support: ['gpt', 'claude'],
+      health: {
+        model: 'gpt-5.4',
+      },
     },
   );
 });
 
-test('buildConfigItemFromForm defaults apikey support to gpt when nothing is selected', () => {
+test('buildConfigItemFromForm defaults apikey support and health model when nothing is selected', () => {
   assert.deepEqual(
     buildConfigItemFromForm({
       mode: 'apikey',
@@ -825,6 +835,9 @@ test('buildConfigItemFromForm defaults apikey support to gpt when nothing is sel
       base_url: 'https://api.example.com/v1',
       description: '',
       support: ['gpt'],
+      health: {
+        model: 'gpt-5.4-mini',
+      },
     },
   );
 });
@@ -1210,7 +1223,7 @@ test('getConfigIdentityValue shows base_url and masks upstream config secrets', 
         },
       },
     ),
-    'https://api.example.com/v1 (sk--...7890)',
+    'https://api.example.com/v1 (sk-...7890)',
   );
   assert.equal(
     getConfigIdentityValue(
@@ -1224,7 +1237,7 @@ test('getConfigIdentityValue shows base_url and masks upstream config secrets', 
         },
       },
     ),
-    'https://claude.example.com/v1 (sk--...3456)',
+    'https://claude.example.com/v1 (sk-...3456)',
   );
   assert.equal(
     getConfigIdentityValue(

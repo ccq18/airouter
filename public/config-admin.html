@@ -365,6 +365,7 @@
     }
 
     input,
+    select,
     textarea {
       width: 100%;
       border: 1px solid var(--line);
@@ -375,7 +376,8 @@
       font: inherit;
     }
 
-    input {
+    input,
+    select {
       min-height: 48px;
     }
 
@@ -1271,6 +1273,14 @@
               <input id="apiKeyDescriptionInput" type="text" placeholder="例如：OpenAI 兼容备用上游">
             </div>
             <div class="field">
+              <label class="field-label" for="apiKeyHealthModelSelect">可用性测试模型</label>
+              <select id="apiKeyHealthModelSelect" name="apiKeyHealthModel">
+                <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+                <option value="gpt-5.4">gpt-5.4</option>
+              </select>
+              <p class="field-hint">用于 GPT fallback 恢复探测。</p>
+            </div>
+            <div class="field">
               <span class="field-label">支持能力</span>
               <div class="support-options">
                 <label class="support-option">
@@ -1349,6 +1359,14 @@
         <div class="field">
           <label class="field-label" for="fallbackDescriptionInput">备注</label>
           <input id="fallbackDescriptionInput" type="text" placeholder="例如：GPT 备用上游">
+        </div>
+        <div class="field">
+          <label class="field-label" for="fallbackHealthModelSelect">可用性测试模型</label>
+          <select id="fallbackHealthModelSelect" name="fallbackHealthModel">
+            <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+            <option value="gpt-5.4">gpt-5.4</option>
+          </select>
+          <p class="field-hint">用于 GPT fallback 恢复探测。</p>
         </div>
         <div class="field">
           <span class="field-label">兜底能力</span>
@@ -1463,9 +1481,11 @@
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
     const apiKeyInput = document.getElementById('apiKeyInput');
     const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
+    const apiKeyHealthModelSelect = document.getElementById('apiKeyHealthModelSelect');
     const fallbackBaseUrlInput = document.getElementById('fallbackBaseUrlInput');
     const fallbackApiKeyInput = document.getElementById('fallbackApiKeyInput');
     const fallbackDescriptionInput = document.getElementById('fallbackDescriptionInput');
+    const fallbackHealthModelSelect = document.getElementById('fallbackHealthModelSelect');
     const addButton = document.getElementById('addButton');
     const addFallbackButton = document.getElementById('addFallbackButton');
     const refreshButton = document.getElementById('refreshButton');
@@ -1793,6 +1813,7 @@
         baseUrl: apiKeyBaseUrlInput.value,
         description: apiKeyDescriptionInput.value,
         support: getSelectedApiKeySupport(),
+        healthModel: apiKeyHealthModelSelect.value,
       });
     }
 
@@ -1803,6 +1824,7 @@
         baseUrl: fallbackBaseUrlInput.value,
         description: fallbackDescriptionInput.value,
         support: getSelectedFallbackSupport(),
+        healthModel: fallbackHealthModelSelect.value,
       });
     }
 
@@ -1811,6 +1833,7 @@
       apiKeyInput.value = '';
       apiKeyBaseUrlInput.value = '';
       apiKeyDescriptionInput.value = '';
+      apiKeyHealthModelSelect.value = 'gpt-5.4-mini';
       document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
         input.checked = input.value === 'gpt';
       });
@@ -1820,6 +1843,7 @@
       fallbackApiKeyInput.value = '';
       fallbackBaseUrlInput.value = '';
       fallbackDescriptionInput.value = '';
+      fallbackHealthModelSelect.value = 'gpt-5.4-mini';
       document.querySelectorAll('input[name="fallbackSupport"]').forEach(input => {
         input.checked = input.value === 'gpt';
       });

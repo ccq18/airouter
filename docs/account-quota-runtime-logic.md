@@ -30,7 +30,7 @@
 - 最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败时，apikey 会被临时标记为不可用
 - 已被标记为不可用且是当前 OpenAI fallback 焦点、`support` 包含 `gpt` 时，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用
 - GPT apikey 恢复探测默认超时为 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；该超时独立于 token 额度检查的短超时
-- GPT apikey 恢复探测默认使用模型 `gpt-5.4-mini`，可通过配置项里的 `health.model` 覆盖
+- GPT apikey 恢复探测默认使用模型 `gpt-5.4-mini`，管理页新增 fallback apikey 时可选择 `gpt-5.4-mini` 或 `gpt-5.4`，对应写入配置项里的 `health.model`
 - 管理页会显示当前 OpenAI fallback 焦点的 GPT apikey 恢复探测是否启用、是否待恢复、上次探测时间、结果、HTTP 状态/错误和探测模型
 - 只支持 `claude` 的 apikey 不做 `/v1/responses` 恢复探测
 - 管理页分别提供 OpenAI fallback 与 Claude fallback 两个 apikey 焦点开关；手动切换到某个 `apikey` 配置项时，只会调整对应链路的焦点，并把该配置恢复为可用
