@@ -9,6 +9,7 @@ const { createUpstreamRequest, requestBuffered } = require('../app/upstream-requ
 function createMockResponse({ statusCode = 200, headers = {} } = {}) {
   const response = new PassThrough();
   const originalEnd = response.end.bind(response);
+  let timeoutHandle = null;
 
   response.statusCode = statusCode;
   response.headers = headers;
@@ -17,6 +18,22 @@ function createMockResponse({ statusCode = 200, headers = {} } = {}) {
     response.complete = true;
     return originalEnd(...args);
   };
+  response.setTimeout = (timeoutMs, callback) => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+    if (timeoutMs > 0) {
+      timeoutHandle = setTimeout(callback, timeoutMs);
+    }
+    return response;
+  };
+  response.once('close', () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  });
 
   return response;
 }
@@ -92,6 +109,112 @@ test('createUpstreamRequest aborts a hanging response body after timeout', async
       return true;
     }
   );
+});
+
+test('createUpstreamRequest aborts when a connection does not become ready', async t => {
+  withStubbedHttpRequest(t, () => createMockRequest(() => {}));
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/connect',
+    connectTimeoutMs: 20,
+    timeoutMs: 200,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'connect');
+    return true;
+  });
+});
+
+test('createUpstreamRequest aborts when the first response does not arrive', async t => {
+  withStubbedHttpRequest(t, () => {
+    const request = createMockRequest(() => {});
+    process.nextTick(() => {
+      request.emit('socket', { connecting: false });
+    });
+    return request;
+  });
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/first-response',
+    connectTimeoutMs: 10,
+    firstResponseTimeoutMs: 25,
+    timeoutMs: 200,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'first_response');
+    return true;
+  });
+});
+
+test('createUpstreamRequest aborts an idle response stream', async t => {
+  withStubbedHttpRequest(t, (_options, callback) => {
+    return createMockRequest((_body, request) => {
+      const response = createMockResponse();
+      request.response = response;
+
+      setImmediate(() => {
+        callback(response);
+        response.write('partial');
+      });
+    });
+  });
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/idle',
+    idleTimeoutMs: 25,
+    timeoutMs: 200,
+  });
+  const response = await upstream.responsePromise;
+
+  await assert.rejects(readResponseBody(response), error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'idle');
+    return true;
+  });
+});
+
+test('createUpstreamRequest respects a shared absolute deadline', async t => {
+  withStubbedHttpRequest(t, () => createMockRequest(() => {}));
+
+  const startedAt = Date.now();
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/deadline',
+    deadlineAt: Date.now() + 35,
+    timeoutMs: 200,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'total');
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 100);
+});
+
+test('createUpstreamRequest reports the total deadline before a longer connect timeout', async t => {
+  withStubbedHttpRequest(t, () => createMockRequest(() => {}));
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/deadline-before-connect',
+    connectTimeoutMs: 200,
+    deadlineAt: Date.now() + 25,
+    timeoutMs: 500,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'total');
+    return true;
+  });
 });
 
 test('requestBuffered keeps one timeout budget across redirects', async t => {

@@ -73,9 +73,17 @@ curl -sS http://localhost:3009/health \
   "configs": {
     "total": 2,
     "default": "account@example.com"
+  },
+  "concurrency": {
+    "inFlight": 3,
+    "maxInFlight": 32,
+    "queued": 1,
+    "maxQueueSize": 64
   }
 }
 ```
+
+`concurrency` 用于观察业务入口的当前处理数和排队数；健康检查本身不占用业务并发槽位。
 
 ## POST /v1/responses
 
@@ -265,7 +273,7 @@ apikey 模式下，请求会直连上游 Images API，支持字段和返回格�
 
 这里的 `300s` 左右表示 Airouter 等上游返回时达到服务端请求超时边界，返回 HTTP 500 `request timeout after 300000ms`。这些数据是单次样本，受账号状态、上游排队、图片尺寸、prompt 复杂度和网络状态影响很大，只适合作为当前链路的粗略参考。
 
-后续默认上游请求超时已经按官方 SDK 默认请求窗口调整为 `600000ms`（10 分钟），仍可用环境变量 `UPSTREAM_REQUEST_TIMEOUT_MS` 覆盖。两个图片测试脚本的客户端默认 timeout 是 `660s`，比服务端多 60 秒，方便服务端先返回上游结果或明确的超时错误。上表中的 `300s` 超时结果保留为调大超时前的实测记录。
+后续默认上游总 deadline 已经按官方 SDK 默认请求窗口调整为 `600000ms`（10 分钟）。优先使用 `UPSTREAM_TOTAL_TIMEOUT_MS` 覆盖；旧变量 `UPSTREAM_REQUEST_TIMEOUT_MS` 在未设置新变量时继续兼容。failover 和 redirect 共享同一个总 deadline，不会为每次尝试重新计算 10 分钟。连接、流式首响应和流式空闲另有更短的分阶段超时，详见 [并发、背压与超时](performance-and-timeouts.md)。两个图片测试脚本的客户端默认 timeout 是 `660s`，比服务端多 60 秒，方便服务端先返回上游结果或明确的超时错误。上表中的 `300s` 超时结果保留为调大超时前的实测记录。
 
 ## POST /v1/images/edits
 
@@ -364,11 +372,14 @@ Airouter 自己产生的错误通常是 JSON：
 | 状态码 | 场景 |
 | --- | --- |
 | `400` | 请求体格式错误、必填字段缺失、当前兼容路径不支持的参数 |
+| `408` | 客户端上传请求体时长时间没有新数据 |
 | `401` | 配置了入口 `apikeys`，但请求没有提供有效入口密钥 |
+| `413` | JSON、普通代理或图片编辑请求体超过配置上限 |
 | `404` | 路径不存在 |
 | `405` | 接口不支持该 HTTP 方法 |
 | `415` | `/v1/messages` 没有使用 `application/json` |
 | `502` | 没有可用配置项，或上游请求失败 |
+| `503` | 全局并发队列已满或排队超时；响应携带 `Retry-After: 1` |
 | `504` | 上游请求超时 |
 
 上游直接返回的错误会尽量保持原状态码、响应头和响应体。

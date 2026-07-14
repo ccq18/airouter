@@ -87,7 +87,7 @@
 - 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
 - `/v1/messages` 优先使用 `claude_token` 或 `support` 包含 `claude` 的 `apikey` 原样转发；如果请求里的本地 fake auth token 匹配某个 `claude_token.local_auth_token`，会严格绑定到该配置，不会透明切到其它 Claude 登录态。交互式 Claude Code 主请求如果改用本机 Keychain 中同一登录态的真实 Claude OAuth access token，Airouter 也会识别为这条 `claude_token` 配置。`airouter-oauth-` 前缀的本地 fake token 如果没有绑定到可用 `claude_token`，也不会 fallback 到 OpenAI/GPT 上游。没有命中 Claude fake token 绑定且没有可用 Claude 直转配置时，优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
 - `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
-- 每分钟额度轮询会检查所有 `token` 配置项
+- 每分钟额度轮询只检查当前活动配置（当前活动配置为 `token` 时）；每 3 分钟全量校正会检查所有 `token` 配置项
 - 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
 - `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换；最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用
 - 每 3 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.4-mini`，可通过该配置项的 `health.model` 覆盖
@@ -167,7 +167,7 @@
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
 - `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；如果没有可切换配置，才透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。是否临时标记为不可用仍按最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败判断
-- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
+- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `30000ms`（30 秒），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
 

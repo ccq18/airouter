@@ -1,4 +1,6 @@
 const { createUpstreamRequest } = require('./upstream-request');
+const { readRequestBody } = require('./request-body');
+const { writeWithBackpressure } = require('./stream-backpressure');
 const {
     transformClaudeMessagesRequest,
     transformResponsesResponseToClaudeMessage,
@@ -216,22 +218,6 @@ function buildDirectClaudeUpstreamHeaders(reqHeaders, config, contentLength, isS
     return headers;
 }
 
-function readRequestBody(req) {
-    return new Promise((resolve, reject) => {
-        const bodyChunks = [];
-
-        req.on('data', chunk => {
-            bodyChunks.push(chunk);
-        });
-
-        req.on('end', () => {
-            resolve(Buffer.concat(bodyChunks));
-        });
-
-        req.on('error', reject);
-    });
-}
-
 function sendJsonError(res, status, payload) {
     if (res.headersSent) {
         res.end();
@@ -363,8 +349,8 @@ function getGatewayStatusCode(err) {
 }
 
 function writeSseEvent(res, entry) {
-    res.write(`event: ${entry.event}\n`);
-    res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+    const frame = `event: ${entry.event}\ndata: ${JSON.stringify(entry.data)}\n\n`;
+    return res.write(frame);
 }
 
 function normalizeUpstreamHeaders(rawHeaders) {
@@ -574,6 +560,10 @@ function forwardDirectClaudeMessagesRequest({
     accessLogEnabled,
     logRequestSnapshot,
     createUpstreamRequestImpl,
+    deadlineAt,
+    upstreamConnectTimeoutMs,
+    upstreamFirstResponseTimeoutMs,
+    upstreamStreamIdleTimeoutMs,
     upstreamRequestTimeoutMs,
     handleRetryableUpstreamError,
     observeApiKeyRequestResult = null,
@@ -609,7 +599,11 @@ function forwardDirectClaudeMessagesRequest({
         targetUrl,
         headers: upstreamHeaders,
         body: rawBody,
-        timeoutMs: upstreamRequestTimeoutMs
+        connectTimeoutMs: upstreamConnectTimeoutMs,
+        deadlineAt,
+        firstResponseTimeoutMs: isClientStream ? upstreamFirstResponseTimeoutMs : 0,
+        idleTimeoutMs: isClientStream ? upstreamStreamIdleTimeoutMs : 0,
+        timeoutMs: upstreamRequestTimeoutMs,
     });
     let responseFinished = false;
     let requestClosed = false;
@@ -684,7 +678,7 @@ function forwardDirectClaudeMessagesRequest({
         return result;
     }
 
-    upstream.responsePromise.then(response => {
+    upstream.responsePromise.then(async response => {
         const statusCode = Number(response.statusCode || 502);
         const upstreamHeaders = normalizeUpstreamHeaders(response.headers);
         const contentType = upstreamHeaders['content-type'] || '';
@@ -713,58 +707,21 @@ function forwardDirectClaudeMessagesRequest({
                 res.setHeader(name, value);
             }
 
-            response.on('data', chunk => {
-                observeSuccessfulClientCommit(statusCode);
-                res.write(chunk);
-            });
-            response.on('end', () => {
-                responseFinished = true;
-                releaseCurrentConfig();
-                if (!res.writableEnded) {
-                    observeSuccessfulClientCommit(statusCode);
-                    res.end();
-                }
-            });
-            response.on('error', err => {
-                if (requestClosed) {
-                    return;
-                }
-
-                error(`代理请求失败: ${err.message}`);
-                if (successfulClientResponseCommitted || res.headersSent) {
+            for await (const chunk of response) {
+                if (!await writeWithBackpressure(res, chunk, {
+                    onWrite: () => observeSuccessfulClientCommit(statusCode)
+                })) {
                     releaseCurrentConfig();
-                    if (!res.writableEnded) {
-                        res.end();
-                    }
                     return;
                 }
+            }
 
-                const retryResult = tryRetryWithNextConfig({
-                    reason: 'apikey_upstream_error',
-                    retryKey: err.message || 'response_error',
-                    retrySource: 'stream'
-                });
-                if (retryResult.retried) {
-                    return;
-                }
-                if (!retryResult.handled) {
-                    observeDirectApiKeyResult({
-                        ok: false,
-                        reason: 'apikey_upstream_error',
-                        lastError: err.message,
-                        switchReason: 'apikey_upstream_failover'
-                    });
-                }
-                releaseCurrentConfig();
-                if (!res.headersSent) {
-                    sendJsonError(res, getGatewayStatusCode(err), {
-                        error: 'Bad Gateway',
-                        message: err.message
-                    });
-                } else if (!res.writableEnded) {
-                    res.end();
-                }
-            });
+            responseFinished = true;
+            releaseCurrentConfig();
+            if (!res.writableEnded) {
+                observeSuccessfulClientCommit(statusCode);
+                res.end();
+            }
             return;
         }
 
@@ -820,6 +777,14 @@ function forwardDirectClaudeMessagesRequest({
 
         const message = err.message || 'upstream request failed';
         error(`代理请求失败: ${message}`);
+        if (successfulClientResponseCommitted || res.headersSent) {
+            releaseCurrentConfig();
+            if (!res.writableEnded) {
+                res.end();
+            }
+            return;
+        }
+
         const retryResult = tryRetryWithNextConfig({
             reason: 'apikey_upstream_error',
             retryKey: message,
@@ -865,6 +830,11 @@ function createClaudeMessagesHandler({
     reasoningEffort = 'high',
     clientVersion = '1.0.1',
     upstreamRequestTimeoutMs = 0,
+    upstreamConnectTimeoutMs = 10 * 1000,
+    upstreamFirstResponseTimeoutMs = 60 * 1000,
+    upstreamStreamIdleTimeoutMs = 3 * 60 * 1000,
+    requestBodyLimitBytes = 16 * 1024 * 1024,
+    requestBodyIdleTimeoutMs = 30 * 1000,
     createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest,
     handleRetryableUpstreamError = null,
     getSessionKey = () => '',
@@ -902,7 +872,10 @@ function createClaudeMessagesHandler({
         let config = null;
 
         try {
-            rawBody = await readRequestBody(req);
+            rawBody = await readRequestBody(req, {
+                idleTimeoutMs: requestBodyIdleTimeoutMs,
+                limitBytes: requestBodyLimitBytes,
+            });
             claudeRequest = JSON.parse(rawBody.toString('utf8'));
             isClientStream = claudeRequest.stream === true;
             sessionKey = getSessionKey({
@@ -912,8 +885,13 @@ function createClaudeMessagesHandler({
                 rawBody
             });
         } catch (err) {
-            return sendJsonError(res, 400, {
-                error: '请求体处理失败',
+            const statusCode = Number.isInteger(err.statusCode) ? err.statusCode : 400;
+            return sendJsonError(res, statusCode, {
+                error: statusCode === 413
+                    ? 'Payload Too Large'
+                    : statusCode === 408
+                        ? 'Request Timeout'
+                        : '请求体处理失败',
                 details: err.message
             });
         }
@@ -947,6 +925,7 @@ function createClaudeMessagesHandler({
             });
         }
 
+        const deadlineAt = upstreamRequestTimeoutMs > 0 ? Date.now() + upstreamRequestTimeoutMs : null;
         let upstreamBody = null;
         let responseFinished = false;
         let requestClosed = false;
@@ -1081,6 +1060,10 @@ function createClaudeMessagesHandler({
                     accessLogEnabled,
                     logRequestSnapshot,
                     createUpstreamRequestImpl,
+                    deadlineAt,
+                    upstreamConnectTimeoutMs,
+                    upstreamFirstResponseTimeoutMs,
+                    upstreamStreamIdleTimeoutMs,
                     upstreamRequestTimeoutMs,
                     handleRetryableUpstreamError,
                     observeApiKeyRequestResult,
@@ -1133,7 +1116,11 @@ function createClaudeMessagesHandler({
                 targetUrl: attemptTarget.targetUrl,
                 headers: upstreamHeaders,
                 body: upstreamBody,
-                timeoutMs: upstreamRequestTimeoutMs
+                connectTimeoutMs: upstreamConnectTimeoutMs,
+                deadlineAt,
+                firstResponseTimeoutMs: upstreamFirstResponseTimeoutMs,
+                idleTimeoutMs: upstreamStreamIdleTimeoutMs,
+                timeoutMs: upstreamRequestTimeoutMs,
             });
             currentUpstream = upstream;
 
@@ -1144,6 +1131,55 @@ function createClaudeMessagesHandler({
             let upstreamMeta = null;
             let retryClassification = null;
             let convertedApiKeyResultRecorded = false;
+            let activeResponse = null;
+            let waitingForClientDrain = false;
+            const pendingClientStreamEntries = [];
+
+            function clearClientBackpressure() {
+                waitingForClientDrain = false;
+                pendingClientStreamEntries.length = 0;
+                res.removeListener('drain', handleClientDrain);
+                res.removeListener('close', clearClientBackpressure);
+            }
+
+            function handleClientDrain() {
+                waitingForClientDrain = false;
+                while (pendingClientStreamEntries.length > 0) {
+                    const entry = pendingClientStreamEntries.shift();
+                    const accepted = writeSseEvent(res, entry);
+                    observeConvertedApiKeyResult({ ok: true });
+                    if (accepted === false) {
+                        waitingForClientDrain = true;
+                        res.once('drain', handleClientDrain);
+                        return;
+                    }
+                }
+
+                if (activeResponse && !activeResponse.destroyed && !requestClosed) {
+                    activeResponse.resume();
+                }
+            }
+
+            function writeClientStreamEntry(entry) {
+                if (waitingForClientDrain) {
+                    pendingClientStreamEntries.push(entry);
+                    return;
+                }
+
+                const accepted = writeSseEvent(res, entry);
+                observeConvertedApiKeyResult({ ok: true });
+                if (accepted !== false) {
+                    return;
+                }
+
+                waitingForClientDrain = true;
+                if (activeResponse && typeof activeResponse.pause === 'function') {
+                    activeResponse.pause();
+                }
+                res.once('drain', handleClientDrain);
+            }
+
+            res.once('close', clearClientBackpressure);
 
             function createResponsesUpstreamErrorClassification(err, retrySource) {
                 const message = err && err.message ? err.message : String(err || 'upstream_error');
@@ -1161,6 +1197,7 @@ function createClaudeMessagesHandler({
                 }
 
                 responseFinished = false;
+                clearClientBackpressure();
                 releaseCurrentConfigSelection();
                 startAttempt(nextSelection, failoverAttempt + 1);
                 return true;
@@ -1222,7 +1259,7 @@ function createClaudeMessagesHandler({
                     collector.accept(entry);
                     if (isClientStream) {
                         ensureClientStreamHeaders();
-                        writeSseEvent(res, entry);
+                        writeClientStreamEntry(entry);
                     }
                 }
             }
@@ -1240,6 +1277,7 @@ function createClaudeMessagesHandler({
             }
 
             upstream.responsePromise.then(response => {
+                activeResponse = response;
                 upstreamMeta = {
                     statusCode: Number(response.statusCode || 502),
                     headers: normalizeUpstreamHeaders(response.headers)
@@ -1260,6 +1298,7 @@ function createClaudeMessagesHandler({
 
                 response.on('end', () => {
                     responseFinished = true;
+                    clearClientBackpressure();
 
                     if (isSuccessfulResponsesStatus(upstreamMeta.statusCode)) {
                         processResponsesSseText(
@@ -1326,6 +1365,7 @@ function createClaudeMessagesHandler({
                 });
 
                 response.on('error', err => {
+                    clearClientBackpressure();
                     if (requestClosed) {
                         return;
                     }
@@ -1350,6 +1390,7 @@ function createClaudeMessagesHandler({
                     });
                 });
             }).catch(err => {
+                clearClientBackpressure();
                 if (requestClosed) {
                     return;
                 }

@@ -1390,7 +1390,7 @@ test('refreshQuotas marks token unavailable only after three consecutive quota c
   assert.equal(configs[0].runtime.quotaCheckFailures, 0);
 });
 
-test('startQuotaMonitor schedules minute and three-minute spaced all-account polls', async () => {
+test('startQuotaMonitor checks the active token each minute and all tokens every three minutes', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }),
     createConfig(1, { available: true, reason: 'ok' }),
@@ -1460,18 +1460,18 @@ test('startQuotaMonitor schedules minute and three-minute spaced all-account pol
 
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-1'],
+    ['account-0'],
   );
-  assert.deepEqual(delayCalls, [1000]);
+  assert.deepEqual(delayCalls, []);
 
   intervalCallbacks[1]();
   await flushAsyncWork();
 
   assert.deepEqual(
     quotaResponses.getCalls().map(call => call.headers['chatgpt-account-id']),
-    ['account-0', 'account-1', 'account-0', 'account-1'],
+    ['account-0', 'account-0', 'account-1'],
   );
-  assert.deepEqual(delayCalls, [1000, 1000]);
+  assert.deepEqual(delayCalls, [1000]);
 
   manager.stopQuotaMonitor();
 
@@ -1597,7 +1597,7 @@ test('refreshQuotas gives apikey recovery probes an AI request timeout', async (
   await manager.refreshQuotas('all_poll');
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].timeoutMs, 10 * 60 * 1000);
+  assert.equal(calls[0].timeoutMs, 30 * 1000);
 });
 
 test('refreshQuotas treats non-200 apikey recovery statuses as failed', async () => {
