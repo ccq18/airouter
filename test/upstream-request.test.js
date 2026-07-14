@@ -180,6 +180,34 @@ test('createUpstreamRequest aborts an idle response stream', async t => {
   });
 });
 
+test('createUpstreamRequest completes safely after Node clears the response socket', async t => {
+  withStubbedHttpRequest(t, (_options, callback) => {
+    return createMockRequest((_body, request) => {
+      const response = createMockResponse();
+      response.socket = {
+        setTimeout() {},
+      };
+      request.response = response;
+
+      setImmediate(() => {
+        callback(response);
+        response.socket = null;
+        response.emit('close');
+      });
+    });
+  });
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/socket-cleared-before-close',
+    idleTimeoutMs: 25,
+    timeoutMs: 200,
+  });
+
+  await upstream.responsePromise;
+  await new Promise(resolve => setImmediate(resolve));
+});
+
 test('createUpstreamRequest respects a shared absolute deadline', async t => {
   withStubbedHttpRequest(t, () => createMockRequest(() => {}));
 

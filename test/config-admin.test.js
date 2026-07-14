@@ -1244,6 +1244,19 @@ test('getConfigIdentityValue shows base_url and masks upstream config secrets', 
       { mode: 'mixed' },
       {
         item: {
+          type: 'apikey',
+          baseUrl: 'https://api.legacy.example/v1',
+          apiKey: 'sk-legacy123456',
+        },
+      },
+    ),
+    'https://api.legacy.example/v1 (sk-...3456)',
+  );
+  assert.equal(
+    getConfigIdentityValue(
+      { mode: 'mixed' },
+      {
+        item: {
           type: 'claude_token',
           local_auth_token: 'airouter-oauth-local-token',
         },

@@ -296,6 +296,27 @@ test('createRuntimeConfigs supports item-level apikey configs', () => {
   assert.deepEqual(runtimeConfigs[1].support, ['gpt', 'claude']);
 });
 
+test('createRuntimeConfigs accepts camelCase apikey credentials', () => {
+  const parsed = parseOpenAiConfigFile(JSON.stringify({
+    configs: [
+      {
+        type: 'apikey',
+        baseUrl: 'https://api.example.com/v1/',
+        apiKey: 'sk-1',
+        description: 'primary',
+      },
+    ],
+  }));
+
+  const runtimeConfigs = createRuntimeConfigs(parsed);
+
+  assert.equal(runtimeConfigs.length, 1);
+  assert.equal(runtimeConfigs[0].type, 'apikey');
+  assert.equal(runtimeConfigs[0].baseUrl, 'https://api.example.com/v1');
+  assert.equal(runtimeConfigs[0].apiKey, 'sk-1');
+  assert.deepEqual(runtimeConfigs[0].support, ['gpt']);
+});
+
 test('createRuntimeConfigs preserves configured GPT apikey health model', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify({
     configs: [

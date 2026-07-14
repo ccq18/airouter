@@ -76,6 +76,23 @@ function normalizeString(value) {
     return String(value).trim();
 }
 
+function getFirstNormalizedString(source, keys) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        return '';
+    }
+
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+            const normalized = normalizeString(source[key]);
+            if (normalized) {
+                return normalized;
+            }
+        }
+    }
+
+    return '';
+}
+
 function normalizeSha256HexArray(values) {
     if (!Array.isArray(values)) {
         return [];
@@ -321,8 +338,8 @@ function createTokenRuntimeConfig(config, index) {
 }
 
 function createApiKeyRuntimeConfig(config, index) {
-    const apikey = normalizeString(config && config.apikey);
-    const baseUrl = normalizeString(config && config.base_url).replace(/\/+$/, '');
+    const apikey = getFirstNormalizedString(config, ['apikey', 'apiKey', 'api_key']);
+    const baseUrl = getFirstNormalizedString(config, ['base_url', 'baseUrl', 'baseURL']).replace(/\/+$/, '');
 
     if (!apikey || !baseUrl) {
         throw new Error('apikey 配置至少需要 apikey 和 base_url');

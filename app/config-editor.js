@@ -26,6 +26,20 @@ function normalizeString(value) {
     return String(value);
 }
 
+function getFirstObjectValue(source, keys) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        return undefined;
+    }
+
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+            return source[key];
+        }
+    }
+
+    return undefined;
+}
+
 function decodeJwtPayload(token) {
     const text = normalizeString(token);
     const parts = text.split('.');
@@ -224,11 +238,18 @@ function normalizeConfigItem(item, existingItem = {}) {
     }
 
     if (type === 'apikey') {
+        const rawApiKey = getFirstObjectValue(item, ['apikey', 'apiKey', 'api_key']);
+        const rawBaseUrl = getFirstObjectValue(item, ['base_url', 'baseUrl', 'baseURL']);
         nextItem.type = 'apikey';
-        nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
-        if (Object.prototype.hasOwnProperty.call(normalizedItem, 'support')) {
-            nextItem.support = normalizeApiKeySupport(normalizedItem.support);
+        nextItem.apikey = normalizeString(rawApiKey);
+        nextItem.base_url = normalizeString(rawBaseUrl).replace(/\/+$/, '');
+        if (Object.prototype.hasOwnProperty.call(item, 'support')) {
+            nextItem.support = normalizeApiKeySupport(item.support);
         }
+        delete nextItem.apiKey;
+        delete nextItem.api_key;
+        delete nextItem.baseUrl;
+        delete nextItem.baseURL;
     }
 
     if (type === 'claude_token') {

@@ -73,17 +73,9 @@ curl -sS http://localhost:3009/health \
   "configs": {
     "total": 2,
     "default": "account@example.com"
-  },
-  "concurrency": {
-    "inFlight": 3,
-    "maxInFlight": 32,
-    "queued": 1,
-    "maxQueueSize": 64
   }
 }
 ```
-
-`concurrency` 用于观察业务入口的当前处理数和排队数；健康检查本身不占用业务并发槽位。
 
 ## POST /v1/responses
 

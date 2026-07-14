@@ -599,8 +599,10 @@
     if (configItem && configItem.type === 'apikey') {
       const baseUrl = typeof configItem.base_url === 'string' && configItem.base_url.trim()
         ? configItem.base_url.trim()
+        : typeof configItem.baseUrl === 'string' && configItem.baseUrl.trim()
+          ? configItem.baseUrl.trim()
         : '-';
-      const apikey = configItem && configItem.apikey;
+      const apikey = configItem && (configItem.apikey || configItem.apiKey || configItem.api_key);
 
       return `${baseUrl} (${maskSecret(apikey)})`;
     }
@@ -608,6 +610,8 @@
     if (configItem && configItem.type === 'claude_token') {
       const baseUrl = typeof configItem.base_url === 'string' && configItem.base_url.trim()
         ? configItem.base_url.trim()
+        : typeof configItem.baseUrl === 'string' && configItem.baseUrl.trim()
+          ? configItem.baseUrl.trim()
         : 'https://api.anthropic.com';
       const identity = configItem.local_auth_token || configItem.account_uuid || configItem.access_token;
 

@@ -359,8 +359,11 @@ function createUpstreamRequest({
     completed = true;
     clearPhaseTimeouts();
     clearTimer('total');
-    if (response && typeof response.setTimeout === 'function') {
-      response.setTimeout(0);
+    // IncomingMessage.setTimeout() delegates to response.socket.setTimeout().
+    // Node clears response.socket before emitting close, so calling the wrapper
+    // from a close listener can throw while completing an otherwise normal request.
+    if (response && response.socket && typeof response.socket.setTimeout === 'function') {
+      response.socket.setTimeout(0);
     }
   }
 

@@ -11,13 +11,6 @@ const zlib = require('zlib');
 const express = require('express');
 const { createUpstreamRequest, consumeResponseBody, requestBuffered } = require('./app/upstream-request');
 const { readRequestBody, RequestBodyError } = require('./app/request-body');
-const {
-    DEFAULT_MAX_IN_FLIGHT: DEFAULT_GLOBAL_MAX_IN_FLIGHT,
-    DEFAULT_MAX_QUEUE_SIZE: DEFAULT_REQUEST_QUEUE_MAX_SIZE,
-    DEFAULT_QUEUE_TIMEOUT_MS,
-    createRequestConcurrencyLimiter,
-    createRequestConcurrencyMiddleware,
-} = require('./app/request-concurrency');
 const { forwardReadableWithBackpressure } = require('./app/stream-backpressure');
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
 const { buildIncomingUrl, rewriteProxyUrl } = require('./app/proxy-url-rewrite');
@@ -185,14 +178,6 @@ const IMAGE_REQUEST_BODY_LIMIT_BYTES = parsePositiveInteger(
     'IMAGE_REQUEST_BODY_LIMIT_BYTES',
     DEFAULT_IMAGE_REQUEST_BODY_LIMIT_BYTES
 );
-const GLOBAL_MAX_IN_FLIGHT = parsePositiveInteger('GLOBAL_MAX_IN_FLIGHT', DEFAULT_GLOBAL_MAX_IN_FLIGHT);
-const REQUEST_QUEUE_MAX_SIZE = parsePositiveInteger('REQUEST_QUEUE_MAX_SIZE', DEFAULT_REQUEST_QUEUE_MAX_SIZE);
-const REQUEST_QUEUE_TIMEOUT_MS = parsePositiveInteger('REQUEST_QUEUE_TIMEOUT_MS', DEFAULT_QUEUE_TIMEOUT_MS);
-const requestConcurrencyLimiter = createRequestConcurrencyLimiter({
-    maxInFlight: GLOBAL_MAX_IN_FLIGHT,
-    maxQueueSize: REQUEST_QUEUE_MAX_SIZE,
-    queueTimeoutMs: REQUEST_QUEUE_TIMEOUT_MS,
-});
 
 function hasCliFlag(flag) {
     return process.argv.includes(flag);
@@ -3487,7 +3472,6 @@ function stopControlWatcher() {
 
 // ==================== 初始化 ====================
 const app = express();
-const proxyConcurrencyMiddleware = createRequestConcurrencyMiddleware(requestConcurrencyLimiter);
 
 // ==================== 路由配置 ====================
 
@@ -4030,13 +4014,8 @@ app.get('/health', requireConfiguredApiKeys, (req, res) => {
             total: apiConfigs.length,
             default: currentAccountStatus ? currentAccountStatus.description : null
         },
-        concurrency: requestConcurrencyLimiter.getStatus(),
     });
 });
-
-app.use('/v1', requireConfiguredApiKeys, proxyConcurrencyMiddleware);
-app.use('/wham', requireConfiguredApiKeys, proxyConcurrencyMiddleware);
-app.use('/cpa/v1', requireConfiguredApiKeys, proxyConcurrencyMiddleware);
 
 app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
     if (!accountManager.getActiveConfig()) {
@@ -4123,7 +4102,6 @@ async function startServer() {
             log(`  - 上游超时: 连接 ${UPSTREAM_CONNECT_TIMEOUT_MS}ms，流式首响应 ${UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS}ms，流式空闲 ${UPSTREAM_STREAM_IDLE_TIMEOUT_MS}ms，总时间 ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
             log(`  - apikey 恢复探测超时: ${hasRecoverableApiKeyConfigs(apiConfigs) ? `${APIKEY_RECOVERY_TIMEOUT_MS}ms` : '关闭（无 GPT apikey 配置项）'}`);
-            log(`  - 全局并发: 最多 ${GLOBAL_MAX_IN_FLIGHT} 个处理中，队列 ${REQUEST_QUEUE_MAX_SIZE} 个，排队超时 ${REQUEST_QUEUE_TIMEOUT_MS}ms`);
             log(`  - 请求体限制: JSON ${JSON_REQUEST_BODY_LIMIT_BYTES} 字节，图片编辑 ${IMAGE_REQUEST_BODY_LIMIT_BYTES} 字节，上传空闲超时 ${REQUEST_BODY_IDLE_TIMEOUT_MS}ms`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
             log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
