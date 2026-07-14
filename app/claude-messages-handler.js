@@ -832,7 +832,7 @@ function createClaudeMessagesHandler({
     upstreamRequestTimeoutMs = 0,
     upstreamConnectTimeoutMs = 10 * 1000,
     upstreamFirstResponseTimeoutMs = 60 * 1000,
-    upstreamStreamIdleTimeoutMs = 3 * 60 * 1000,
+    upstreamStreamIdleTimeoutMs = 2 * 60 * 1000,
     requestBodyLimitBytes = 16 * 1024 * 1024,
     requestBodyIdleTimeoutMs = 30 * 1000,
     createUpstreamRequest: createUpstreamRequestImpl = createUpstreamRequest,

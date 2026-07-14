@@ -166,7 +166,7 @@ const LEGACY_UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIME
 const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_TOTAL_TIMEOUT_MS', LEGACY_UPSTREAM_REQUEST_TIMEOUT_MS);
 const UPSTREAM_CONNECT_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_CONNECT_TIMEOUT_MS', 10 * 1000);
 const UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS', 60 * 1000);
-const UPSTREAM_STREAM_IDLE_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_STREAM_IDLE_TIMEOUT_MS', 3 * 60 * 1000);
+const UPSTREAM_STREAM_IDLE_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_STREAM_IDLE_TIMEOUT_MS', 2 * 60 * 1000);
 const QUOTA_CHECK_TIMEOUT_MS = parseTimeoutMs('QUOTA_CHECK_TIMEOUT_MS', 10 * 1000);
 const APIKEY_RECOVERY_TIMEOUT_MS = parseTimeoutMs('APIKEY_RECOVERY_TIMEOUT_MS', 30 * 1000);
 const REQUEST_BODY_IDLE_TIMEOUT_MS = parsePositiveInteger('REQUEST_BODY_IDLE_TIMEOUT_MS', 30 * 1000);
@@ -3054,6 +3054,7 @@ function buildTokenImageUpstreamRequest(req, config, responsesPayload, deadlineA
         targetUrl,
         headers,
         body: upstreamBody,
+        maxResponseBytes: IMAGE_REQUEST_BODY_LIMIT_BYTES,
         ...buildUpstreamTimeoutOptions(false, deadlineAt),
     };
 }
@@ -3066,6 +3067,7 @@ function buildNativeImageUpstreamRequest(req, incomingUrl, config, body, deadlin
         targetUrl: new URL(rewrittenUrl, config.baseUrl).toString(),
         headers,
         body,
+        maxResponseBytes: IMAGE_REQUEST_BODY_LIMIT_BYTES,
         ...buildUpstreamTimeoutOptions(false, deadlineAt),
     };
 }

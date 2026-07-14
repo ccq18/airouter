@@ -843,7 +843,7 @@ test('server uses phased proxy timeouts within the official SDK total timeout wi
   assert.match(openaiSource, /UPSTREAM_TOTAL_TIMEOUT_MS', LEGACY_UPSTREAM_REQUEST_TIMEOUT_MS/);
   assert.match(openaiSource, /UPSTREAM_CONNECT_TIMEOUT_MS', 10 \* 1000/);
   assert.match(openaiSource, /UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS', 60 \* 1000/);
-  assert.match(openaiSource, /UPSTREAM_STREAM_IDLE_TIMEOUT_MS', 3 \* 60 \* 1000/);
+  assert.match(openaiSource, /UPSTREAM_STREAM_IDLE_TIMEOUT_MS', 2 \* 60 \* 1000/);
   assert.match(openaiSource, /APIKEY_RECOVERY_TIMEOUT_MS', 30 \* 1000/);
   assert.match(openaiSource, /ALL_QUOTA_CHECK_INTERVAL_MS = 3 \* 60 \* 1000/);
   assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);

@@ -8,7 +8,7 @@
 | --- | ---: | --- |
 | `UPSTREAM_CONNECT_TIMEOUT_MS` | `10000` | 建连超时，包含代理 CONNECT 和 HTTPS/TLS 建连 |
 | `UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS` | `60000` | 流式请求等待上游响应头/首响应的最长时间 |
-| `UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | `180000` | 流式响应两次上游网络活动之间允许的最长空闲时间 |
+| `UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | `120000` | 流式响应两次上游网络活动之间允许的最长空闲时间 |
 | `UPSTREAM_TOTAL_TIMEOUT_MS` | `600000` | 一次客户端业务请求的共享上游总 deadline，包含 failover 重放 |
 | `UPSTREAM_REQUEST_TIMEOUT_MS` | `600000` | 旧版总超时变量；只在未设置 `UPSTREAM_TOTAL_TIMEOUT_MS` 时作为兼容回退 |
 | `APIKEY_RECOVERY_TIMEOUT_MS` | `30000` | GPT apikey 恢复探测超时 |
@@ -38,6 +38,8 @@
 
 非流式长任务不使用 60 秒首响应限制，仍受 10 分钟共享总 deadline 保护。需要超过 10 分钟的 OpenAI Responses 工作，优先考虑上游 Background mode 和轮询结果，而不是无限增大同步 HTTP 超时。
 
+默认值按阶段区分：建连快速失败，流式空闲允许模型短暂停顿，总 deadline 则为长推理和 failover 保留完整预算。总 deadline 为 10 分钟不代表失效连接一定等待 10 分钟；连接、首响应和流式空闲会优先触发。GPT apikey 恢复探测会消耗上游 token，保留 30 秒超时，避免上游仍在处理时本地过早放弃并在后续周期重复探测。
+
 ## 为什么默认总超时仍是 10 分钟
 
 OpenAI 官方 SDK 的默认请求超时窗口是 10 分钟，因此 Airouter 保留 `600000ms` 作为兼容总上限；这不是要求所有业务都等待 10 分钟。连接、流式首响应、流式空闲和健康探测使用更短的独立边界，可以更快回收明显失效的连接。
@@ -50,3 +52,8 @@ OpenAI 官方 SDK 的默认请求超时窗口是 10 分钟，因此 Airouter 保
 - 超过请求体上限返回 HTTP 413，并停止继续缓存请求体。
 - 上传过程中超过 `REQUEST_BODY_IDLE_TIMEOUT_MS` 没有新数据时返回 HTTP 408。
 - `/v1/images/generations` 使用 JSON 上限；`/v1/images/edits` 使用图片 multipart 上限。
+
+## 缓冲响应与重定向
+
+- 额度、OAuth 和其他缓冲型上游响应默认最多读取 16 MiB；图片生成链路最多读取 64 MiB。声明长度或实际 chunk 累计超限时会立即中止上游请求。
+- 携带鉴权信息或敏感请求体的缓冲请求只自动跟随同源重定向。跨协议、主机或端口的重定向会被拒绝，避免 access token、apikey 或 refresh token 泄露。

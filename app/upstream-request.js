@@ -8,6 +8,15 @@ const DEFAULT_PORTS = {
 };
 const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_BUFFERED_RESPONSE_LIMIT_BYTES = 16 * 1024 * 1024;
+
+class UpstreamResponseError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'UpstreamResponseError';
+    this.code = code;
+  }
+}
 
 function parseTimeoutMs(value, label) {
   if (value === undefined || value === null || value === '') {
@@ -467,10 +476,27 @@ function isRedirectStatus(statusCode) {
   return [301, 302, 303, 307, 308].includes(Number(statusCode));
 }
 
-async function consumeResponseBody(response) {
+async function consumeResponseBody(response, options = {}) {
+  const configuredLimit = Number(options.maxResponseBytes);
+  const maxResponseBytes = Number.isFinite(configuredLimit) && configuredLimit > 0
+    ? Math.floor(configuredLimit)
+    : DEFAULT_BUFFERED_RESPONSE_LIMIT_BYTES;
+  const declaredLength = Number(response && response.headers && response.headers['content-length']);
+
+  if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+    if (response && typeof response.destroy === 'function') {
+      response.destroy();
+    }
+    throw new UpstreamResponseError(
+      `upstream response exceeds ${maxResponseBytes} bytes`,
+      'UPSTREAM_RESPONSE_TOO_LARGE'
+    );
+  }
+
   return new Promise((resolve, reject) => {
     const chunks = [];
     let settled = false;
+    let totalBytes = 0;
 
     function cleanup() {
       response.removeListener('data', handleData);
@@ -500,7 +526,20 @@ async function consumeResponseBody(response) {
     }
 
     function handleData(chunk) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > maxResponseBytes) {
+        settleWithReject(new UpstreamResponseError(
+          `upstream response exceeds ${maxResponseBytes} bytes`,
+          'UPSTREAM_RESPONSE_TOO_LARGE'
+        ));
+        if (typeof response.destroy === 'function') {
+          response.destroy();
+        }
+        return;
+      }
+
+      chunks.push(buffer);
     }
 
     function handleEnd() {
@@ -599,11 +638,21 @@ async function requestBuffered(
   const statusCode = Number(response.statusCode || 0);
 
   if (isRedirectStatus(statusCode) && response.headers.location && redirectCount < (options.maxRedirects || 0)) {
+    const currentUrl = new URL(options.targetUrl);
+    const nextUrlObject = new URL(response.headers.location, currentUrl);
+    if (nextUrlObject.origin !== currentUrl.origin) {
+      response.destroy();
+      throw new UpstreamResponseError(
+        `cross-origin redirect blocked: ${currentUrl.origin} -> ${nextUrlObject.origin}`,
+        'UPSTREAM_CROSS_ORIGIN_REDIRECT'
+      );
+    }
+
     const drained = waitForResponseDrain(response);
     response.resume();
     await drained;
 
-    const nextUrl = new URL(response.headers.location, options.targetUrl).toString();
+    const nextUrl = nextUrlObject.toString();
     const nextMethod = statusCode === 303 ? 'GET' : options.method;
     const nextBody = nextMethod === 'GET' || nextMethod === 'HEAD' ? undefined : options.body;
 
@@ -615,7 +664,9 @@ async function requestBuffered(
     }, redirectCount + 1, requestDeadline);
   }
 
-  const responseBody = await consumeResponseBody(response);
+  const responseBody = await consumeResponseBody(response, {
+    maxResponseBytes: options.maxResponseBytes,
+  });
   return {
     statusCode,
     headers: response.headers,
@@ -625,6 +676,8 @@ async function requestBuffered(
 }
 
 module.exports = {
+  DEFAULT_BUFFERED_RESPONSE_LIMIT_BYTES,
+  UpstreamResponseError,
   createUpstreamRequest,
   consumeResponseBody,
   requestBuffered,

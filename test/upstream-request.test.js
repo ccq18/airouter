@@ -4,7 +4,7 @@ const http = require('node:http');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
-const { createUpstreamRequest, requestBuffered } = require('../app/upstream-request');
+const { consumeResponseBody, createUpstreamRequest, requestBuffered } = require('../app/upstream-request');
 
 function createMockResponse({ statusCode = 200, headers = {} } = {}) {
   const response = new PassThrough();
@@ -294,4 +294,68 @@ test('requestBuffered keeps one timeout budget across redirects', async t => {
   const elapsedMs = Date.now() - startedAt;
   assert.equal(callCount, 2);
   assert.ok(elapsedMs < 300, `expected redirect chain to share one timeout budget, got ${elapsedMs}ms`);
+});
+
+test('requestBuffered blocks cross-origin redirects before forwarding credentials', async t => {
+  let callCount = 0;
+
+  withStubbedHttpRequest(t, (_options, callback) => {
+    callCount += 1;
+    return createMockRequest(() => {
+      const response = createMockResponse({
+        statusCode: 307,
+        headers: {
+          location: 'http://attacker.example/collect',
+        },
+      });
+      setImmediate(() => callback(response));
+    });
+  });
+
+  await assert.rejects(
+    requestBuffered({
+      method: 'POST',
+      targetUrl: 'http://example.test/token',
+      headers: { authorization: 'Bearer secret' },
+      body: Buffer.from('refresh_token=secret'),
+      maxRedirects: 1,
+      timeoutMs: 200,
+    }),
+    error => {
+      assert.equal(error.code, 'UPSTREAM_CROSS_ORIGIN_REDIRECT');
+      return true;
+    }
+  );
+  assert.equal(callCount, 1);
+});
+
+test('consumeResponseBody rejects an oversized declared content length', async () => {
+  const response = createMockResponse({
+    headers: {
+      'content-length': '11',
+    },
+  });
+
+  await assert.rejects(
+    consumeResponseBody(response, { maxResponseBytes: 10 }),
+    error => {
+      assert.equal(error.code, 'UPSTREAM_RESPONSE_TOO_LARGE');
+      return true;
+    }
+  );
+  assert.equal(response.destroyed, true);
+});
+
+test('consumeResponseBody stops a chunked response after the configured limit', async () => {
+  const response = createMockResponse();
+  const bodyPromise = consumeResponseBody(response, { maxResponseBytes: 5 });
+
+  response.write('123');
+  response.write('456');
+
+  await assert.rejects(bodyPromise, error => {
+    assert.equal(error.code, 'UPSTREAM_RESPONSE_TOO_LARGE');
+    return true;
+  });
+  assert.equal(response.destroyed, true);
 });
