@@ -16,7 +16,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 - 路径命中 `/responses`
 - 当前账号类型是 `token`
 
-普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。`apikey` 配置项不走 Codex responses 事件解析，但直连上游在响应提交前出现非成功状态、请求异常或响应体中断时，也会找同能力池的下一个可用 apikey。
+普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。token-backed Responses 即使收到 HTTP 200，也会检查 JSON 错误对象；其中 `Selected model is at capacity` 会触发同一套账号临时摘除与重放逻辑。`apikey` 配置项不走 Codex responses 事件解析，但直连上游在响应提交前出现非成功状态、请求异常或响应体中断时，也会找同能力池的下一个可用 apikey。
 
 同一个请求会排除已经失败的账号继续重试，最多重放 2 次；达到上限、没有新的可用配置或响应已经开始写回客户端后，不再继续切号。
 

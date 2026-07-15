@@ -28,6 +28,7 @@ const {
     applyResponsesFailoverRequestHeaders,
     classifyResponsesModelDowngrade,
     classifyRetryableResponsesHttpError,
+    classifyRetryableResponsesPayloadError,
     createResponsesEventStreamInspector,
     drainAbandonedResponse,
     isInspectableResponsesEventStream,
@@ -796,8 +797,7 @@ function isResponsesFailoverInspectionCandidate(statusCode, headers, options = {
 
     const contentType = getHeaderValue(headers, 'content-type').toLowerCase();
     return isSuccessfulResponsesStatus(normalizedStatusCode) &&
-        contentType.includes('json') &&
-        shouldInspectForResponsesModelDowngrade(options.requestedModel);
+        contentType.includes('json');
 }
 
 function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) {
@@ -998,11 +998,21 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
     const contentType = getHeaderValue(rawHeaders, 'content-type').toLowerCase();
     if (
         isSuccessfulResponsesStatus(statusCode) &&
-        contentType.includes('json') &&
-        shouldInspectForResponsesModelDowngrade(options.requestedModel)
+        contentType.includes('json')
     ) {
         const bodyBuffer = await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
+        const payloadClassification = classifyRetryableResponsesPayloadError({
+            bodyText,
+        });
+        if (payloadClassification) {
+            return {
+                action: 'retry',
+                classification: payloadClassification,
+                forwardMode: 'buffered',
+                bodyBuffer,
+            };
+        }
         let responseModel = '';
 
         try {

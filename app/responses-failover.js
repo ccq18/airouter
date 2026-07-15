@@ -195,6 +195,41 @@ function getAuthFailureKey(payload, bodyText) {
   return '';
 }
 
+function classifyRetryableResponsesPayloadError({ bodyText, retrySource = 'body' } = {}) {
+  const payload = parseJsonObject(bodyText);
+  const errorType = payload && payload.error && typeof payload.error.type === 'string'
+    ? payload.error.type
+    : '';
+  const errorCode = payload && payload.error && typeof payload.error.code === 'string'
+    ? payload.error.code
+    : '';
+  const authFailureKey = getAuthFailureKey(payload, bodyText);
+  const messageKey = getUsageLimitMessageKey(
+    getPayloadString(payload, ['error', 'message']),
+    getPayloadString(payload, ['message']),
+    bodyText,
+  );
+  const capacityKey = getModelCapacityMessageKey(
+    getPayloadString(payload, ['error', 'message']),
+    getPayloadString(payload, ['message']),
+    bodyText,
+  );
+  const typedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : '';
+  const codedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorCode) ? errorCode : '';
+  const retryKey = typedRetryKey || codedRetryKey || authFailureKey || messageKey || capacityKey;
+  const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
+
+  if (!metadata) {
+    return null;
+  }
+
+  return {
+    reason: metadata.reason,
+    retryKey,
+    retrySource,
+  };
+}
+
 function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const normalizedStatusCode = Number(statusCode);
   if (!Number.isFinite(normalizedStatusCode) || isSuccessfulResponsesStatus(normalizedStatusCode)) {
@@ -221,6 +256,14 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
     };
   }
 
+  const payloadClassification = classifyRetryableResponsesPayloadError({
+    bodyText,
+    retrySource: 'http',
+  });
+  if (payloadClassification) {
+    return payloadClassification;
+  }
+
   const errorType = payload && payload.error && typeof payload.error.type === 'string'
     ? payload.error.type
     : '';
@@ -233,32 +276,9 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const topLevelCode = payload && typeof payload.code === 'string'
     ? payload.code
     : '';
-  const messageKey = getUsageLimitMessageKey(
-    getPayloadString(payload, ['error', 'message']),
-    getPayloadString(payload, ['message']),
-    bodyText,
-  );
-  const capacityKey = getModelCapacityMessageKey(
-    getPayloadString(payload, ['error', 'message']),
-    getPayloadString(payload, ['message']),
-    bodyText,
-  );
-  const typedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : '';
-  const codedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorCode) ? errorCode : '';
-  const retryKey = typedRetryKey || codedRetryKey || messageKey || capacityKey;
-  const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
-
-  if (!metadata) {
-    return {
-      reason: UNKNOWN_RESPONSES_ERROR.reason,
-      retryKey: errorType || errorCode || topLevelType || topLevelCode || `http_${normalizedStatusCode}`,
-      retrySource: 'http',
-    };
-  }
-
   return {
-    reason: metadata.reason,
-    retryKey,
+    reason: UNKNOWN_RESPONSES_ERROR.reason,
+    retryKey: errorType || errorCode || topLevelType || topLevelCode || `http_${normalizedStatusCode}`,
     retrySource: 'http',
   };
 }
@@ -507,6 +527,7 @@ module.exports = {
   applyResponsesFailoverRequestHeaders,
   classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
+  classifyRetryableResponsesPayloadError,
   classifyRetryableResponsesStreamPayload,
   createResponsesEventStreamInspector,
   drainAbandonedResponse,

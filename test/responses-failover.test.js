@@ -6,6 +6,7 @@ const {
   applyResponsesFailoverRequestHeaders,
   classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
+  classifyRetryableResponsesPayloadError,
   createResponsesEventStreamInspector,
   isInspectableResponsesEventStream,
   drainAbandonedResponse,
@@ -175,6 +176,22 @@ test('classifyRetryableResponsesHttpError detects model capacity HTTP errors', (
     reason: 'responses_model_at_capacity',
     retryKey: 'model_at_capacity',
     retrySource: 'http',
+  });
+});
+
+test('classifyRetryableResponsesPayloadError detects model capacity errors in successful JSON', () => {
+  const result = classifyRetryableResponsesPayloadError({
+    bodyText: JSON.stringify({
+      error: {
+        message: 'Selected model is at capacity. Please try a different model.',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_model_at_capacity',
+    retryKey: 'model_at_capacity',
+    retrySource: 'body',
   });
 });
 

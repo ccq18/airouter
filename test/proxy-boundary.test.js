@@ -148,7 +148,7 @@ test('buildProxyHeaders strips local-only auth headers before forwarding upstrea
   assert.equal(headers['content-length'], '27');
 });
 
-test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () => {
+test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors and successful JSON', () => {
   assert.equal(isResponsesFailoverInspectionCandidate(401, {
     'content-type': 'application/json',
   }), true);
@@ -163,10 +163,10 @@ test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () 
   }), true);
   assert.equal(isResponsesFailoverInspectionCandidate(200, {
     'content-type': 'application/json',
-  }), false);
+  }), true);
 });
 
-test('isResponsesFailoverInspectionCandidate inspects successful JSON when model downgrade is possible', () => {
+test('isResponsesFailoverInspectionCandidate inspects successful JSON regardless of model downgrade eligibility', () => {
   assert.equal(isResponsesFailoverInspectionCandidate(200, {
     'content-type': 'application/json',
   }, {
@@ -176,7 +176,17 @@ test('isResponsesFailoverInspectionCandidate inspects successful JSON when model
     'content-type': 'application/json',
   }, {
     requestedModel: 'gpt-5.4-mini',
-  }), false);
+  }), true);
+});
+
+test('server classifies retryable errors in successful Responses JSON before forwarding', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const inspectionStart = source.indexOf('async function inspectResponsesUpstreamForFailover');
+  const inspectionEnd = source.indexOf('function createClaudeMessagesRequestHandler', inspectionStart);
+  const inspectionSource = source.slice(inspectionStart, inspectionEnd);
+
+  assert.match(inspectionSource, /const payloadClassification = classifyRetryableResponsesPayloadError\(\{\s*bodyText,/);
+  assert.match(inspectionSource, /action: 'retry',\s*classification: payloadClassification/);
 });
 
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {
