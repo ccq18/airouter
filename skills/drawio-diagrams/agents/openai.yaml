@@ -1,0 +1,4 @@
+interface:
+  display_name: "Draw.io Diagrams"
+  short_description: "Structured diagrams, draw.io generation and export"
+  default_prompt: "Use $drawio-diagrams to create, validate and export an editable diagram from these requirements."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Drawing Prompts"
+  short_description: "Sourced image prompt best practices"
+  default_prompt: "Use $drawing-prompts to turn this image idea into a polished generation prompt."
