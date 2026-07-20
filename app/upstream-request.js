@@ -8,6 +8,15 @@ const DEFAULT_PORTS = {
 };
 const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_BUFFERED_RESPONSE_LIMIT_BYTES = 16 * 1024 * 1024;
+
+class UpstreamResponseError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'UpstreamResponseError';
+    this.code = code;
+  }
+}
 
 function parseTimeoutMs(value, label) {
   if (value === undefined || value === null || value === '') {
@@ -36,9 +45,10 @@ function resolveTimeoutMs(timeoutMs, defaultTimeoutMs) {
   return defaultTimeoutMs;
 }
 
-function createTimeoutError(timeoutMs) {
-  const error = new Error(`request timeout after ${timeoutMs}ms`);
+function createTimeoutError(timeoutMs, timeoutPhase = 'total') {
+  const error = new Error(`${timeoutPhase} timeout after ${timeoutMs}ms`);
   error.code = 'ETIMEDOUT';
+  error.timeoutPhase = timeoutPhase;
   return error;
 }
 
@@ -58,7 +68,7 @@ function getRemainingTimeoutMs(deadline) {
 
   const remainingTimeoutMs = deadline.deadlineAt - Date.now();
   if (remainingTimeoutMs <= 0) {
-    throw createTimeoutError(deadline.timeoutMs);
+    throw createTimeoutError(deadline.timeoutMs, 'total');
   }
 
   return Math.ceil(remainingTimeoutMs);
@@ -202,7 +212,7 @@ function createConnectTunnel(proxyUrl, targetUrl, timeoutMs = 0) {
 
     if (timeoutMs > 0) {
       timeoutHandle = setTimeout(() => {
-        const timeoutError = createTimeoutError(timeoutMs);
+        const timeoutError = createTimeoutError(timeoutMs, 'connect');
         request.destroy(timeoutError);
         settleReject(timeoutError);
       }, timeoutMs);
@@ -251,7 +261,7 @@ function createHttpProxyRequestOptions(proxyUrl, targetUrl, method, headers) {
   };
 }
 
-function createHttpsProxyRequestOptions(proxyUrl, targetUrl, method, headers, timeoutMs) {
+function createHttpsProxyRequestOptions(proxyUrl, targetUrl, method, headers, connectTimeoutMs) {
   return {
     module: https,
     options: {
@@ -262,21 +272,21 @@ function createHttpsProxyRequestOptions(proxyUrl, targetUrl, method, headers, ti
       path: `${targetUrl.pathname}${targetUrl.search}`,
       headers,
       createConnection: (_options, callback) => {
-        createConnectTunnel(proxyUrl, targetUrl, timeoutMs)
+        createConnectTunnel(proxyUrl, targetUrl, connectTimeoutMs)
           .then(proxySocket => {
             const secureSocket = tls.connect({
               socket: proxySocket,
               servername: targetUrl.hostname,
             });
 
-            if (timeoutMs > 0) {
-              secureSocket.setTimeout(timeoutMs, () => {
-                secureSocket.destroy(createTimeoutError(timeoutMs));
+            if (connectTimeoutMs > 0) {
+              secureSocket.setTimeout(connectTimeoutMs, () => {
+                secureSocket.destroy(createTimeoutError(connectTimeoutMs, 'connect'));
               });
             }
 
             secureSocket.once('secureConnect', () => {
-              if (timeoutMs > 0) {
+              if (connectTimeoutMs > 0) {
                 secureSocket.setTimeout(0);
               }
               callback(null, secureSocket);
@@ -289,7 +299,7 @@ function createHttpsProxyRequestOptions(proxyUrl, targetUrl, method, headers, ti
   };
 }
 
-function createRequestOptions(method, targetUrl, headers = {}, timeoutMs = 0) {
+function createRequestOptions(method, targetUrl, headers = {}, connectTimeoutMs = 0) {
   const parsedUrl = targetUrl instanceof URL ? targetUrl : new URL(targetUrl);
   const proxyUrl = resolveProxyUrl(parsedUrl);
 
@@ -301,23 +311,53 @@ function createRequestOptions(method, targetUrl, headers = {}, timeoutMs = 0) {
     return createHttpProxyRequestOptions(proxyUrl, parsedUrl, method, headers);
   }
 
-  return createHttpsProxyRequestOptions(proxyUrl, parsedUrl, method, headers, timeoutMs);
+  return createHttpsProxyRequestOptions(proxyUrl, parsedUrl, method, headers, connectTimeoutMs);
 }
 
-function createUpstreamRequest({ method, targetUrl, headers = {}, body, timeoutMs }) {
+function createUpstreamRequest({
+  body,
+  connectTimeoutMs = 0,
+  deadlineAt = null,
+  firstResponseTimeoutMs = 0,
+  headers = {},
+  idleTimeoutMs = 0,
+  method,
+  targetUrl,
+  timeoutMs,
+}) {
   const resolvedTimeoutMs = resolveTimeoutMs(timeoutMs, DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS);
+  const normalizedConnectTimeoutMs = parseTimeoutMs(connectTimeoutMs, 'connectTimeoutMs') || 0;
+  const normalizedFirstResponseTimeoutMs = parseTimeoutMs(firstResponseTimeoutMs, 'firstResponseTimeoutMs') || 0;
+  const normalizedIdleTimeoutMs = parseTimeoutMs(idleTimeoutMs, 'idleTimeoutMs') || 0;
   let request = null;
   let response = null;
-  let timeoutHandle = null;
+  let connectTimeoutHandle = null;
+  let firstResponseTimeoutHandle = null;
+  let totalTimeoutHandle = null;
   let completed = false;
 
-  function clearRequestTimeout() {
-    if (!timeoutHandle) {
-      return;
+  function clearTimer(timerName) {
+    const timer = timerName === 'connect'
+      ? connectTimeoutHandle
+      : timerName === 'first_response'
+        ? firstResponseTimeoutHandle
+        : totalTimeoutHandle;
+    if (timer) {
+      clearTimeout(timer);
     }
 
-    clearTimeout(timeoutHandle);
-    timeoutHandle = null;
+    if (timerName === 'connect') {
+      connectTimeoutHandle = null;
+    } else if (timerName === 'first_response') {
+      firstResponseTimeoutHandle = null;
+    } else {
+      totalTimeoutHandle = null;
+    }
+  }
+
+  function clearPhaseTimeouts() {
+    clearTimer('connect');
+    clearTimer('first_response');
   }
 
   function markCompleted() {
@@ -326,7 +366,14 @@ function createUpstreamRequest({ method, targetUrl, headers = {}, body, timeoutM
     }
 
     completed = true;
-    clearRequestTimeout();
+    clearPhaseTimeouts();
+    clearTimer('total');
+    // IncomingMessage.setTimeout() delegates to response.socket.setTimeout().
+    // Node clears response.socket before emitting close, so calling the wrapper
+    // from a close listener can throw while completing an otherwise normal request.
+    if (response && response.socket && typeof response.socket.setTimeout === 'function') {
+      response.socket.setTimeout(0);
+    }
   }
 
   function abort(error) {
@@ -343,9 +390,21 @@ function createUpstreamRequest({ method, targetUrl, headers = {}, body, timeoutM
 
   const responsePromise = new Promise((resolve, reject) => {
     let requestConfig;
+    let effectiveTotalTimeoutMs = resolvedTimeoutMs;
 
     try {
-      requestConfig = createRequestOptions(method, targetUrl, headers, resolvedTimeoutMs);
+      if (deadlineAt !== null && deadlineAt !== '' && Number.isFinite(Number(deadlineAt))) {
+        const remainingTimeoutMs = Math.ceil(Number(deadlineAt) - Date.now());
+        if (remainingTimeoutMs <= 0) {
+          throw createTimeoutError(resolvedTimeoutMs, 'total');
+        }
+
+        effectiveTotalTimeoutMs = resolvedTimeoutMs > 0
+          ? Math.min(resolvedTimeoutMs, remainingTimeoutMs)
+          : remainingTimeoutMs;
+      }
+
+      requestConfig = createRequestOptions(method, targetUrl, headers, normalizedConnectTimeoutMs);
     } catch (error) {
       reject(error);
       return;
@@ -353,11 +412,26 @@ function createUpstreamRequest({ method, targetUrl, headers = {}, body, timeoutM
 
     request = requestConfig.module.request(requestConfig.options, incomingMessage => {
       response = incomingMessage;
+      clearPhaseTimeouts();
       response.once('close', markCompleted);
       response.once('error', markCompleted);
+      if (normalizedIdleTimeoutMs > 0 && typeof response.setTimeout === 'function') {
+        response.setTimeout(normalizedIdleTimeoutMs, () => {
+          abort(createTimeoutError(normalizedIdleTimeoutMs, 'idle'));
+        });
+      }
       resolve(incomingMessage);
     });
 
+    request.once('socket', socket => {
+      if (!connectTimeoutHandle || !socket || !socket.connecting) {
+        clearTimer('connect');
+        return;
+      }
+
+      const connectedEvent = socket.encrypted ? 'secureConnect' : 'connect';
+      socket.once(connectedEvent, () => clearTimer('connect'));
+    });
     request.once('error', error => {
       markCompleted();
       reject(error);
@@ -368,8 +442,20 @@ function createUpstreamRequest({ method, targetUrl, headers = {}, body, timeoutM
       }
     });
 
-    if (resolvedTimeoutMs > 0) {
-      timeoutHandle = setTimeout(() => abort(createTimeoutError(resolvedTimeoutMs)), resolvedTimeoutMs);
+    if (normalizedConnectTimeoutMs > 0) {
+      connectTimeoutHandle = setTimeout(() => {
+        abort(createTimeoutError(normalizedConnectTimeoutMs, 'connect'));
+      }, normalizedConnectTimeoutMs);
+    }
+    if (normalizedFirstResponseTimeoutMs > 0) {
+      firstResponseTimeoutHandle = setTimeout(() => {
+        abort(createTimeoutError(normalizedFirstResponseTimeoutMs, 'first_response'));
+      }, normalizedFirstResponseTimeoutMs);
+    }
+    if (effectiveTotalTimeoutMs > 0) {
+      totalTimeoutHandle = setTimeout(() => {
+        abort(createTimeoutError(effectiveTotalTimeoutMs, 'total'));
+      }, effectiveTotalTimeoutMs);
     }
 
     if (Buffer.isBuffer(body) && body.length > 0) {
@@ -390,10 +476,27 @@ function isRedirectStatus(statusCode) {
   return [301, 302, 303, 307, 308].includes(Number(statusCode));
 }
 
-async function consumeResponseBody(response) {
+async function consumeResponseBody(response, options = {}) {
+  const configuredLimit = Number(options.maxResponseBytes);
+  const maxResponseBytes = Number.isFinite(configuredLimit) && configuredLimit > 0
+    ? Math.floor(configuredLimit)
+    : DEFAULT_BUFFERED_RESPONSE_LIMIT_BYTES;
+  const declaredLength = Number(response && response.headers && response.headers['content-length']);
+
+  if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+    if (response && typeof response.destroy === 'function') {
+      response.destroy();
+    }
+    throw new UpstreamResponseError(
+      `upstream response exceeds ${maxResponseBytes} bytes`,
+      'UPSTREAM_RESPONSE_TOO_LARGE'
+    );
+  }
+
   return new Promise((resolve, reject) => {
     const chunks = [];
     let settled = false;
+    let totalBytes = 0;
 
     function cleanup() {
       response.removeListener('data', handleData);
@@ -423,7 +526,20 @@ async function consumeResponseBody(response) {
     }
 
     function handleData(chunk) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > maxResponseBytes) {
+        settleWithReject(new UpstreamResponseError(
+          `upstream response exceeds ${maxResponseBytes} bytes`,
+          'UPSTREAM_RESPONSE_TOO_LARGE'
+        ));
+        if (typeof response.destroy === 'function') {
+          response.destroy();
+        }
+        return;
+      }
+
+      chunks.push(buffer);
     }
 
     function handleEnd() {
@@ -500,21 +616,43 @@ function waitForResponseDrain(response) {
 async function requestBuffered(
   options,
   redirectCount = 0,
-  deadline = createRequestDeadline(options.timeoutMs, DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS)
+  deadline = null
 ) {
+  const requestDeadline = deadline || createRequestDeadline(options.timeoutMs, DEFAULT_BUFFERED_REQUEST_TIMEOUT_MS);
+  if (
+    !deadline &&
+    options.deadlineAt !== null &&
+    options.deadlineAt !== '' &&
+    Number.isFinite(Number(options.deadlineAt))
+  ) {
+    const externalDeadlineAt = Number(options.deadlineAt);
+    requestDeadline.deadlineAt = requestDeadline.deadlineAt === null
+      ? externalDeadlineAt
+      : Math.min(requestDeadline.deadlineAt, externalDeadlineAt);
+  }
   const upstream = createUpstreamRequest({
     ...options,
-    timeoutMs: getRemainingTimeoutMs(deadline),
+    timeoutMs: getRemainingTimeoutMs(requestDeadline),
   });
   const response = await upstream.responsePromise;
   const statusCode = Number(response.statusCode || 0);
 
   if (isRedirectStatus(statusCode) && response.headers.location && redirectCount < (options.maxRedirects || 0)) {
+    const currentUrl = new URL(options.targetUrl);
+    const nextUrlObject = new URL(response.headers.location, currentUrl);
+    if (nextUrlObject.origin !== currentUrl.origin) {
+      response.destroy();
+      throw new UpstreamResponseError(
+        `cross-origin redirect blocked: ${currentUrl.origin} -> ${nextUrlObject.origin}`,
+        'UPSTREAM_CROSS_ORIGIN_REDIRECT'
+      );
+    }
+
     const drained = waitForResponseDrain(response);
     response.resume();
     await drained;
 
-    const nextUrl = new URL(response.headers.location, options.targetUrl).toString();
+    const nextUrl = nextUrlObject.toString();
     const nextMethod = statusCode === 303 ? 'GET' : options.method;
     const nextBody = nextMethod === 'GET' || nextMethod === 'HEAD' ? undefined : options.body;
 
@@ -523,10 +661,12 @@ async function requestBuffered(
       method: nextMethod,
       targetUrl: nextUrl,
       body: nextBody,
-    }, redirectCount + 1, deadline);
+    }, redirectCount + 1, requestDeadline);
   }
 
-  const responseBody = await consumeResponseBody(response);
+  const responseBody = await consumeResponseBody(response, {
+    maxResponseBytes: options.maxResponseBytes,
+  });
   return {
     statusCode,
     headers: response.headers,
@@ -536,6 +676,8 @@ async function requestBuffered(
 }
 
 module.exports = {
+  DEFAULT_BUFFERED_RESPONSE_LIMIT_BYTES,
+  UpstreamResponseError,
   createUpstreamRequest,
   consumeResponseBody,
   requestBuffered,

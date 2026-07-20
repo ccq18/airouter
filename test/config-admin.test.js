@@ -203,23 +203,25 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /href="https:\/\/chatgpt\.com\/api\/auth\/session"/);
   assert.match(html, /\/admin\/api\/open-external/);
   assert.doesNotMatch(html, /window\.location\.href\s*=\s*url/);
-  assert.match(html, /autoAuthSessionButton/);
-  assert.match(html, /desktopAuthSessionActions/);
-  assert.match(html, /desktop_app/);
-  assert.match(html, /AirouterReceiveAuthSession/);
-  assert.match(html, /\/admin\/api\/desktop\/auth-session/);
+  assert.doesNotMatch(html, /<button[^>]+id="autoAuthSessionButton"/);
+  assert.doesNotMatch(html, /desktopAuthSessionActions/);
+  assert.doesNotMatch(html, /desktop_app/);
+  assert.doesNotMatch(html, /AirouterReceiveAuthSession/);
+  assert.doesNotMatch(html, /\/admin\/api\/desktop\/auth-session/);
   assert.doesNotMatch(html, /airouter:\/\/auth-session/);
-  assert.match(html, /id="desktopUpdateButton"/);
-  assert.match(html, /check_for_updates/);
-  assert.match(html, /install_update/);
-  assert.match(html, /airouter-update-progress/);
-  assert.match(html, /window\.__TAURI__/);
+  assert.doesNotMatch(html, /window\.__TAURI__/);
   assert.match(html, /隐私模式登录 ChatGPT/);
   assert.match(html, /不要退出该登录态/);
   assert.match(html, /name="configMode" value="token"/);
   assert.match(html, /name="configMode" value="apikey"/);
   assert.match(html, /name="apiKeySupport" value="gpt"/);
   assert.match(html, /name="apiKeySupport" value="claude"/);
+  assert.match(html, /id="apiKeyHealthModelSelect"/);
+  assert.match(html, /id="fallbackHealthModelSelect"/);
+  assert.match(html, /name="apiKeyHealthModel"/);
+  assert.match(html, /name="fallbackHealthModel"/);
+  assert.match(html, /value="gpt-5\.4-mini" selected/);
+  assert.match(html, /value="gpt-5\.4"/);
   assert.match(html, /data-action="activate"/);
   assert.match(html, /data-action="move-up"/);
   assert.match(html, /data-action="move-previous"/);
@@ -804,6 +806,7 @@ test('buildConfigItemFromForm builds an apikey config from normal form fields', 
       baseUrl: ' https://api.example.com/v1/ ',
       description: ' backup provider ',
       support: ['gpt', 'claude'],
+      healthModel: 'gpt-5.4',
     }),
     {
       type: 'apikey',
@@ -811,11 +814,14 @@ test('buildConfigItemFromForm builds an apikey config from normal form fields', 
       base_url: 'https://api.example.com/v1',
       description: 'backup provider',
       support: ['gpt', 'claude'],
+      health: {
+        model: 'gpt-5.4',
+      },
     },
   );
 });
 
-test('buildConfigItemFromForm defaults apikey support to gpt when nothing is selected', () => {
+test('buildConfigItemFromForm defaults apikey support and health model when nothing is selected', () => {
   assert.deepEqual(
     buildConfigItemFromForm({
       mode: 'apikey',
@@ -829,6 +835,9 @@ test('buildConfigItemFromForm defaults apikey support to gpt when nothing is sel
       base_url: 'https://api.example.com/v1',
       description: '',
       support: ['gpt'],
+      health: {
+        model: 'gpt-5.4-mini',
+      },
     },
   );
 });
@@ -1214,7 +1223,7 @@ test('getConfigIdentityValue shows base_url and masks upstream config secrets', 
         },
       },
     ),
-    'https://api.example.com/v1 (sk--...7890)',
+    'https://api.example.com/v1 (sk-...7890)',
   );
   assert.equal(
     getConfigIdentityValue(
@@ -1228,7 +1237,20 @@ test('getConfigIdentityValue shows base_url and masks upstream config secrets', 
         },
       },
     ),
-    'https://claude.example.com/v1 (sk--...3456)',
+    'https://claude.example.com/v1 (sk-...3456)',
+  );
+  assert.equal(
+    getConfigIdentityValue(
+      { mode: 'mixed' },
+      {
+        item: {
+          type: 'apikey',
+          baseUrl: 'https://api.legacy.example/v1',
+          apiKey: 'sk-legacy123456',
+        },
+      },
+    ),
+    'https://api.legacy.example/v1 (sk-...3456)',
   );
   assert.equal(
     getConfigIdentityValue(

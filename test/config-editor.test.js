@@ -346,6 +346,23 @@ test('buildImportedConfigItem keeps item-level apikey credentials', () => {
   });
 });
 
+test('buildImportedConfigItem accepts fallback apikey form field aliases', () => {
+  const imported = buildImportedConfigItem('apikey', {
+    apiKey: '  sk-fallback  ',
+    baseUrl: ' https://api.fallback.example.com/v1/ ',
+    description: ' fallback upstream ',
+    support: [' gpt '],
+  });
+
+  assert.deepEqual(imported, {
+    type: 'apikey',
+    apikey: 'sk-fallback',
+    base_url: 'https://api.fallback.example.com/v1',
+    description: 'fallback upstream',
+    support: ['gpt'],
+  });
+});
+
 test('updateConfigItem overwrites editable fields but keeps unknown keys on the item', () => {
   const parsed = createTokenConfig({
     configs: [

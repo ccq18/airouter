@@ -364,125 +364,8 @@
       color: var(--danger);
     }
 
-    .update-modal {
-      position: fixed;
-      inset: 0;
-      z-index: 50;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      background: rgba(22, 33, 43, 0.32);
-    }
-
-    .update-dialog {
-      width: min(620px, 100%);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 18px;
-      background: var(--surface);
-      box-shadow: var(--shadow);
-    }
-
-    .update-dialog-head,
-    .update-dialog-actions,
-    .update-progress-line {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-    }
-
-    .update-dialog h2 {
-      margin: 0;
-      font-size: 20px;
-      line-height: 1.25;
-      letter-spacing: 0;
-    }
-
-    .update-meta {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      margin: 14px 0 0;
-    }
-
-    .update-meta div,
-    .update-notes,
-    .update-progress-panel {
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 12px;
-      background: var(--surface-muted);
-    }
-
-    .update-meta dt {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .update-meta dd {
-      margin: 5px 0 0;
-      font-size: 14px;
-      font-weight: 700;
-      overflow-wrap: anywhere;
-    }
-
-    .update-notes {
-      max-height: 220px;
-      margin-top: 12px;
-      overflow: auto;
-      color: var(--muted);
-      font-family: var(--mono);
-      font-size: 12px;
-      line-height: 1.65;
-      white-space: pre-wrap;
-    }
-
-    .update-progress-panel {
-      margin-top: 12px;
-    }
-
-    .update-progress-line {
-      align-items: center;
-      font-size: 13px;
-      font-weight: 700;
-    }
-
-    .update-progress-track {
-      height: 8px;
-      margin-top: 10px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: var(--surface-strong);
-    }
-
-    .update-progress-fill {
-      display: block;
-      width: 0;
-      height: 100%;
-      border-radius: inherit;
-      background: var(--active);
-      transition: width 160ms ease;
-    }
-
-    .update-progress-track.indeterminate .update-progress-fill {
-      width: 42%;
-      animation: update-slide 1.2s ease-in-out infinite;
-    }
-
-    .update-dialog-actions {
-      align-items: center;
-      justify-content: flex-end;
-      margin-top: 14px;
-    }
-
-    @keyframes update-slide {
-      0% { transform: translateX(-110%); }
-      55%, 100% { transform: translateX(240%); }
-    }
-
     input,
+    select,
     textarea {
       width: 100%;
       border: 1px solid var(--line);
@@ -493,7 +376,8 @@
       font: inherit;
     }
 
-    input {
+    input,
+    select {
       min-height: 48px;
     }
 
@@ -1300,49 +1184,12 @@
           <p class="page-subtitle" id="currentPageSubtitle">默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。</p>
         </div>
         <div class="toolbar">
-          <button class="secondary" type="button" id="desktopUpdateButton" hidden>检查更新</button>
           <button class="secondary" type="button" id="refreshButton">刷新</button>
           <button class="secondary" type="button" id="testResponseButton">测试请求</button>
         </div>
       </header>
 
     <div id="message" class="message" role="status" aria-live="polite"></div>
-    <div class="update-modal" id="desktopUpdateDialog" role="dialog" aria-modal="true" aria-labelledby="desktopUpdateTitle" hidden>
-      <section class="update-dialog">
-        <div class="update-dialog-head">
-          <div>
-            <p class="panel-note">应用更新</p>
-            <h2 id="desktopUpdateTitle">发现新版本</h2>
-            <p class="panel-note">确认后会下载并安装更新，完成后自动重启 Airouter。</p>
-          </div>
-          <button class="secondary" id="desktopUpdateCloseButton" type="button">关闭</button>
-        </div>
-        <dl class="update-meta">
-          <div>
-            <dt>版本</dt>
-            <dd id="desktopUpdateVersionText">-</dd>
-          </div>
-          <div id="desktopUpdateDateRow" hidden>
-            <dt>发布日期</dt>
-            <dd id="desktopUpdateDateText">-</dd>
-          </div>
-        </dl>
-        <div class="update-notes" id="desktopUpdateNotes">暂无更新说明。</div>
-        <div class="update-progress-panel" id="desktopUpdateProgressPanel" hidden>
-          <div class="update-progress-line">
-            <span id="desktopUpdateProgressMessage">准备下载更新</span>
-            <strong id="desktopUpdateProgressPercent"></strong>
-          </div>
-          <div class="update-progress-track" id="desktopUpdateProgressTrack" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100">
-            <span class="update-progress-fill" id="desktopUpdateProgressFill"></span>
-          </div>
-        </div>
-        <div class="update-dialog-actions">
-          <button class="secondary" id="desktopUpdateLaterButton" type="button">稍后</button>
-          <button class="primary" id="desktopUpdateInstallButton" type="button">安装更新</button>
-        </div>
-      </section>
-    </div>
 
     <section class="admin-page" data-page="upstreams">
       <div id="upstreamMetrics" class="metrics-grid"></div>
@@ -1426,6 +1273,14 @@
               <input id="apiKeyDescriptionInput" type="text" placeholder="例如：OpenAI 兼容备用上游">
             </div>
             <div class="field">
+              <label class="field-label" for="apiKeyHealthModelSelect">可用性测试模型</label>
+              <select id="apiKeyHealthModelSelect" name="apiKeyHealthModel">
+                <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+                <option value="gpt-5.4">gpt-5.4</option>
+              </select>
+              <p class="field-hint">用于 GPT fallback 恢复探测。</p>
+            </div>
+            <div class="field">
               <span class="field-label">支持能力</span>
               <div class="support-options">
                 <label class="support-option">
@@ -1504,6 +1359,14 @@
         <div class="field">
           <label class="field-label" for="fallbackDescriptionInput">备注</label>
           <input id="fallbackDescriptionInput" type="text" placeholder="例如：GPT 备用上游">
+        </div>
+        <div class="field">
+          <label class="field-label" for="fallbackHealthModelSelect">可用性测试模型</label>
+          <select id="fallbackHealthModelSelect" name="fallbackHealthModel">
+            <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+            <option value="gpt-5.4">gpt-5.4</option>
+          </select>
+          <p class="field-hint">用于 GPT fallback 恢复探测。</p>
         </div>
         <div class="field">
           <span class="field-label">兜底能力</span>
@@ -1613,34 +1476,20 @@
     const batchToolbarEl = document.getElementById('batchToolbar');
     const batchSelectionSummaryEl = document.getElementById('batchSelectionSummary');
     const rawJsonInput = document.getElementById('rawJsonInput');
-    let desktopAuthSessionActions = null;
-    let autoAuthSessionButton = null;
     const tokenConfigPanel = document.getElementById('tokenConfigPanel');
     const apiKeyConfigPanel = document.getElementById('apiKeyConfigPanel');
     const apiKeyBaseUrlInput = document.getElementById('apiKeyBaseUrlInput');
     const apiKeyInput = document.getElementById('apiKeyInput');
     const apiKeyDescriptionInput = document.getElementById('apiKeyDescriptionInput');
+    const apiKeyHealthModelSelect = document.getElementById('apiKeyHealthModelSelect');
     const fallbackBaseUrlInput = document.getElementById('fallbackBaseUrlInput');
     const fallbackApiKeyInput = document.getElementById('fallbackApiKeyInput');
     const fallbackDescriptionInput = document.getElementById('fallbackDescriptionInput');
+    const fallbackHealthModelSelect = document.getElementById('fallbackHealthModelSelect');
     const addButton = document.getElementById('addButton');
     const addFallbackButton = document.getElementById('addFallbackButton');
     const refreshButton = document.getElementById('refreshButton');
     const testResponseButton = document.getElementById('testResponseButton');
-    const desktopUpdateButton = document.getElementById('desktopUpdateButton');
-    const desktopUpdateDialog = document.getElementById('desktopUpdateDialog');
-    const desktopUpdateCloseButton = document.getElementById('desktopUpdateCloseButton');
-    const desktopUpdateLaterButton = document.getElementById('desktopUpdateLaterButton');
-    const desktopUpdateInstallButton = document.getElementById('desktopUpdateInstallButton');
-    const desktopUpdateVersionText = document.getElementById('desktopUpdateVersionText');
-    const desktopUpdateDateRow = document.getElementById('desktopUpdateDateRow');
-    const desktopUpdateDateText = document.getElementById('desktopUpdateDateText');
-    const desktopUpdateNotes = document.getElementById('desktopUpdateNotes');
-    const desktopUpdateProgressPanel = document.getElementById('desktopUpdateProgressPanel');
-    const desktopUpdateProgressMessage = document.getElementById('desktopUpdateProgressMessage');
-    const desktopUpdateProgressPercent = document.getElementById('desktopUpdateProgressPercent');
-    const desktopUpdateProgressTrack = document.getElementById('desktopUpdateProgressTrack');
-    const desktopUpdateProgressFill = document.getElementById('desktopUpdateProgressFill');
     const addApiKeyButton = document.getElementById('addApiKeyButton');
     const saveResponsesSettingsButton = document.getElementById('saveResponsesSettingsButton');
     const saveProxySettingsButton = document.getElementById('saveProxySettingsButton');
@@ -1659,14 +1508,7 @@
     const runtimeSyncStatus = document.getElementById('runtimeSyncStatus');
     const responsesModelAliasesInput = document.getElementById('responsesModelAliasesInput');
     const RUNTIME_SYNC_INTERVAL_MS = 10000;
-    const DESKTOP_AUTH_SESSION_POLL_INTERVAL_MS = 2000;
-    const DESKTOP_AUTH_SESSION_POLL_TIMEOUT_MS = 10 * 60 * 1000;
-    const pageParams = new URLSearchParams(window.location.search);
-    const adminAuthToken = pageParams.get('auth_token') || '';
-    const isDesktopApp = pageParams.get('desktop_app') === '1';
-    const tauriCore = window.__TAURI__ && window.__TAURI__.core;
-    const tauriEvent = window.__TAURI__ && window.__TAURI__.event;
-    let desktopUpdateBusy = false;
+    const adminAuthToken = new URLSearchParams(window.location.search).get('auth_token') || '';
     const {
       buildConfigSnapshotRequest,
       buildJsonRequestOptions,
@@ -1787,119 +1629,6 @@
         state,
         ...options,
       });
-    }
-
-    function setDesktopUpdateBusy(nextBusy) {
-      desktopUpdateBusy = nextBusy;
-      desktopUpdateButton.disabled = nextBusy;
-      desktopUpdateCloseButton.disabled = nextBusy;
-      desktopUpdateLaterButton.disabled = nextBusy;
-      desktopUpdateInstallButton.disabled = nextBusy;
-    }
-
-    function formatDesktopUpdateDate(value) {
-      if (!value) {
-        return '';
-      }
-      const date = new Date(value);
-      return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString();
-    }
-
-    function resetDesktopUpdateProgress() {
-      desktopUpdateProgressPanel.hidden = true;
-      desktopUpdateProgressMessage.textContent = '准备下载更新';
-      desktopUpdateProgressPercent.textContent = '';
-      desktopUpdateProgressFill.style.width = '0%';
-      desktopUpdateProgressTrack.classList.remove('indeterminate');
-      desktopUpdateProgressTrack.removeAttribute('aria-valuenow');
-    }
-
-    function renderDesktopUpdateProgress(payload = {}) {
-      desktopUpdateProgressPanel.hidden = false;
-      desktopUpdateProgressMessage.textContent = payload.message || '正在更新';
-      if (Number.isFinite(payload.percent)) {
-        const percent = Math.max(0, Math.min(100, Number(payload.percent)));
-        desktopUpdateProgressPercent.textContent = `${percent}%`;
-        desktopUpdateProgressFill.style.width = `${percent}%`;
-        desktopUpdateProgressTrack.classList.remove('indeterminate');
-        desktopUpdateProgressTrack.setAttribute('aria-valuenow', String(percent));
-      } else {
-        desktopUpdateProgressPercent.textContent = '';
-        desktopUpdateProgressFill.style.width = '0%';
-        desktopUpdateProgressTrack.classList.add('indeterminate');
-        desktopUpdateProgressTrack.removeAttribute('aria-valuenow');
-      }
-    }
-
-    function openDesktopUpdateDialog(update) {
-      desktopUpdateVersionText.textContent = update.version || '-';
-      const formattedDate = formatDesktopUpdateDate(update.date);
-      desktopUpdateDateRow.hidden = !formattedDate;
-      desktopUpdateDateText.textContent = formattedDate || '-';
-      desktopUpdateNotes.textContent = (update.body || '').trim() || '暂无更新说明。';
-      resetDesktopUpdateProgress();
-      desktopUpdateDialog.hidden = false;
-    }
-
-    function closeDesktopUpdateDialog() {
-      if (desktopUpdateBusy) {
-        return;
-      }
-      desktopUpdateDialog.hidden = true;
-      resetDesktopUpdateProgress();
-    }
-
-    async function checkDesktopUpdates() {
-      if (!tauriCore || desktopUpdateBusy) {
-        return;
-      }
-
-      try {
-        setDesktopUpdateBusy(true);
-        desktopUpdateButton.textContent = '检查中';
-        const update = await tauriCore.invoke('check_for_updates');
-        if (update && update.available) {
-          openDesktopUpdateDialog(update);
-        } else {
-          setMessage('info', '当前已是最新版本。');
-        }
-      } catch (error) {
-        setMessage('error', `检查更新失败：${error.message || error}`);
-      } finally {
-        desktopUpdateButton.textContent = '检查更新';
-        setDesktopUpdateBusy(false);
-      }
-    }
-
-    async function installDesktopUpdate() {
-      if (!tauriCore || desktopUpdateBusy) {
-        return;
-      }
-
-      try {
-        setDesktopUpdateBusy(true);
-        renderDesktopUpdateProgress({ message: '准备下载更新' });
-        await tauriCore.invoke('install_update');
-      } catch (error) {
-        setMessage('error', `安装更新失败：${error.message || error}`);
-        renderDesktopUpdateProgress({ message: error.message || String(error) });
-        setDesktopUpdateBusy(false);
-      }
-    }
-
-    function initializeDesktopUpdater() {
-      if (!isDesktopApp || !tauriCore) {
-        return;
-      }
-
-      desktopUpdateButton.hidden = false;
-      desktopUpdateButton.addEventListener('click', checkDesktopUpdates);
-      desktopUpdateCloseButton.addEventListener('click', closeDesktopUpdateDialog);
-      desktopUpdateLaterButton.addEventListener('click', closeDesktopUpdateDialog);
-      desktopUpdateInstallButton.addEventListener('click', installDesktopUpdate);
-      if (tauriEvent && tauriEvent.listen) {
-        tauriEvent.listen('airouter-update-progress', (event) => renderDesktopUpdateProgress(event.payload));
-      }
     }
 
     function normalizeSelectionIndex(value) {
@@ -2066,118 +1795,6 @@
       apiKeyConfigPanel.hidden = mode !== 'apikey';
     }
 
-    function selectTokenMode() {
-      const tokenModeInput = document.querySelector('input[name="configMode"][value="token"]');
-      if (tokenModeInput) {
-        tokenModeInput.checked = true;
-      }
-      updateConfigMode();
-    }
-
-    function ensureDesktopAuthSessionButton() {
-      if (autoAuthSessionButton) {
-        return autoAuthSessionButton;
-      }
-
-      desktopAuthSessionActions = document.createElement('div');
-      desktopAuthSessionActions.className = 'actions';
-      desktopAuthSessionActions.id = 'desktopAuthSessionActions';
-
-      autoAuthSessionButton = document.createElement('button');
-      autoAuthSessionButton.className = 'secondary';
-      autoAuthSessionButton.type = 'button';
-      autoAuthSessionButton.id = 'autoAuthSessionButton';
-      autoAuthSessionButton.textContent = 'App 自动获取';
-      desktopAuthSessionActions.appendChild(autoAuthSessionButton);
-      rawJsonInput.before(desktopAuthSessionActions);
-      return autoAuthSessionButton;
-    }
-
-    function receiveDesktopAuthSession(payload = {}) {
-      if (!isDesktopApp || !autoAuthSessionButton) {
-        return;
-      }
-
-      if (payload.ok && payload.session) {
-        window.__airouterDesktopAuthSessionDone = true;
-        selectTokenMode();
-        rawJsonInput.value = JSON.stringify(payload.session, null, 2);
-        rawJsonInput.focus();
-        autoAuthSessionButton.disabled = false;
-        setMessage('info', '已自动获取 AuthSession JSON，请确认后点击“新增 OpenAI token”。');
-        return;
-      }
-
-      autoAuthSessionButton.disabled = false;
-      if (payload.message) {
-        setMessage('error', payload.message);
-      }
-    }
-
-    async function pollDesktopAuthSession(startedAt) {
-      if (window.__airouterDesktopAuthSessionDone) {
-        return;
-      }
-
-      if (Date.now() - startedAt > DESKTOP_AUTH_SESSION_POLL_TIMEOUT_MS) {
-        autoAuthSessionButton.disabled = false;
-        setMessage('error', '等待 ChatGPT 登录超时，请重新点击 App 自动获取。');
-        return;
-      }
-
-      try {
-        const payload = await requestJson('/admin/api/desktop/auth-session', {
-          method: 'GET',
-        });
-        if (payload && payload.ok && payload.session) {
-          receiveDesktopAuthSession(payload);
-          return;
-        }
-        if (payload && payload.cancelled) {
-          autoAuthSessionButton.disabled = false;
-          setMessage('info', payload.message || 'ChatGPT 登录窗口已关闭，可重新点击 App 自动获取。');
-          return;
-        }
-      } catch (error) {
-        autoAuthSessionButton.disabled = false;
-        setMessage('error', `自动获取 AuthSession 失败：${error.message}`);
-        return;
-      }
-
-      window.setTimeout(() => {
-        pollDesktopAuthSession(startedAt);
-      }, DESKTOP_AUTH_SESSION_POLL_INTERVAL_MS);
-    }
-
-    function initializeDesktopAuthSessionImport() {
-      if (!isDesktopApp) {
-        return;
-      }
-
-      ensureDesktopAuthSessionButton();
-      if (autoAuthSessionButton.dataset.initialized === 'true') {
-        return;
-      }
-
-      autoAuthSessionButton.dataset.initialized = 'true';
-      autoAuthSessionButton.addEventListener('click', async () => {
-        autoAuthSessionButton.disabled = true;
-        try {
-          await requestJson('/admin/api/desktop/auth-session', {
-            method: 'POST',
-            body: JSON.stringify({}),
-          });
-          setMessage('info', '已打开 ChatGPT 登录窗口；登录完成后会自动回填 AuthSession JSON。');
-          pollDesktopAuthSession(Date.now());
-        } catch (error) {
-          autoAuthSessionButton.disabled = false;
-          setMessage('error', `无法触发 App 自动获取：${error.message}`);
-        }
-      });
-    }
-
-    window.AirouterReceiveAuthSession = receiveDesktopAuthSession;
-
     function getSelectedApiKeySupport() {
       return [...document.querySelectorAll('input[name="apiKeySupport"]:checked')]
         .map(input => input.value);
@@ -2196,6 +1813,7 @@
         baseUrl: apiKeyBaseUrlInput.value,
         description: apiKeyDescriptionInput.value,
         support: getSelectedApiKeySupport(),
+        healthModel: apiKeyHealthModelSelect.value,
       });
     }
 
@@ -2206,6 +1824,7 @@
         baseUrl: fallbackBaseUrlInput.value,
         description: fallbackDescriptionInput.value,
         support: getSelectedFallbackSupport(),
+        healthModel: fallbackHealthModelSelect.value,
       });
     }
 
@@ -2214,6 +1833,7 @@
       apiKeyInput.value = '';
       apiKeyBaseUrlInput.value = '';
       apiKeyDescriptionInput.value = '';
+      apiKeyHealthModelSelect.value = 'gpt-5.4-mini';
       document.querySelectorAll('input[name="apiKeySupport"]').forEach(input => {
         input.checked = input.value === 'gpt';
       });
@@ -2223,6 +1843,7 @@
       fallbackApiKeyInput.value = '';
       fallbackBaseUrlInput.value = '';
       fallbackDescriptionInput.value = '';
+      fallbackHealthModelSelect.value = 'gpt-5.4-mini';
       document.querySelectorAll('input[name="fallbackSupport"]').forEach(input => {
         input.checked = input.value === 'gpt';
       });
@@ -3629,8 +3250,6 @@
 
     setupPageNavigation();
     updateConfigMode();
-    initializeDesktopAuthSessionImport();
-    initializeDesktopUpdater();
     loadSnapshot();
     startRuntimeSyncPolling();
   </script>

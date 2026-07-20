@@ -9,11 +9,6 @@ const RETRYABLE_HTTP_ERROR_TYPES = new Map([
   ['model_at_capacity', { reason: 'responses_model_at_capacity' }],
 ]);
 
-const RETRYABLE_HTTP_USAGE_ERROR_TYPES = new Map([
-  ['usage_limit_reached', { reason: 'responses_usage_limit_reached' }],
-  ['usage_not_included', { reason: 'responses_usage_not_included' }],
-]);
-
 const RETRYABLE_STREAM_ERROR_CODES = new Map([
   ['insufficient_quota', { reason: 'responses_insufficient_quota' }],
   ['usage_limit_reached', { reason: 'responses_usage_limit_reached' }],
@@ -134,30 +129,6 @@ function getUsageLimitMessageKey(...values) {
   return '';
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function findRetryableErrorKey(value, retryableMap) {
-  const normalized = normalizeErrorText(value);
-  if (!normalized) {
-    return '';
-  }
-
-  if (retryableMap.has(normalized)) {
-    return normalized;
-  }
-
-  for (const key of retryableMap.keys()) {
-    const pattern = new RegExp(`(?:^|[^a-z0-9_])(?:[a-z][a-z0-9_+-]*:)?${escapeRegExp(key)}(?=$|[^a-z0-9_])`);
-    if (pattern.test(normalized)) {
-      return key;
-    }
-  }
-
-  return '';
-}
-
 function getModelCapacityMessageKey(...values) {
   const normalized = values
     .map(normalizeErrorText)
@@ -224,6 +195,41 @@ function getAuthFailureKey(payload, bodyText) {
   return '';
 }
 
+function classifyRetryableResponsesPayloadError({ bodyText, retrySource = 'body' } = {}) {
+  const payload = parseJsonObject(bodyText);
+  const errorType = payload && payload.error && typeof payload.error.type === 'string'
+    ? payload.error.type
+    : '';
+  const errorCode = payload && payload.error && typeof payload.error.code === 'string'
+    ? payload.error.code
+    : '';
+  const authFailureKey = getAuthFailureKey(payload, bodyText);
+  const messageKey = getUsageLimitMessageKey(
+    getPayloadString(payload, ['error', 'message']),
+    getPayloadString(payload, ['message']),
+    bodyText,
+  );
+  const capacityKey = getModelCapacityMessageKey(
+    getPayloadString(payload, ['error', 'message']),
+    getPayloadString(payload, ['message']),
+    bodyText,
+  );
+  const typedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : '';
+  const codedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorCode) ? errorCode : '';
+  const retryKey = typedRetryKey || codedRetryKey || authFailureKey || messageKey || capacityKey;
+  const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
+
+  if (!metadata) {
+    return null;
+  }
+
+  return {
+    reason: metadata.reason,
+    retryKey,
+    retrySource,
+  };
+}
+
 function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const normalizedStatusCode = Number(statusCode);
   if (!Number.isFinite(normalizedStatusCode) || isSuccessfulResponsesStatus(normalizedStatusCode)) {
@@ -250,11 +256,16 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
     };
   }
 
+  const payloadClassification = classifyRetryableResponsesPayloadError({
+    bodyText,
+    retrySource: 'http',
+  });
+  if (payloadClassification) {
+    return payloadClassification;
+  }
+
   const errorType = payload && payload.error && typeof payload.error.type === 'string'
     ? payload.error.type
-    : '';
-  const errorText = payload && typeof payload.error === 'string'
-    ? payload.error
     : '';
   const errorCode = payload && payload.error && typeof payload.error.code === 'string'
     ? payload.error.code
@@ -265,38 +276,9 @@ function classifyRetryableResponsesHttpError({ statusCode, bodyText }) {
   const topLevelCode = payload && typeof payload.code === 'string'
     ? payload.code
     : '';
-  const messageKey = getUsageLimitMessageKey(
-    getPayloadString(payload, ['error', 'message']),
-    getPayloadString(payload, ['message']),
-    bodyText,
-  );
-  const capacityKey = getModelCapacityMessageKey(
-    getPayloadString(payload, ['error', 'message']),
-    getPayloadString(payload, ['message']),
-    bodyText,
-  );
-  const retryKey =
-    findRetryableErrorKey(errorType, RETRYABLE_HTTP_ERROR_TYPES) ||
-    findRetryableErrorKey(errorCode, RETRYABLE_HTTP_ERROR_TYPES) ||
-    findRetryableErrorKey(errorText, RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
-    findRetryableErrorKey(getPayloadString(payload, ['error', 'message']), RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
-    findRetryableErrorKey(getPayloadString(payload, ['message']), RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
-    findRetryableErrorKey(bodyText, RETRYABLE_HTTP_USAGE_ERROR_TYPES) ||
-    messageKey ||
-    capacityKey;
-  const metadata = RETRYABLE_HTTP_ERROR_TYPES.get(retryKey);
-
-  if (!metadata) {
-    return {
-      reason: UNKNOWN_RESPONSES_ERROR.reason,
-      retryKey: errorType || errorCode || topLevelType || topLevelCode || `http_${normalizedStatusCode}`,
-      retrySource: 'http',
-    };
-  }
-
   return {
-    reason: metadata.reason,
-    retryKey,
+    reason: UNKNOWN_RESPONSES_ERROR.reason,
+    retryKey: errorType || errorCode || topLevelType || topLevelCode || `http_${normalizedStatusCode}`,
     retrySource: 'http',
   };
 }
@@ -332,11 +314,7 @@ function classifyRetryableResponsesStreamPayload(payload, options = {}) {
     : '';
   const messageKey = getUsageLimitMessageKey(errorMessage);
   const capacityKey = getModelCapacityMessageKey(errorMessage);
-  const retryKey =
-    findRetryableErrorKey(errorCode, RETRYABLE_STREAM_ERROR_CODES) ||
-    findRetryableErrorKey(errorMessage, RETRYABLE_STREAM_ERROR_CODES) ||
-    messageKey ||
-    capacityKey;
+  const retryKey = RETRYABLE_STREAM_ERROR_CODES.has(errorCode) ? errorCode : messageKey || capacityKey;
   const normalizedEventType = normalizeErrorText(eventType);
   const isFailureEvent = normalizedEventType === 'response.failed' ||
     normalizedEventType === 'error' ||
@@ -549,6 +527,7 @@ module.exports = {
   applyResponsesFailoverRequestHeaders,
   classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
+  classifyRetryableResponsesPayloadError,
   classifyRetryableResponsesStreamPayload,
   createResponsesEventStreamInspector,
   drainAbandonedResponse,

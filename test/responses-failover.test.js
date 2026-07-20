@@ -6,6 +6,7 @@ const {
   applyResponsesFailoverRequestHeaders,
   classifyResponsesModelDowngrade,
   classifyRetryableResponsesHttpError,
+  classifyRetryableResponsesPayloadError,
   createResponsesEventStreamInspector,
   isInspectableResponsesEventStream,
   drainAbandonedResponse,
@@ -34,19 +35,6 @@ test('classifyRetryableResponsesHttpError detects raw usage limit messages', () 
   const result = classifyRetryableResponsesHttpError({
     statusCode: 429,
     bodyText: "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 3:22 PM.",
-  });
-
-  assert.deepEqual(result, {
-    reason: 'responses_usage_limit_reached',
-    retryKey: 'usage_limit_reached',
-    retrySource: 'http',
-  });
-});
-
-test('classifyRetryableResponsesHttpError detects http-prefixed usage limit errors', () => {
-  const result = classifyRetryableResponsesHttpError({
-    statusCode: 429,
-    bodyText: '错误=http:usage_limit_reached',
   });
 
   assert.deepEqual(result, {
@@ -188,6 +176,22 @@ test('classifyRetryableResponsesHttpError detects model capacity HTTP errors', (
     reason: 'responses_model_at_capacity',
     retryKey: 'model_at_capacity',
     retrySource: 'http',
+  });
+});
+
+test('classifyRetryableResponsesPayloadError detects model capacity errors in successful JSON', () => {
+  const result = classifyRetryableResponsesPayloadError({
+    bodyText: JSON.stringify({
+      error: {
+        message: 'Selected model is at capacity. Please try a different model.',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_model_at_capacity',
+    retryKey: 'model_at_capacity',
+    retrySource: 'body',
   });
 });
 

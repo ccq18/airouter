@@ -148,7 +148,7 @@ test('buildProxyHeaders strips local-only auth headers before forwarding upstrea
   assert.equal(headers['content-length'], '27');
 });
 
-test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () => {
+test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors and successful JSON', () => {
   assert.equal(isResponsesFailoverInspectionCandidate(401, {
     'content-type': 'application/json',
   }), true);
@@ -163,10 +163,10 @@ test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors', () 
   }), true);
   assert.equal(isResponsesFailoverInspectionCandidate(200, {
     'content-type': 'application/json',
-  }), false);
+  }), true);
 });
 
-test('isResponsesFailoverInspectionCandidate inspects successful JSON when model downgrade is possible', () => {
+test('isResponsesFailoverInspectionCandidate inspects successful JSON regardless of model downgrade eligibility', () => {
   assert.equal(isResponsesFailoverInspectionCandidate(200, {
     'content-type': 'application/json',
   }, {
@@ -176,7 +176,17 @@ test('isResponsesFailoverInspectionCandidate inspects successful JSON when model
     'content-type': 'application/json',
   }, {
     requestedModel: 'gpt-5.4-mini',
-  }), false);
+  }), true);
+});
+
+test('server classifies retryable errors in successful Responses JSON before forwarding', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const inspectionStart = source.indexOf('async function inspectResponsesUpstreamForFailover');
+  const inspectionEnd = source.indexOf('function createClaudeMessagesRequestHandler', inspectionStart);
+  const inspectionSource = source.slice(inspectionStart, inspectionEnd);
+
+  assert.match(inspectionSource, /const payloadClassification = classifyRetryableResponsesPayloadError\(\{\s*bodyText,/);
+  assert.match(inspectionSource, /action: 'retry',\s*classification: payloadClassification/);
 });
 
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {
@@ -835,12 +845,16 @@ test('image generations apikey business request keeps native Images forwarding',
   assert.equal(res.writableEnded, true);
 });
 
-test('server defaults upstream requests to the official SDK timeout window', () => {
+test('server uses phased proxy timeouts within the official SDK total timeout window', () => {
   const openaiSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const upstreamSource = fs.readFileSync(path.join(__dirname, '..', 'app/upstream-request.js'), 'utf8');
 
   assert.match(openaiSource, /UPSTREAM_REQUEST_TIMEOUT_MS', 10 \* 60 \* 1000/);
-  assert.match(openaiSource, /APIKEY_RECOVERY_TIMEOUT_MS', 10 \* 60 \* 1000/);
+  assert.match(openaiSource, /UPSTREAM_TOTAL_TIMEOUT_MS', LEGACY_UPSTREAM_REQUEST_TIMEOUT_MS/);
+  assert.match(openaiSource, /UPSTREAM_CONNECT_TIMEOUT_MS', 10 \* 1000/);
+  assert.match(openaiSource, /UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS', 60 \* 1000/);
+  assert.match(openaiSource, /UPSTREAM_STREAM_IDLE_TIMEOUT_MS', 2 \* 60 \* 1000/);
+  assert.match(openaiSource, /APIKEY_RECOVERY_TIMEOUT_MS', 30 \* 1000/);
   assert.match(openaiSource, /ALL_QUOTA_CHECK_INTERVAL_MS = 3 \* 60 \* 1000/);
   assert.match(upstreamSource, /DEFAULT_UPSTREAM_REQUEST_TIMEOUT_MS = 10 \* 60 \* 1000/);
 });
@@ -850,18 +864,19 @@ test('generic apikey proxy records success after committing the upstream respons
   const startForwardingIndex = source.indexOf('function startForwardingResponse');
   const flushHeadersIndex = source.indexOf('res.flushHeaders();', startForwardingIndex);
   const successRecordIndex = source.indexOf('recordCurrentApiKeyRequestResult({ ok: true })', flushHeadersIndex);
-  const responseEndIndex = source.indexOf("response.on('end'", startForwardingIndex);
-  const responseErrorIndex = source.indexOf("response.on('error'", startForwardingIndex);
-  const responseResumeIndex = source.indexOf('response.resume();', responseErrorIndex);
-  const responseErrorBlock = source.slice(responseErrorIndex, responseResumeIndex);
+  const forwardingIndex = source.indexOf('await forwardReadableWithBackpressure({', successRecordIndex);
+  const catchIndex = source.indexOf('}).catch(err => {', forwardingIndex);
+  const committedResponseGuardIndex = source.indexOf('if (headersApplied || res.headersSent)', catchIndex);
+  const apiKeyFailureIndex = source.indexOf("if (config && config.type === 'apikey')", catchIndex);
 
   assert.notEqual(startForwardingIndex, -1);
   assert.notEqual(flushHeadersIndex, -1);
   assert.notEqual(successRecordIndex, -1);
-  assert.notEqual(responseEndIndex, -1);
-  assert.notEqual(responseErrorIndex, -1);
-  assert.ok(successRecordIndex < responseEndIndex);
-  assert.match(responseErrorBlock, /if \(!res\.headersSent\) \{\n\s+recordCurrentApiKeyRequestResult\(\{\n\s+ok: false/);
+  assert.notEqual(forwardingIndex, -1);
+  assert.notEqual(committedResponseGuardIndex, -1);
+  assert.ok(flushHeadersIndex < successRecordIndex);
+  assert.ok(successRecordIndex < forwardingIndex);
+  assert.ok(committedResponseGuardIndex < apiKeyFailureIndex);
   assert.equal(source.includes('accountManager.recordApiKeyRequestResult(config, { ok: true })'), false);
 });
 
@@ -1080,6 +1095,10 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
     observeApiKeyRequestResult: (config, result) => {
       apiKeyResults.push({ config, result });
     },
+    upstreamConnectTimeoutMs: 11,
+    upstreamFirstResponseTimeoutMs: 22,
+    upstreamStreamIdleTimeoutMs: 33,
+    upstreamRequestTimeoutMs: 44,
   });
 
   const res = createJsonResponseRecorder();
@@ -1101,6 +1120,11 @@ test('createClaudeMessagesHandler forwards apikey configs with claude support wi
   assert.equal(upstreamRequests[0].targetUrl, 'https://claude.example.com/v1/messages?client_version=1');
   assert.equal(upstreamRequests[0].headers.authorization, 'Bearer upstream-claude-key');
   assert.equal(upstreamRequests[0].headers['chatgpt-account-id'], undefined);
+  assert.equal(upstreamRequests[0].connectTimeoutMs, 11);
+  assert.equal(upstreamRequests[0].firstResponseTimeoutMs, 0);
+  assert.equal(upstreamRequests[0].idleTimeoutMs, 0);
+  assert.equal(upstreamRequests[0].timeoutMs, 44);
+  assert.equal(typeof upstreamRequests[0].deadlineAt, 'number');
   assert.deepEqual(JSON.parse(upstreamRequests[0].body.toString('utf8')), body);
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.payload.content, [
@@ -1774,6 +1798,244 @@ test('createClaudeMessagesHandler treats direct claude apikey stream errors afte
   ]);
 });
 
+test('createClaudeMessagesHandler applies downstream backpressure to direct Claude streams', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'streaming claude upstream',
+    apiKey: 'upstream-claude-key',
+    baseUrl: 'https://claude-stream.example.com/v1',
+    support: ['claude'],
+  };
+  const upstreamResponse = new PassThrough();
+  upstreamResponse.statusCode = 200;
+  upstreamResponse.headers = {
+    'content-type': 'text/event-stream',
+  };
+  const upstreamRequests = [];
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    createUpstreamRequest: request => {
+      upstreamRequests.push(request);
+      return {
+        responsePromise: Promise.resolve(upstreamResponse),
+        abort() {},
+      };
+    },
+    upstreamConnectTimeoutMs: 11,
+    upstreamFirstResponseTimeoutMs: 22,
+    upstreamStreamIdleTimeoutMs: 33,
+    upstreamRequestTimeoutMs: 1000,
+  });
+  const res = createJsonResponseRecorder();
+  const writtenChunks = [];
+  res.write = chunk => {
+    res.headersSent = true;
+    writtenChunks.push(Buffer.from(chunk));
+    return writtenChunks.length !== 1;
+  };
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    stream: true,
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  upstreamResponse.write('first');
+  await new Promise(resolve => setImmediate(resolve));
+  upstreamResponse.write('second');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(writtenChunks.length, 1);
+  assert.equal(upstreamRequests[0].connectTimeoutMs, 11);
+  assert.equal(upstreamRequests[0].firstResponseTimeoutMs, 22);
+  assert.equal(upstreamRequests[0].idleTimeoutMs, 33);
+
+  res.emit('drain');
+  upstreamResponse.end();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(Buffer.concat(writtenChunks).toString('utf8'), 'firstsecond');
+  assert.equal(res.writableEnded, true);
+});
+
+test('createClaudeMessagesHandler queues converted SSE frames until downstream drain', async () => {
+  const config = {
+    type: 'token',
+    index: 0,
+    description: 'responses token',
+    access_token: 'token-1',
+    account_id: 'account-1',
+    baseUrl: 'https://chatgpt.com',
+    apiBasePath: '/backend-api/codex',
+  };
+  const upstreamResponse = new PassThrough();
+  upstreamResponse.statusCode = 200;
+  upstreamResponse.headers = {
+    'content-type': 'text/event-stream',
+  };
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    createUpstreamRequest: () => ({
+      responsePromise: Promise.resolve(upstreamResponse),
+      abort() {},
+    }),
+  });
+  const res = createJsonResponseRecorder();
+  const writtenFrames = [];
+  res.write = frame => {
+    res.headersSent = true;
+    writtenFrames.push(String(frame));
+    return writtenFrames.length !== 1;
+  };
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    stream: true,
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  upstreamResponse.write([
+    'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+    '',
+    '',
+  ].join('\n'));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(writtenFrames.length, 1);
+  assert.match(writtenFrames[0], /event: message_start/);
+  assert.equal(upstreamResponse.isPaused(), true);
+
+  res.emit('drain');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(writtenFrames.length, 2);
+  assert.match(writtenFrames[1], /event: content_block_start/);
+  assert.equal(upstreamResponse.isPaused(), false);
+
+  upstreamResponse.end([
+    'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+    '',
+    'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+    '',
+    '',
+  ].join('\n'));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(res.writableEnded, true);
+  assert.ok(writtenFrames.length > 2);
+});
+
+test('createClaudeMessagesHandler treats converted stream errors after client commit as success', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'responses apikey',
+    apiKey: 'upstream-responses-key',
+    baseUrl: 'https://responses.example.com/v1',
+    support: ['gpt'],
+  };
+  const upstreamResponse = new PassThrough();
+  upstreamResponse.statusCode = 200;
+  upstreamResponse.headers = {
+    'content-type': 'text/event-stream',
+  };
+  const observations = [];
+  let retryAttempts = 0;
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    handleRetryableUpstreamError: () => {
+      retryAttempts += 1;
+      return null;
+    },
+    observeApiKeyRequestResult: (observedConfig, result) => {
+      observations.push({ observedConfig, result });
+      return { unavailable: false, sampleSize: 1, failureCount: 0 };
+    },
+    createUpstreamRequest: () => ({
+      responsePromise: Promise.resolve(upstreamResponse),
+      abort() {},
+    }),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    stream: true,
+    max_tokens: 32,
+    messages: [
+      {
+        role: 'user',
+        content: 'hello',
+      },
+    ],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  upstreamResponse.write([
+    'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+    '',
+    '',
+  ].join('\n'));
+  await new Promise(resolve => setImmediate(resolve));
+  upstreamResponse.destroy(new Error('late converted stream disconnect'));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(retryAttempts, 0);
+  assert.equal(res.headersSent, true);
+  assert.equal(res.writableEnded, true);
+  assert.deepEqual(observations, [
+    {
+      observedConfig: config,
+      result: { ok: true },
+    },
+  ]);
+});
+
+test('createClaudeMessagesHandler rejects oversized JSON before selecting an upstream', async () => {
+  let getConfigCalls = 0;
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => {
+      getConfigCalls += 1;
+      return null;
+    },
+    requestBodyLimitBytes: 8,
+  });
+  const req = new EventEmitter();
+  req.method = 'POST';
+  req.baseUrl = '';
+  req.url = '/v1/messages';
+  req.headers = {
+    'content-type': 'application/json',
+    'content-length': '9',
+  };
+  req.readableEnded = false;
+  req.resume = () => {};
+  const res = createJsonResponseRecorder();
+
+  await handler(req, res);
+
+  assert.equal(getConfigCalls, 0);
+  assert.equal(res.statusCode, 413);
+  assert.equal(res.payload.error, 'Payload Too Large');
+});
+
 test('createClaudeMessagesHandler reports direct claude apikey non-200 statuses as failures', async () => {
   const config = {
     type: 'apikey',
@@ -1852,6 +2114,7 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
   const modelObservations = [];
   const handler = createClaudeMessagesHandler({
     getConfig: () => configs[0],
+    upstreamRequestTimeoutMs: 1000,
     handleRetryableUpstreamError: (config, classification) => {
       classifications.push({ config, classification });
       return configs[1];
@@ -1918,6 +2181,8 @@ test('createClaudeMessagesHandler retries retryable upstream usage-limit errors 
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(upstreamAccountIds, ['account-1', 'account-2']);
+  assert.equal(typeof upstreamRequests[0].deadlineAt, 'number');
+  assert.equal(upstreamRequests[0].deadlineAt, upstreamRequests[1].deadlineAt);
   assert.deepEqual(upstreamRequests.map(request => request.headers.version), ['1.0.1', '1.0.1']);
   assert.deepEqual(upstreamRequests.map(request => request.targetUrl), [
     'https://chatgpt.com/backend-api/codex/responses?client_version=1.0.1',

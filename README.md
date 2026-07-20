@@ -85,6 +85,7 @@ npm run logs
 - `支持类型`：
   - `GPT`：支持 OpenAI 兼容接口，也可作为 `/v1/messages` 的 Responses 转换上游。
   - `Claude`：支持 Claude Messages 原样转发接口。
+- `可用性测试模型`：用于 GPT fallback 恢复探测，默认 `gpt-5.4-mini`，可选 `gpt-5.4`。
 
 填完后点击 `新增 fallback apikey`。
 
@@ -184,7 +185,7 @@ Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `sessio
 - 用 `停用` 将账号移入停用列表。停用账号对服务不可见，后续请求、额度刷新和 fallback 都不会读取它，但可以在管理页重新启用；管理页也支持勾选多项后批量停用已启用配置、批量启用停用配置。
 - 用 `删除` 永久移除不再需要的账号；管理页也支持勾选多项后批量删除启用配置、停用配置和入口 apikey。
 
-token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态；额度低、登录态失效或账号不可用时，会跳过它。额度检查本身连续 3 次失败才会把 token 标记为 `quota_check_failed`，成功检查会清零失败计数。token Responses 请求如果请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但上游成功响应里的实际模型变成了 `gpt-5.4-mini` 或同名日期版本，会被视为模型降级并触发本次请求自动切号，但不会把账号标记为不可用。apikey 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换。最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用。已被标记为不可用的 GPT apikey 会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测，成功后自动恢复可用；探测默认超时 `600000ms`（10 分钟），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；探测模型默认 `gpt-5.4-mini`，可在 apikey 配置里用 `"health": {"model": "gpt-4.1-mini"}` 覆盖。
+token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态；额度低、登录态失效或账号不可用时，会跳过它。额度检查本身连续 3 次失败才会把 token 标记为 `quota_check_failed`，成功检查会清零失败计数。token Responses 请求如果请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但上游成功响应里的实际模型变成了 `gpt-5.4-mini` 或同名日期版本，会被视为模型降级并触发本次请求自动切号，但不会把账号标记为不可用。apikey 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换。最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用。已被标记为不可用的 GPT apikey 会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测，成功后自动恢复可用；探测默认超时 `30000ms`（30 秒），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；探测模型默认 `gpt-5.4-mini`，管理页新增 fallback apikey 时可选择 `gpt-5.4-mini` 或 `gpt-5.4`，配置文件中对应 `"health": {"model": "gpt-5.4-mini"}`。
 
 管理页会在“调度模式”和 token 账号摘要里显示安全的调度观测：正在请求时显示 `当前会话 #短hash -> 配置 #N`，请求结束后保留 `最近会话 #短hash`，用于观察某个会话实际命中了哪个账号。原始会话 ID 不会写入配置，也不会返回到页面。
 
@@ -193,6 +194,12 @@ token 账号不可用时，同一会话会自动漂移到其他可用 token 账�
 `/v1/messages` 会优先使用 `claude_token` 原样转发；没有可用 Claude token 时，使用支持 `Claude` 的 API Key 原样转发。Claude 直转链路都不可用时，才转换到 Responses：优先使用 OpenAI token，OpenAI token 不可用时再使用支持 `GPT` 的 API Key。
 
 `/cpa/v1/*` 提供 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路。走 Codex/Responses 转换时，Airouter 会把原始 `instructions` 或 Claude `system` 转成 `developer` input，并保留空字符串 `instructions` 字段，避免把系统提示直接作为 system/instructions 发给上游。
+
+## 性能与超时
+
+Airouter 不在业务入口设置全局请求队列或全局并发上限；上游限流时，客户端应针对上游返回的 429/5xx 使用带随机抖动的指数退避。流式响应会在慢客户端产生背压时暂停读取上游，避免未发送数据持续占用内存。
+
+上游默认使用 10 秒连接超时、60 秒流式首响应超时、180 秒流式空闲超时和 10 分钟共享总 deadline。一次请求发生 failover 时复用同一个总 deadline，不会为每次重放重新计算 10 分钟。详细环境变量、请求体上限和调优建议见 [并发、背压与超时](docs/performance-and-timeouts.md)。
 
 ## 端口说明
 

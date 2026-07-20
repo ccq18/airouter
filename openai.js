@@ -10,6 +10,8 @@ const { StringDecoder } = require('node:string_decoder');
 const zlib = require('zlib');
 const express = require('express');
 const { createUpstreamRequest, consumeResponseBody, requestBuffered } = require('./app/upstream-request');
+const { readRequestBody, RequestBodyError } = require('./app/request-body');
+const { forwardReadableWithBackpressure } = require('./app/stream-backpressure');
 const { applyForcedProxyHeaders } = require('./app/proxy-header-overrides');
 const { buildIncomingUrl, rewriteProxyUrl } = require('./app/proxy-url-rewrite');
 const {
@@ -26,6 +28,7 @@ const {
     applyResponsesFailoverRequestHeaders,
     classifyResponsesModelDowngrade,
     classifyRetryableResponsesHttpError,
+    classifyRetryableResponsesPayloadError,
     createResponsesEventStreamInspector,
     drainAbandonedResponse,
     isInspectableResponsesEventStream,
@@ -85,8 +88,6 @@ let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
 const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
 const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
-const DESKTOP_AUTH_SESSION_REQUEST_FILE = path.join(__dirname, 'airouter.auth-session.request.json');
-const DESKTOP_AUTH_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
 const QUOTA_CHECK_INTERVAL_MS = 1 * 60 * 1000;
 const ALL_QUOTA_CHECK_INTERVAL_MS = 3 * 60 * 1000;
@@ -135,6 +136,8 @@ const SESSION_KEY_BODY_FIELDS = [
     'thread_id',
     'previous_response_id'
 ];
+const DEFAULT_JSON_REQUEST_BODY_LIMIT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_IMAGE_REQUEST_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 
 function parseTimeoutMs(name, fallbackValue) {
     const rawValue = process.env[name];
@@ -151,9 +154,31 @@ function parseTimeoutMs(name, fallbackValue) {
     return Math.floor(parsedValue);
 }
 
-const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 10 * 60 * 1000);
+function parsePositiveInteger(name, fallbackValue) {
+    const value = parseTimeoutMs(name, fallbackValue);
+    if (value <= 0) {
+        throw new Error(`${name} 必须是正整数`);
+    }
+
+    return value;
+}
+
+const LEGACY_UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_REQUEST_TIMEOUT_MS', 10 * 60 * 1000);
+const UPSTREAM_REQUEST_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_TOTAL_TIMEOUT_MS', LEGACY_UPSTREAM_REQUEST_TIMEOUT_MS);
+const UPSTREAM_CONNECT_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_CONNECT_TIMEOUT_MS', 10 * 1000);
+const UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS', 60 * 1000);
+const UPSTREAM_STREAM_IDLE_TIMEOUT_MS = parseTimeoutMs('UPSTREAM_STREAM_IDLE_TIMEOUT_MS', 2 * 60 * 1000);
 const QUOTA_CHECK_TIMEOUT_MS = parseTimeoutMs('QUOTA_CHECK_TIMEOUT_MS', 10 * 1000);
-const APIKEY_RECOVERY_TIMEOUT_MS = parseTimeoutMs('APIKEY_RECOVERY_TIMEOUT_MS', 10 * 60 * 1000);
+const APIKEY_RECOVERY_TIMEOUT_MS = parseTimeoutMs('APIKEY_RECOVERY_TIMEOUT_MS', 30 * 1000);
+const REQUEST_BODY_IDLE_TIMEOUT_MS = parsePositiveInteger('REQUEST_BODY_IDLE_TIMEOUT_MS', 30 * 1000);
+const JSON_REQUEST_BODY_LIMIT_BYTES = parsePositiveInteger(
+    'JSON_REQUEST_BODY_LIMIT_BYTES',
+    DEFAULT_JSON_REQUEST_BODY_LIMIT_BYTES
+);
+const IMAGE_REQUEST_BODY_LIMIT_BYTES = parsePositiveInteger(
+    'IMAGE_REQUEST_BODY_LIMIT_BYTES',
+    DEFAULT_IMAGE_REQUEST_BODY_LIMIT_BYTES
+);
 
 function hasCliFlag(flag) {
     return process.argv.includes(flag);
@@ -441,6 +466,34 @@ function getCurrentTimestamp() {
 
 function getGatewayStatusCode(err) {
     return err && err.code === 'ETIMEDOUT' ? 504 : 502;
+}
+
+function createUpstreamDeadlineAt() {
+    return UPSTREAM_REQUEST_TIMEOUT_MS > 0
+        ? Date.now() + UPSTREAM_REQUEST_TIMEOUT_MS
+        : null;
+}
+
+function buildUpstreamTimeoutOptions(isStreaming, deadlineAt) {
+    return {
+        connectTimeoutMs: UPSTREAM_CONNECT_TIMEOUT_MS,
+        deadlineAt,
+        firstResponseTimeoutMs: isStreaming ? UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS : 0,
+        idleTimeoutMs: isStreaming ? UPSTREAM_STREAM_IDLE_TIMEOUT_MS : 0,
+        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+    };
+}
+
+function sendRequestBodyError(res, err) {
+    const statusCode = err instanceof RequestBodyError ? err.statusCode : 400;
+    res.status(statusCode).json({
+        error: statusCode === 413
+            ? 'Payload Too Large'
+            : statusCode === 408
+                ? 'Request Timeout'
+                : '请求体处理失败',
+        details: err.message,
+    });
 }
 
 function getHeaderValue(headers, headerName) {
@@ -744,8 +797,7 @@ function isResponsesFailoverInspectionCandidate(statusCode, headers, options = {
 
     const contentType = getHeaderValue(headers, 'content-type').toLowerCase();
     return isSuccessfulResponsesStatus(normalizedStatusCode) &&
-        contentType.includes('json') &&
-        shouldInspectForResponsesModelDowngrade(options.requestedModel);
+        contentType.includes('json');
 }
 
 function writeBufferedUpstreamResponse(res, statusCode, rawHeaders, bodyBuffer) {
@@ -946,11 +998,21 @@ async function inspectResponsesUpstreamForFailover(response, statusCode, rawHead
     const contentType = getHeaderValue(rawHeaders, 'content-type').toLowerCase();
     if (
         isSuccessfulResponsesStatus(statusCode) &&
-        contentType.includes('json') &&
-        shouldInspectForResponsesModelDowngrade(options.requestedModel)
+        contentType.includes('json')
     ) {
         const bodyBuffer = await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
+        const payloadClassification = classifyRetryableResponsesPayloadError({
+            bodyText,
+        });
+        if (payloadClassification) {
+            return {
+                action: 'retry',
+                classification: payloadClassification,
+                forwardMode: 'buffered',
+                bodyBuffer,
+            };
+        }
         let responseModel = '';
 
         try {
@@ -1073,6 +1135,11 @@ function createClaudeMessagesRequestHandler(options = {}) {
         reasoningEffort: process.env.CLAUDE_PROXY_REASONING_EFFORT || claudeCodeConfig.reasoningEffort,
         clientVersion: process.env.CODEX_CLIENT_VERSION || '1.0.1',
         upstreamRequestTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+        upstreamConnectTimeoutMs: UPSTREAM_CONNECT_TIMEOUT_MS,
+        upstreamFirstResponseTimeoutMs: UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS,
+        upstreamStreamIdleTimeoutMs: UPSTREAM_STREAM_IDLE_TIMEOUT_MS,
+        requestBodyLimitBytes: JSON_REQUEST_BODY_LIMIT_BYTES,
+        requestBodyIdleTimeoutMs: REQUEST_BODY_IDLE_TIMEOUT_MS,
         cpaStyleCompatibility,
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
@@ -1483,76 +1550,6 @@ function triggerServiceStart(options = {}) {
 
 function triggerServiceRestart(options = {}) {
     return triggerServiceCommand('restart', options);
-}
-
-let desktopAuthSessionJob = null;
-
-function startDesktopAuthSessionJob() {
-    const job = {
-        id: `${Date.now()}`,
-        status: 'running',
-        started_at: Date.now(),
-        payload: null,
-        last_probe: '',
-        error: ''
-    };
-    desktopAuthSessionJob = job;
-    fs.writeFileSync(
-        DESKTOP_AUTH_SESSION_REQUEST_FILE,
-        JSON.stringify({
-            action: 'open_auth_session',
-            job_id: job.id,
-            login_url: 'https://chatgpt.com/',
-            callback_url: `http://localhost:${runtimePort}/admin/api/desktop/auth-session/callback?auth_token=${encodeURIComponent(getConfiguredAuthToken(currentParsedConfig))}`,
-            created_at: new Date().toISOString()
-        }, null, 2)
-    );
-    return job;
-}
-
-function receiveDesktopAuthSession(payload) {
-    if (typeof payload === 'string') {
-        try {
-            payload = JSON.parse(payload);
-        } catch (err) {
-            throw new ConfigEditorError('AuthSession 回填 JSON 解析失败');
-        }
-    }
-
-    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
-        throw new ConfigEditorError('自动获取 AuthSession 尚未启动');
-    }
-
-    const session = payload && payload.session;
-    if (!session || typeof session !== 'object' || !session.accessToken || !session.account || !session.account.id) {
-        throw new ConfigEditorError('AuthSession JSON 不完整');
-    }
-
-    desktopAuthSessionJob.status = 'complete';
-    desktopAuthSessionJob.payload = {
-        ok: true,
-        session
-    };
-    return desktopAuthSessionJob.payload;
-}
-
-function updateDesktopAuthSessionProbe(payload) {
-    if (!desktopAuthSessionJob || desktopAuthSessionJob.status !== 'running') {
-        return;
-    }
-
-    if (payload && payload.cancelled) {
-        desktopAuthSessionJob.status = 'cancelled';
-        desktopAuthSessionJob.error = typeof payload.message === 'string'
-            ? payload.message
-            : 'ChatGPT 登录窗口已关闭';
-        return;
-    }
-
-    const message = payload && typeof payload.message === 'string'
-        ? payload.message
-        : '等待 ChatGPT 登录完成';
-    desktopAuthSessionJob.last_probe = message.slice(0, 500);
 }
 
 function listenOnPort(port) {
@@ -2303,6 +2300,23 @@ function isStreamingResponsesRequest(requestPath, body) {
     }
 }
 
+function isStreamingProxyRequest(requestPath, body) {
+    if (isStreamingResponsesRequest(requestPath, body)) {
+        return true;
+    }
+
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+        return false;
+    }
+
+    try {
+        const payload = JSON.parse(body.toString('utf8'));
+        return Boolean(payload && payload.stream === true);
+    } catch (err) {
+        return false;
+    }
+}
+
 function defaultContentTypeForProxyResponse(requestPath, body) {
     return isStreamingResponsesRequest(requestPath, body)
         ? 'text/event-stream; charset=utf-8'
@@ -2464,6 +2478,9 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const requestPredicate = typeof options.predicate === 'function' ? options.predicate : () => true;
     const excludedConfigs = Array.isArray(options.excludedConfigs) ? options.excludedConfigs : [];
     const retrySelector = typeof options.retrySelector === 'function' ? options.retrySelector : null;
+    const requestDeadlineAt = Object.prototype.hasOwnProperty.call(options, 'deadlineAt')
+        ? options.deadlineAt
+        : createUpstreamDeadlineAt();
     let currentLease = options.lease || null;
     let leaseReleased = false;
     const shouldObserveResponseModel = isResponsesPath(req.url);
@@ -2475,12 +2492,13 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     logProxyRequestSnapshot(req, originalUrl, req.url, config, headers, hasBufferedBody ? body : Buffer.alloc(0));
     req.headers = headers;
     const targetUrl = new URL(req.url, config.baseUrl).toString();
+    const isStreaming = isStreamingProxyRequest(req.url, body);
     const upstream = createUpstreamRequest({
         method: req.method,
         targetUrl,
         headers,
         body: hasBufferedBody ? body : undefined,
-        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS
+        ...buildUpstreamTimeoutOptions(isStreaming, requestDeadlineAt),
     });
 
     let headersApplied = false;
@@ -2565,7 +2583,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
     }
 
-    function startForwardingResponse(response, statusCode, rawHeaders, initialChunks = []) {
+    async function startForwardingResponse(response, statusCode, rawHeaders, initialChunks = []) {
         const responseMeta = applyResponseHeaders(res, statusCode, rawHeaders, {
             defaultContentType: defaultContentTypeForProxyResponse(req.url, body),
         });
@@ -2594,55 +2612,25 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             if (shouldLogQuotaUsage) {
                 responseBodyChunks.push(chunk);
             }
-            res.write(chunk);
         };
-
-        for (const chunk of initialChunks) {
-            writeChunk(chunk);
+        const forwarded = await forwardReadableWithBackpressure({
+            initialChunks,
+            onChunk: writeChunk,
+            readable: response,
+            writable: res,
+        });
+        if (!forwarded) {
+            releaseCurrentLease();
+            return;
         }
 
-        response.on('data', writeChunk);
-
-        response.on('end', () => {
-            responseFinished = true;
-            responseModelObserver.finish();
-            handleQuotaUsageResponseComplete();
-            releaseCurrentLease();
-
-            if (!res.writableEnded) {
-                res.end();
-            }
-        });
-
-        response.on('error', err => {
-            if (requestClosed) {
-                return;
-            }
-
-            error('代理请求失败:', err.message);
-            if (!res.headersSent) {
-                recordCurrentApiKeyRequestResult({
-                    ok: false,
-                    reason: 'apikey_upstream_error',
-                    lastError: err.message,
-                    switchReason: 'apikey_upstream_failover',
-                });
-                const gatewayStatusCode = getGatewayStatusCode(err);
-                releaseCurrentLease();
-                res.status(gatewayStatusCode).json({
-                    error: gatewayStatusCode === 504 ? 'Gateway Timeout' : 'Bad Gateway',
-                    message: err.message
-                });
-                return;
-            }
-
-            if (!res.writableEnded) {
-                releaseCurrentLease();
-                res.end();
-            }
-        });
-
-        response.resume();
+        responseFinished = true;
+        responseModelObserver.finish();
+        handleQuotaUsageResponseComplete();
+        releaseCurrentLease();
+        if (!res.writableEnded) {
+            res.end();
+        }
     }
 
     function observeBufferedResponseModel(statusCode, rawHeaders, bodyBuffer) {
@@ -2689,6 +2677,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    deadlineAt: requestDeadlineAt,
                     lease: nextLease,
                     sessionKey: requestSessionKey,
                     predicate: requestPredicate,
@@ -2744,6 +2733,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     releaseCurrentLease();
                     proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                         failoverAttempt: failoverAttempt + 1,
+                        deadlineAt: requestDeadlineAt,
                         lease: nextLease,
                         sessionKey: requestSessionKey,
                         predicate: requestPredicate,
@@ -2772,7 +2762,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     return;
                 }
 
-                startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
+                await startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
                 return;
             }
 
@@ -2791,7 +2781,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
 
             if (inspection.action === 'forward-stream') {
-                startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
+                await startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
                 return;
             }
         }
@@ -2815,6 +2805,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    deadlineAt: requestDeadlineAt,
                     lease: nextLease,
                     sessionKey: requestSessionKey,
                     predicate: requestPredicate,
@@ -2830,13 +2821,21 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
-        startForwardingResponse(response, statusCode, response.headers);
+        await startForwardingResponse(response, statusCode, response.headers);
     }).catch(err => {
         if (requestClosed) {
             return;
         }
 
         error('代理请求失败:', err.message);
+        if (headersApplied || res.headersSent) {
+            releaseCurrentLease();
+            if (!res.writableEnded) {
+                res.end();
+            }
+            return;
+        }
+
         if (config && config.type === 'apikey') {
             const apiKeyResult = recordCurrentApiKeyRequestResult({
                 ok: false,
@@ -2845,7 +2844,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 switchReason: 'apikey_upstream_failover',
             });
 
-            if (apiKeyResult.unavailable) {
+            if (apiKeyResult && apiKeyResult.unavailable) {
                 warn(`apikey 上游请求失败并标记不可用: #${config.index + 1} ${config.description} (${err.message}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
             }
 
@@ -2859,6 +2858,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    deadlineAt: requestDeadlineAt,
                     lease: nextLease,
                     sessionKey: requestSessionKey,
                     predicate: requestPredicate,
@@ -2889,6 +2889,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                 releaseCurrentLease();
                 proxyRequest(req, res, nextConfig, nextBody, originalUrl, {
                     failoverAttempt: failoverAttempt + 1,
+                    deadlineAt: requestDeadlineAt,
                     lease: nextLease,
                     sessionKey: requestSessionKey,
                     predicate: requestPredicate,
@@ -2936,6 +2937,7 @@ function createHandler(proxyPath = '', options = {}) {
     const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     return function handler(req, res) {
         const incomingUrl = buildIncomingUrl(req, proxyPath);
+        const deadlineAt = createUpstreamDeadlineAt();
 
         function acquireProxyLease(sessionKey, excludedConfigs = []) {
             return acquireTokenThenGptApiKeyLease(accountManager, 'proxy_request', sessionKey, excludedConfigs);
@@ -2971,6 +2973,7 @@ function createHandler(proxyPath = '', options = {}) {
             }
 
             proxyRequest(req, res, config, nextBody, incomingUrl, {
+                deadlineAt,
                 lease,
                 sessionKey: lease.sessionKey,
                 predicate: config.type === 'token' ? isTokenProxyConfig : isGptApiKeyProxyConfig,
@@ -2980,13 +2983,10 @@ function createHandler(proxyPath = '', options = {}) {
         }
 
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
-            const bodyChunks = [];
-            req.on('data', chunk => {
-                bodyChunks.push(chunk);
-            });
-
-            req.on('end', () => {
-                const body = Buffer.concat(bodyChunks);
+            void readRequestBody(req, {
+                idleTimeoutMs: REQUEST_BODY_IDLE_TIMEOUT_MS,
+                limitBytes: JSON_REQUEST_BODY_LIMIT_BYTES,
+            }).then(body => {
                 const contentType = String(req.headers['content-type'] || '').toLowerCase();
                 let jsonBody = null;
 
@@ -3005,6 +3005,10 @@ function createHandler(proxyPath = '', options = {}) {
 
                 const sessionKey = getRequestSessionKey(req, incomingUrl, jsonBody);
                 forwardWithConfig(acquireProxyLease(sessionKey), body, jsonBody);
+            }).catch(err => {
+                if (!res.headersSent) {
+                    sendRequestBodyError(res, err);
+                }
             });
         } else {
             const sessionKey = getRequestSessionKey(req, incomingUrl);
@@ -3030,26 +3034,9 @@ function forwardCpaClaudeMessagesRequest(req, res) {
 }
 
 function readBufferedRequestBody(req, limitBytes = 1024 * 1024) {
-    return new Promise((resolve, reject) => {
-        const chunks = [];
-        let totalBytes = 0;
-
-        req.on('data', chunk => {
-            totalBytes += chunk.length;
-            if (totalBytes > limitBytes) {
-                reject(new Error('请求体过大'));
-                req.destroy();
-                return;
-            }
-
-            chunks.push(chunk);
-        });
-
-        req.on('end', () => {
-            resolve(Buffer.concat(chunks));
-        });
-
-        req.on('error', reject);
+    return readRequestBody(req, {
+        idleTimeoutMs: REQUEST_BODY_IDLE_TIMEOUT_MS,
+        limitBytes,
     });
 }
 
@@ -3057,7 +3044,7 @@ function acquireImageBusinessLease(manager, sessionKey, excludedConfigs = []) {
     return acquireTokenThenGptApiKeyLease(manager, 'image_request', sessionKey, excludedConfigs);
 }
 
-function buildTokenImageUpstreamRequest(req, config, responsesPayload) {
+function buildTokenImageUpstreamRequest(req, config, responsesPayload, deadlineAt) {
     const upstreamPath = `${config.apiBasePath}/responses`;
     const normalizedPayload = normalizeProxyJsonBody(config, upstreamPath, responsesPayload, responsesConfig);
     const upstreamBody = Buffer.from(JSON.stringify(normalizedPayload));
@@ -3077,11 +3064,12 @@ function buildTokenImageUpstreamRequest(req, config, responsesPayload) {
         targetUrl,
         headers,
         body: upstreamBody,
-        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+        maxResponseBytes: IMAGE_REQUEST_BODY_LIMIT_BYTES,
+        ...buildUpstreamTimeoutOptions(false, deadlineAt),
     };
 }
 
-function buildNativeImageUpstreamRequest(req, incomingUrl, config, body) {
+function buildNativeImageUpstreamRequest(req, incomingUrl, config, body, deadlineAt) {
     const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
     const headers = buildProxyHeaders(req.headers, config, body.length);
     return {
@@ -3089,7 +3077,8 @@ function buildNativeImageUpstreamRequest(req, incomingUrl, config, body) {
         targetUrl: new URL(rewrittenUrl, config.baseUrl).toString(),
         headers,
         body,
-        timeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+        maxResponseBytes: IMAGE_REQUEST_BODY_LIMIT_BYTES,
+        ...buildUpstreamTimeoutOptions(false, deadlineAt),
     };
 }
 
@@ -3174,11 +3163,13 @@ async function executeImageBusinessAttempt({
     incomingUrl,
     config,
     body,
+    deadlineAt,
     getTokenResponsesPayload,
     requestBufferedImpl
 }) {
     if (config.type !== 'token') {
-        const result = await requestBufferedImpl(buildNativeImageUpstreamRequest(req, incomingUrl, config, body));
+        const upstreamRequest = buildNativeImageUpstreamRequest(req, incomingUrl, config, body, deadlineAt);
+        const result = await requestBufferedImpl(upstreamRequest);
         if (isSuccessfulResponsesStatus(result.statusCode)) {
             return {
                 type: 'native_success',
@@ -3206,7 +3197,8 @@ async function executeImageBusinessAttempt({
         };
     }
 
-    const result = await requestBufferedImpl(buildTokenImageUpstreamRequest(req, config, responsesPayload.payload));
+    const upstreamRequest = buildTokenImageUpstreamRequest(req, config, responsesPayload.payload, deadlineAt);
+    const result = await requestBufferedImpl(upstreamRequest);
 
     if (!isSuccessfulResponsesStatus(result.statusCode)) {
         return {
@@ -3303,6 +3295,7 @@ async function handleImageBusinessRequest(req, res, options = {}) {
     const requestBufferedImpl = options.requestBuffered || requestBuffered;
     const now = typeof options.now === 'function' ? options.now : Date.now;
     const incomingUrl = buildIncomingUrl(req);
+    const deadlineAt = createUpstreamDeadlineAt();
     const body = await readBufferedRequestBody(req, options.bodyLimitBytes || 1024 * 1024);
     const sessionKey = getRequestSessionKey(req, incomingUrl);
     const getTokenResponsesPayload = options.createTokenPayloadFactory(req, body, options);
@@ -3320,6 +3313,7 @@ async function handleImageBusinessRequest(req, res, options = {}) {
                 incomingUrl,
                 config,
                 body,
+                deadlineAt,
                 getTokenResponsesPayload,
                 requestBufferedImpl,
             });
@@ -3364,9 +3358,13 @@ function createImageGenerationsHandler(options = {}) {
     return function imageGenerationsHandler(req, res) {
         return handleImageBusinessRequest(req, res, {
             ...options,
-            bodyLimitBytes: 1024 * 1024,
+            bodyLimitBytes: JSON_REQUEST_BODY_LIMIT_BYTES,
             createTokenPayloadFactory: (_req, body, handlerOptions) => createTokenImageGenerationPayloadFactory(body, handlerOptions),
         }).catch(err => {
+            if (err instanceof RequestBodyError && !res.headersSent) {
+                sendRequestBodyError(res, err);
+                return;
+            }
             reportBusinessRequestError(res, err, '图片生成请求处理失败');
         });
     };
@@ -3376,9 +3374,13 @@ function createImageEditsHandler(options = {}) {
     return function imageEditsHandler(req, res) {
         return handleImageBusinessRequest(req, res, {
             ...options,
-            bodyLimitBytes: 32 * 1024 * 1024,
+            bodyLimitBytes: IMAGE_REQUEST_BODY_LIMIT_BYTES,
             createTokenPayloadFactory: createTokenImageEditPayloadFactory,
         }).catch(err => {
+            if (err instanceof RequestBodyError && !res.headersSent) {
+                sendRequestBodyError(res, err);
+                return;
+            }
             reportBusinessRequestError(res, err, '图片编辑请求处理失败');
         });
     };
@@ -3506,14 +3508,6 @@ app.get('/config-admin.js', (req, res) => {
 
 app.use('/admin', requireAdminAuthToken);
 app.use('/admin/api', express.json({ limit: '1mb' }));
-app.use('/admin/api/desktop/auth-session/callback', express.text({
-    type: 'text/plain',
-    limit: '1mb'
-}));
-app.use('/admin/api/desktop/auth-session/callback', express.urlencoded({
-    extended: false,
-    limit: '1mb'
-}));
 
 app.get('/admin/configs', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'config-admin.html'));
@@ -3930,97 +3924,6 @@ app.post('/admin/api/open-external', async (req, res) => {
     }
 });
 
-app.post('/admin/api/desktop/auth-session', async (req, res) => {
-    try {
-        const job = startDesktopAuthSessionJob();
-        res.status(202).json({
-            ok: true,
-            status: job.status,
-            job_id: job.id
-        });
-    } catch (err) {
-        res.status(500).json({
-            error: '自动获取 AuthSession 触发失败',
-            details: err.message
-        });
-    }
-});
-
-app.post('/admin/api/desktop/auth-session/callback', (req, res) => {
-    try {
-        let body = req.body;
-        if (body && typeof body === 'object' && typeof body.payload === 'string') {
-            body = body.payload;
-        }
-        let parsedBody = body;
-        if (typeof parsedBody === 'string') {
-            try {
-                parsedBody = JSON.parse(parsedBody);
-            } catch (err) {
-                throw new ConfigEditorError('AuthSession 回填 JSON 解析失败');
-            }
-        }
-        if (parsedBody && parsedBody.ok === false) {
-            updateDesktopAuthSessionProbe(parsedBody);
-            res.json({ ok: false, waiting: true });
-            return;
-        }
-        const payload = receiveDesktopAuthSession(parsedBody);
-        res.json(payload);
-    } catch (err) {
-        const statusCode = err instanceof ConfigEditorError ? 400 : 500;
-        res.status(statusCode).json({
-            error: statusCode === 400 ? 'AuthSession 回填失败' : 'AuthSession 回填异常',
-            details: err.message
-        });
-    }
-});
-
-app.get('/admin/api/desktop/auth-session', (req, res) => {
-    if (!desktopAuthSessionJob) {
-        res.status(404).json({
-            error: '自动获取 AuthSession 尚未启动',
-            details: '请先点击 App 自动获取'
-        });
-        return;
-    }
-
-    if (Date.now() - desktopAuthSessionJob.started_at > DESKTOP_AUTH_SESSION_TIMEOUT_MS) {
-        desktopAuthSessionJob.status = 'error';
-        desktopAuthSessionJob.error = '等待 ChatGPT 登录超时';
-    }
-
-    if (desktopAuthSessionJob.status === 'complete') {
-        res.json(desktopAuthSessionJob.payload);
-        return;
-    }
-
-    if (desktopAuthSessionJob.status === 'error') {
-        res.status(502).json({
-            error: '自动获取 AuthSession 失败',
-            details: desktopAuthSessionJob.error || '未知错误'
-        });
-        return;
-    }
-
-    if (desktopAuthSessionJob.status === 'cancelled') {
-        res.json({
-            ok: false,
-            cancelled: true,
-            status: desktopAuthSessionJob.status,
-            message: desktopAuthSessionJob.error || 'ChatGPT 登录窗口已关闭'
-        });
-        return;
-    }
-
-    res.json({
-        ok: false,
-        waiting: true,
-        status: desktopAuthSessionJob.status,
-        message: desktopAuthSessionJob.last_probe || ''
-    });
-});
-
 app.post('/admin/api/start-service', (req, res) => {
     try {
         const pid = triggerServiceStart();
@@ -4122,7 +4025,7 @@ app.get('/health', requireConfiguredApiKeys, (req, res) => {
         configs: {
             total: apiConfigs.length,
             default: currentAccountStatus ? currentAccountStatus.description : null
-        }
+        },
     });
 });
 
@@ -4207,10 +4110,11 @@ async function startServer() {
             log(`  - 模式: ${configType}`);
             log(`  - 账号数量: ${apiConfigs.length}`);
             log(`  - 当前账号: ${currentAccountStatus ? currentAccountStatus.label : '未配置'}`);
-            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查所有 token 账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟额外全量校正（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
-            log(`  - 上游请求超时: ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
+            log(`  - 额度轮询: ${hasQuotaMonitoredConfigs(apiConfigs) ? `每 ${QUOTA_CHECK_INTERVAL_MS / 60000} 分钟检查当前 token 账号，每 ${ALL_QUOTA_CHECK_INTERVAL_MS / 60000} 分钟全量校正（账号间隔 ${ALL_QUOTA_CHECK_DELAY_MS / 1000} 秒），主额度低于 ${MIN_REMAINING_PERCENT}% 自动标记不可用` : '关闭（无 token 配置项）'}`);
+            log(`  - 上游超时: 连接 ${UPSTREAM_CONNECT_TIMEOUT_MS}ms，流式首响应 ${UPSTREAM_FIRST_RESPONSE_TIMEOUT_MS}ms，流式空闲 ${UPSTREAM_STREAM_IDLE_TIMEOUT_MS}ms，总时间 ${UPSTREAM_REQUEST_TIMEOUT_MS > 0 ? `${UPSTREAM_REQUEST_TIMEOUT_MS}ms` : '关闭'}`);
             log(`  - quota check 超时: ${hasQuotaMonitoredConfigs(apiConfigs) ? `${QUOTA_CHECK_TIMEOUT_MS}ms` : '关闭（无 token 配置项）'}`);
             log(`  - apikey 恢复探测超时: ${hasRecoverableApiKeyConfigs(apiConfigs) ? `${APIKEY_RECOVERY_TIMEOUT_MS}ms` : '关闭（无 GPT apikey 配置项）'}`);
+            log(`  - 请求体限制: JSON ${JSON_REQUEST_BODY_LIMIT_BYTES} 字节，图片编辑 ${IMAGE_REQUEST_BODY_LIMIT_BYTES} 字节，上传空闲超时 ${REQUEST_BODY_IDLE_TIMEOUT_MS}ms`);
             log(`  - 入口 apikey 校验: ${hasConfiguredApiKeys(currentParsedConfig) ? `开启（${getConfiguredApiKeys(currentParsedConfig).length} 个）` : '关闭（未配置 apikey）'}`);
             log(`  - 访问日志: ${ACCESS_LOG_ENABLED ? '开启' : '关闭'}${ACCESS_LOG_ENABLED ? '（--access-log）' : '（使用 --access-log 开启）'}`);
             if (hasQuotaMonitoredConfigs(apiConfigs) && apiConfigs.length > 0) {

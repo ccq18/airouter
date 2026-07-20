@@ -129,6 +129,8 @@ Rate limit reached for gpt-5.1 ... Please try again in 11.054s.
 
 如果 `429` 已经确认是失败，但 `error.type` 不在已知集合里，也应当继续按失败处理。
 
+如果 `429` 已经确认是失败，但 `error.type` 不在已知集合里，也应当继续按失败处理。
+
 #### 1.2.2 明确可识别的 `error.type`
 
 - `usage_limit_reached`

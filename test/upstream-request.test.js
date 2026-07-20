@@ -4,11 +4,12 @@ const http = require('node:http');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
-const { createUpstreamRequest, requestBuffered } = require('../app/upstream-request');
+const { consumeResponseBody, createUpstreamRequest, requestBuffered } = require('../app/upstream-request');
 
 function createMockResponse({ statusCode = 200, headers = {} } = {}) {
   const response = new PassThrough();
   const originalEnd = response.end.bind(response);
+  let timeoutHandle = null;
 
   response.statusCode = statusCode;
   response.headers = headers;
@@ -17,6 +18,22 @@ function createMockResponse({ statusCode = 200, headers = {} } = {}) {
     response.complete = true;
     return originalEnd(...args);
   };
+  response.setTimeout = (timeoutMs, callback) => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+    if (timeoutMs > 0) {
+      timeoutHandle = setTimeout(callback, timeoutMs);
+    }
+    return response;
+  };
+  response.once('close', () => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+  });
 
   return response;
 }
@@ -94,6 +111,140 @@ test('createUpstreamRequest aborts a hanging response body after timeout', async
   );
 });
 
+test('createUpstreamRequest aborts when a connection does not become ready', async t => {
+  withStubbedHttpRequest(t, () => createMockRequest(() => {}));
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/connect',
+    connectTimeoutMs: 20,
+    timeoutMs: 200,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'connect');
+    return true;
+  });
+});
+
+test('createUpstreamRequest aborts when the first response does not arrive', async t => {
+  withStubbedHttpRequest(t, () => {
+    const request = createMockRequest(() => {});
+    process.nextTick(() => {
+      request.emit('socket', { connecting: false });
+    });
+    return request;
+  });
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/first-response',
+    connectTimeoutMs: 10,
+    firstResponseTimeoutMs: 25,
+    timeoutMs: 200,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'first_response');
+    return true;
+  });
+});
+
+test('createUpstreamRequest aborts an idle response stream', async t => {
+  withStubbedHttpRequest(t, (_options, callback) => {
+    return createMockRequest((_body, request) => {
+      const response = createMockResponse();
+      request.response = response;
+
+      setImmediate(() => {
+        callback(response);
+        response.write('partial');
+      });
+    });
+  });
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/idle',
+    idleTimeoutMs: 25,
+    timeoutMs: 200,
+  });
+  const response = await upstream.responsePromise;
+
+  await assert.rejects(readResponseBody(response), error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'idle');
+    return true;
+  });
+});
+
+test('createUpstreamRequest completes safely after Node clears the response socket', async t => {
+  withStubbedHttpRequest(t, (_options, callback) => {
+    return createMockRequest((_body, request) => {
+      const response = createMockResponse();
+      response.socket = {
+        setTimeout() {},
+      };
+      request.response = response;
+
+      setImmediate(() => {
+        callback(response);
+        response.socket = null;
+        response.emit('close');
+      });
+    });
+  });
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/socket-cleared-before-close',
+    idleTimeoutMs: 25,
+    timeoutMs: 200,
+  });
+
+  await upstream.responsePromise;
+  await new Promise(resolve => setImmediate(resolve));
+});
+
+test('createUpstreamRequest respects a shared absolute deadline', async t => {
+  withStubbedHttpRequest(t, () => createMockRequest(() => {}));
+
+  const startedAt = Date.now();
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/deadline',
+    deadlineAt: Date.now() + 35,
+    timeoutMs: 200,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'total');
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 100);
+});
+
+test('createUpstreamRequest reports the total deadline before a longer connect timeout', async t => {
+  withStubbedHttpRequest(t, () => createMockRequest(() => {}));
+
+  const upstream = createUpstreamRequest({
+    method: 'GET',
+    targetUrl: 'http://example.test/deadline-before-connect',
+    connectTimeoutMs: 200,
+    deadlineAt: Date.now() + 25,
+    timeoutMs: 500,
+  });
+
+  await assert.rejects(upstream.responsePromise, error => {
+    assert.equal(error.code, 'ETIMEDOUT');
+    assert.equal(error.timeoutPhase, 'total');
+    return true;
+  });
+});
+
 test('requestBuffered keeps one timeout budget across redirects', async t => {
   let callCount = 0;
 
@@ -143,4 +294,68 @@ test('requestBuffered keeps one timeout budget across redirects', async t => {
   const elapsedMs = Date.now() - startedAt;
   assert.equal(callCount, 2);
   assert.ok(elapsedMs < 300, `expected redirect chain to share one timeout budget, got ${elapsedMs}ms`);
+});
+
+test('requestBuffered blocks cross-origin redirects before forwarding credentials', async t => {
+  let callCount = 0;
+
+  withStubbedHttpRequest(t, (_options, callback) => {
+    callCount += 1;
+    return createMockRequest(() => {
+      const response = createMockResponse({
+        statusCode: 307,
+        headers: {
+          location: 'http://attacker.example/collect',
+        },
+      });
+      setImmediate(() => callback(response));
+    });
+  });
+
+  await assert.rejects(
+    requestBuffered({
+      method: 'POST',
+      targetUrl: 'http://example.test/token',
+      headers: { authorization: 'Bearer secret' },
+      body: Buffer.from('refresh_token=secret'),
+      maxRedirects: 1,
+      timeoutMs: 200,
+    }),
+    error => {
+      assert.equal(error.code, 'UPSTREAM_CROSS_ORIGIN_REDIRECT');
+      return true;
+    }
+  );
+  assert.equal(callCount, 1);
+});
+
+test('consumeResponseBody rejects an oversized declared content length', async () => {
+  const response = createMockResponse({
+    headers: {
+      'content-length': '11',
+    },
+  });
+
+  await assert.rejects(
+    consumeResponseBody(response, { maxResponseBytes: 10 }),
+    error => {
+      assert.equal(error.code, 'UPSTREAM_RESPONSE_TOO_LARGE');
+      return true;
+    }
+  );
+  assert.equal(response.destroyed, true);
+});
+
+test('consumeResponseBody stops a chunked response after the configured limit', async () => {
+  const response = createMockResponse();
+  const bodyPromise = consumeResponseBody(response, { maxResponseBytes: 5 });
+
+  response.write('123');
+  response.write('456');
+
+  await assert.rejects(bodyPromise, error => {
+    assert.equal(error.code, 'UPSTREAM_RESPONSE_TOO_LARGE');
+    return true;
+  });
+  assert.equal(response.destroyed, true);
 });

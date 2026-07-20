@@ -26,6 +26,20 @@ function normalizeString(value) {
     return String(value);
 }
 
+function getFirstObjectValue(source, keys) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+        return undefined;
+    }
+
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+            return source[key];
+        }
+    }
+
+    return undefined;
+}
+
 function decodeJwtPayload(token) {
     const text = normalizeString(token);
     const parts = text.split('.');
@@ -53,6 +67,37 @@ function normalizeStringArray(values) {
     return values
         .map(value => normalizeString(value))
         .filter(Boolean);
+}
+
+function hasOwnField(value, field) {
+    return Object.prototype.hasOwnProperty.call(value, field);
+}
+
+function normalizeApiKeyConfigAliases(item) {
+    const normalized = { ...item };
+
+    if (!hasOwnField(normalized, 'apikey')) {
+        if (hasOwnField(normalized, 'apiKey')) {
+            normalized.apikey = normalized.apiKey;
+        } else if (hasOwnField(normalized, 'api_key')) {
+            normalized.apikey = normalized.api_key;
+        }
+    }
+
+    if (!hasOwnField(normalized, 'base_url')) {
+        if (hasOwnField(normalized, 'baseUrl')) {
+            normalized.base_url = normalized.baseUrl;
+        } else if (hasOwnField(normalized, 'baseURL')) {
+            normalized.base_url = normalized.baseURL;
+        }
+    }
+
+    delete normalized.apiKey;
+    delete normalized.api_key;
+    delete normalized.baseUrl;
+    delete normalized.baseURL;
+
+    return normalized;
 }
 
 function normalizeResponsesModelAliases(value) {
@@ -165,18 +210,23 @@ function readParsedConfigFile(configFile, options = {}) {
 function normalizeConfigItem(item, existingItem = {}) {
     assertPlainObject(item, '配置项必须是对象');
 
-    const nextItem = {
+    const typeProbe = {
         ...(existingItem && typeof existingItem === 'object' && !Array.isArray(existingItem) ? existingItem : {}),
         ...item,
     };
-    const type = getConfigItemType(nextItem);
+    const type = getConfigItemType(typeProbe);
+    const normalizedItem = type === 'apikey' ? normalizeApiKeyConfigAliases(item) : item;
+    const nextItem = {
+        ...(existingItem && typeof existingItem === 'object' && !Array.isArray(existingItem) ? existingItem : {}),
+        ...normalizedItem,
+    };
 
     for (const field of getEditableFields(type)) {
         if (field === 'support') {
             continue;
         }
 
-        nextItem[field] = normalizeString(item[field]);
+        nextItem[field] = normalizeString(normalizedItem[field]);
     }
 
     if (type === 'token' && !nextItem.type) {
@@ -188,10 +238,41 @@ function normalizeConfigItem(item, existingItem = {}) {
     }
 
     if (type === 'apikey') {
+        const rawApiKey = getFirstObjectValue(item, ['apikey', 'apiKey', 'api_key']);
+        const rawBaseUrl = getFirstObjectValue(item, ['base_url', 'baseUrl', 'baseURL']);
         nextItem.type = 'apikey';
-        nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
+        nextItem.apikey = normalizeString(rawApiKey);
+        nextItem.base_url = normalizeString(rawBaseUrl).replace(/\/+$/, '');
         if (Object.prototype.hasOwnProperty.call(item, 'support')) {
             nextItem.support = normalizeApiKeySupport(item.support);
+        }
+        delete nextItem.apiKey;
+        delete nextItem.api_key;
+        delete nextItem.baseUrl;
+        delete nextItem.baseURL;
+    }
+
+    if (type === 'claude_token') {
+        nextItem.type = 'claude_token';
+        if (nextItem.base_url) {
+            nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
+        } else {
+            delete nextItem.base_url;
+        }
+        if (!nextItem.refresh_token) {
+            delete nextItem.refresh_token;
+        }
+        if (!nextItem.expires_at) {
+            delete nextItem.expires_at;
+        }
+        if (!nextItem.account_uuid) {
+            delete nextItem.account_uuid;
+        }
+        if (!nextItem.organization_uuid) {
+            delete nextItem.organization_uuid;
+        }
+        if (!nextItem.local_auth_token) {
+            delete nextItem.local_auth_token;
         }
     }
 

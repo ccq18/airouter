@@ -9,7 +9,7 @@ const APIKEY_REQUEST_FAILURE_THRESHOLD = 3;
 const APIKEY_REQUEST_SAMPLE_TTL_MS = 30 * 60 * 1000;
 const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
 const DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS = 60 * 60 * 1000;
-const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 30 * 1000;
 const OPENAI_APIKEY_STATIC_POOL = 'openai_apikey';
 const CLAUDE_APIKEY_STATIC_POOL = 'claude_apikey';
 const APIKEY_RECOVERY_REQUEST_BODY = {
@@ -1524,8 +1524,8 @@ function createAccountManager(options) {
 
     currentQuotaMonitorTimer = setIntervalFn(() => {
       void refreshQuotas('poll', {
-        refreshAll: true,
-        delayBetweenAccountsMs: allQuotaCheckDelayMs,
+        refreshAll: false,
+        delayBetweenAccountsMs: 0,
       });
     }, quotaCheckIntervalMs);
 

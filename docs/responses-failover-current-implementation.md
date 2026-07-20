@@ -16,7 +16,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 - 路径命中 `/responses`
 - 当前账号类型是 `token`
 
-普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。`apikey` 配置项不走 Codex responses 事件解析，但直连上游在响应提交前出现非成功状态、请求异常或响应体中断时，也会找同能力池的下一个可用 apikey。
+普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。token-backed Responses 即使收到 HTTP 200，也会检查 JSON 错误对象；其中 `Selected model is at capacity` 会触发同一套账号临时摘除与重放逻辑。`apikey` 配置项不走 Codex responses 事件解析，但直连上游在响应提交前出现非成功状态、请求异常或响应体中断时，也会找同能力池的下一个可用 apikey。
 
 同一个请求会排除已经失败的账号继续重试，最多重放 2 次；达到上限、没有新的可用配置或响应已经开始写回客户端后，不再继续切号。
 
@@ -26,15 +26,12 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 - HTTP `429` 且 `error.type == "usage_limit_reached"`
 - HTTP `429` 且 `error.type == "usage_not_included"`
-- HTTP `429` 响应体中出现 `http:usage_limit_reached` 或 `http:usage_not_included` 这类带来源前缀的错误码
 - HTTP 非 `200` 且 `error.code == "model_at_capacity"`，或错误消息包含 `Selected model is at capacity`
 - HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
 - 其他 HTTP 非 `200` 响应，包括 `201`、`400`、`500`、`503` 等
 - 请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但成功响应里的实际模型是 `gpt-5.4-mini` 或同名日期版本
 - SSE `response.failed` 且 `response.error.code == "insufficient_quota"`
-- SSE `response.failed` 且 `response.error.code == "usage_limit_reached"`
 - SSE `response.failed` 且 `response.error.code == "usage_not_included"`
-- SSE `response.failed` 的错误码或错误信息中出现 `http:usage_limit_reached` 或 `http:usage_not_included` 这类带来源前缀的错误码
 - SSE `response.failed` 且 `response.error.code == "model_at_capacity"`，或错误消息包含 `Selected model is at capacity`
 - 其他 `response.failed`
 - SSE `event: error`、`*.failed`、`*.error`，或 payload 中出现 `error`
@@ -47,15 +44,12 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 | 上游返回 | 内部原因码 |
 | --- | --- |
 | `429 + usage_limit_reached` | `responses_usage_limit_reached` |
-| `429 + http:usage_limit_reached` | `responses_usage_limit_reached` |
 | `429 + usage_not_included` | `responses_usage_not_included` |
-| `429 + http:usage_not_included` | `responses_usage_not_included` |
 | `model_at_capacity` / `Selected model is at capacity` | `responses_model_at_capacity` |
 | `401/403 + unauthorized/token_revoked` | `missing_credentials` |
 | `其他 HTTP 非 200` | `responses_unknown_error` |
 | 请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但响应模型为 `gpt-5.4-mini` 或同名日期版本 | `responses_model_downgraded` |
 | `response.failed + insufficient_quota` | `responses_insufficient_quota` |
-| `response.failed + usage_limit_reached` | `responses_usage_limit_reached` |
 | `response.failed + usage_not_included` | `responses_usage_not_included` |
 | `response.failed + model_at_capacity` | `responses_model_at_capacity` |
 | 其他 SSE 错误事件 / SSE 格式异常 | `responses_unknown_error` |
@@ -81,7 +75,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
    - `response.created`
    - `response.in_progress`
    这两类事件，会继续等待；如果这些事件里的 `response.model` 已经从请求模型降级成 `gpt-5.4-mini` 或同名日期版本，会立即切号
-5. 如果看到 `response.failed`、`event: error`、`*.failed`、`*.error`、payload 中的 `error`，或 SSE 事件体无法解析，就中断当前转发流程，改走切号重试；错误码可以是裸值，例如 `usage_limit_reached`，也可以是带来源前缀的值，例如 `http:usage_limit_reached`
+5. 如果看到 `response.failed`、`event: error`、`*.failed`、`*.error`、payload 中的 `error`，或 SSE 事件体无法解析，就中断当前转发流程，改走切号重试
 6. 如果在前置阶段先看到了正常输出事件，例如 `response.output_text.delta`
    就认为这条流已经开始正常产出内容，直接透传，不再尝试切号
 
