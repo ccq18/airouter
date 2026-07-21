@@ -363,9 +363,14 @@ test('ensureActiveStaticConfig keeps OpenAI and Claude apikey focus separate', (
     });
   }
 
-  const claudeBackup = manager.ensureActiveStaticConfig('claude_apikey', 'claude_direct_failover', isClaudeApiKey);
+  const claudeBackup = manager.ensureActiveStaticConfig(
+    'claude_apikey',
+    'claude_direct_failover',
+    config => isClaudeApiKey(config) && config !== configs[1],
+  );
 
   assert.equal(claudeBackup, configs[3]);
+  assert.equal(configs[1].runtime.available, true);
   assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
@@ -1107,7 +1112,7 @@ test('markConfigUnavailable keeps the current account when no alternative is ava
   assert.match(warnings[0], /没有可用账号，继续使用当前账号 #1 account-1 \(responses_failover\)/);
 });
 
-test('recordApiKeyRequestResult marks apikey unavailable when recent failures reach three in a ten-request window', () => {
+test('recordApiKeyRequestResult recommends switching but keeps apikey available when recent failures reach three', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
       type: 'apikey',
@@ -1118,7 +1123,7 @@ test('recordApiKeyRequestResult marks apikey unavailable when recent failures re
     }),
     createConfig(1, { available: true, reason: 'ok' }),
   ];
-  const { manager, warnings } = createManager(configs);
+  const { manager } = createManager(configs);
 
   for (let index = 0; index < 2; index += 1) {
     manager.recordApiKeyRequestResult(configs[0], {
@@ -1145,17 +1150,17 @@ test('recordApiKeyRequestResult marks apikey unavailable when recent failures re
     switchReason: 'apikey_upstream_failover',
   });
 
-  assert.equal(result.unavailable, true);
+  assert.equal(result.failureThresholdReached, true);
+  assert.equal(result.switchRecommended, true);
+  assert.equal(result.unavailable, false);
   assert.equal(result.failureCount, 3);
   assert.equal(result.sampleSize, 9);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'apikey_rate_limited');
-  assert.equal(configs[0].runtime.lastError, 'http:429');
-  assert.equal(manager.getActiveConfig(), configs[1]);
-  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(apikey_upstream_failover\)/.test(line)), true);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+  assert.equal(manager.getActiveConfig(), configs[0]);
 });
 
-test('recordApiKeyRequestResult marks apikey unavailable after three consecutive failed requests even before the window is full', () => {
+test('recordApiKeyRequestResult recommends switching after three consecutive failures without removing apikey', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
       type: 'apikey',
@@ -1191,12 +1196,73 @@ test('recordApiKeyRequestResult marks apikey unavailable after three consecutive
     switchReason: 'apikey_upstream_failover',
   });
 
-  assert.equal(result.unavailable, true);
+  assert.equal(result.failureThresholdReached, true);
+  assert.equal(result.switchRecommended, true);
+  assert.equal(result.unavailable, false);
   assert.equal(result.failureCount, 3);
   assert.equal(result.sampleSize, 3);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'apikey_upstream_5xx');
-  assert.equal(manager.getActiveConfig(), configs[1]);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+  assert.equal(manager.getActiveConfig(), configs[0]);
+});
+
+test('recordApiKeyRequestResult never removes apikey after the failure threshold is reached', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+
+  for (let index = 0; index < 3; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_upstream_5xx',
+      lastError: 'http:500',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  const protectedResult = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_upstream_5xx',
+    lastError: 'http:500',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(protectedResult.failureThresholdReached, true);
+  assert.equal(protectedResult.switchRecommended, true);
+  assert.equal(protectedResult.unavailable, false);
+  assert.equal(protectedResult.failureCount, 4);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+
+  const successfulResult = manager.recordApiKeyRequestResult(configs[0], {
+    ok: true,
+  });
+
+  assert.equal(successfulResult.failureThresholdReached, true);
+  assert.equal(successfulResult.switchRecommended, false);
+  assert.equal(successfulResult.unavailable, false);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
+
+  const laterFailureResult = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_upstream_5xx',
+    lastError: 'http:500',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(laterFailureResult.failureThresholdReached, true);
+  assert.equal(laterFailureResult.switchRecommended, true);
+  assert.equal(laterFailureResult.unavailable, false);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
 });
 
 test('recordApiKeyRequestResult only counts failures in the latest ten apikey requests', () => {
@@ -1310,10 +1376,12 @@ test('recordApiKeyRequestResult retains apikey failures at the five-minute TTL b
     switchReason: 'apikey_upstream_failover',
   });
 
-  assert.equal(result.unavailable, true);
+  assert.equal(result.failureThresholdReached, true);
+  assert.equal(result.switchRecommended, true);
+  assert.equal(result.unavailable, false);
   assert.equal(result.failureCount, 3);
   assert.equal(result.sampleSize, 3);
-  assert.equal(configs[0].runtime.available, false);
+  assert.equal(configs[0].runtime.available, true);
 });
 
 test('activateConfig restores an unavailable apikey config before switching to it', () => {
@@ -1949,7 +2017,7 @@ test('refreshQuotas keeps missing_credentials when refresh_token is unavailable'
   assert.equal(configs[0].runtime.reason, 'missing_credentials');
 });
 
-test('all-account polls probe only the active GPT apikey fallback focus', async () => {
+test('all-account polls do not probe an apikey that only reached the business failure threshold', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }, {
       type: 'apikey',
@@ -2001,8 +2069,7 @@ test('all-account polls probe only the active GPT apikey fallback focus', async 
   assert.equal(manager.ensureActiveStaticConfig('openai_apikey', 'openai_failover', isGptApiKey), configs[0]);
   await manager.refreshQuotas('all_poll');
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].targetUrl, 'https://openai-primary.example.com/v1/responses');
+  assert.equal(calls.length, 0);
   assert.equal(configs[0].runtime.available, true);
   assert.equal(configs[1].runtime.available, false);
   assert.equal(configs[2].runtime.available, false);

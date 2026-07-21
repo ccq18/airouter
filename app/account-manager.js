@@ -577,21 +577,15 @@ function createAccountManager(options) {
       windowSize: APIKEY_REQUEST_WINDOW_SIZE,
       sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
     };
-    const unavailable = summary.failureCount >= APIKEY_REQUEST_FAILURE_THRESHOLD;
-    let selectedConfig = config;
-
-    if (unavailable && config.runtime.available !== false) {
-      selectedConfig = markConfigUnavailable(config, result.reason || 'apikey_upstream_error', {
-        allowSwitch: result.allowSwitch,
-        lastError: result.lastError || null,
-        switchReason: result.switchReason || 'apikey_upstream_failover',
-      });
-    }
+    const failureThresholdReached = summary.failureCount >= APIKEY_REQUEST_FAILURE_THRESHOLD;
+    const switchRecommended = !Boolean(result.ok) && failureThresholdReached;
 
     return {
       ...summary,
-      unavailable,
-      selectedConfig,
+      failureThresholdReached,
+      switchRecommended,
+      unavailable: false,
+      selectedConfig: config,
     };
   }
 

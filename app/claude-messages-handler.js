@@ -9,12 +9,18 @@ const {
 const {
     classifyRetryableResponsesHttpError,
     classifyRetryableResponsesStreamPayload,
+    isResponsesModelDowngradeClassification,
     isSuccessfulResponsesStatus
 } = require('./responses-failover');
 
 const DEFAULT_RESPONSES_API_PATH = '/backend-api/codex/responses';
 const CLAUDE_RESPONSES_COMPAT_MODEL = 'gpt-5.5';
 const DEFAULT_MAX_FAILOVER_RETRIES = 2;
+const RESPONSES_USAGE_LIMIT_REASONS = new Set([
+    'responses_insufficient_quota',
+    'responses_usage_limit_reached',
+    'responses_usage_not_included'
+]);
 const HOP_BY_HOP_HEADERS = new Set([
     'host',
     'connection',
@@ -225,6 +231,21 @@ function sendJsonError(res, status, payload) {
     }
 
     res.status(status).json(payload);
+}
+
+function sendRetryableResponsesError(res, classification) {
+    if (RESPONSES_USAGE_LIMIT_REASONS.has(classification && classification.reason)) {
+        sendJsonError(res, 429, {
+            error: 'Too Many Requests',
+            message: '你已达到使用上限。请稍后再试。'
+        });
+        return;
+    }
+
+    sendJsonError(res, 502, {
+        error: 'Bad Gateway',
+        message: '上游服务暂时不可用，请稍后再试。'
+    });
 }
 
 function sendUpstreamError(res, status, contentType, bodyText) {
@@ -660,7 +681,7 @@ function forwardDirectClaudeMessagesRequest({
         }
 
         result.handled = true;
-        const nextSelection = getRetryConfig(config, classification);
+        const nextSelection = getRetryConfig(config, classification, observeDirectApiKeyResult);
         if (!nextSelection || !nextSelection.config || nextSelection.config === config) {
             if (nextSelection && typeof nextSelection.release === 'function') {
                 nextSelection.release();
@@ -935,7 +956,12 @@ function createClaudeMessagesHandler({
         let currentConfigReleased = false;
         const failedConfigs = [];
 
-        function getRetryConfig(activeConfig, classification, failoverAttempt) {
+        function getRetryConfig(
+            activeConfig,
+            classification,
+            failoverAttempt,
+            observeApiKeyFailure = null
+        ) {
             if (
                 typeof handleRetryableUpstreamError !== 'function' ||
                 res.headersSent ||
@@ -957,6 +983,24 @@ function createClaudeMessagesHandler({
                 failedConfigs: [...failedConfigs],
                 excludedConfigs: [...failedConfigs]
             }));
+            const hasFailoverCandidate = Boolean(
+                retryAllowed &&
+                nextSelection.config &&
+                nextSelection.config !== activeConfig &&
+                !failedConfigs.includes(nextSelection.config)
+            );
+            if (
+                activeConfig.type === 'apikey' &&
+                !isResponsesModelDowngradeClassification(classification) &&
+                typeof observeApiKeyFailure === 'function'
+            ) {
+                observeApiKeyFailure({
+                    ok: false,
+                    reason: classification.reason,
+                    lastError: `${classification.retrySource}:${classification.retryKey}`,
+                    switchReason: 'apikey_upstream_failover'
+                });
+            }
             if (!retryAllowed) {
                 if (typeof nextSelection.release === 'function') {
                     nextSelection.release();
@@ -964,7 +1008,7 @@ function createClaudeMessagesHandler({
                 return null;
             }
 
-            if (nextSelection.config && nextSelection.config !== activeConfig && !failedConfigs.includes(nextSelection.config)) {
+            if (hasFailoverCandidate) {
                 return nextSelection;
             }
 
@@ -1068,7 +1112,12 @@ function createClaudeMessagesHandler({
                     handleRetryableUpstreamError,
                     observeApiKeyRequestResult,
                     getRetryConfig: typeof handleRetryableUpstreamError === 'function'
-                        ? (failedConfig, classification) => getRetryConfig(failedConfig, classification, failoverAttempt)
+                        ? (failedConfig, classification, observeApiKeyFailure) => getRetryConfig(
+                            failedConfig,
+                            classification,
+                            failoverAttempt,
+                            observeApiKeyFailure
+                        )
                         : null,
                     retryWithSelection: nextSelection => startAttempt(nextSelection, failoverAttempt + 1),
                     releaseConfig: normalizedSelection.release,
@@ -1191,7 +1240,12 @@ function createClaudeMessagesHandler({
             }
 
             function retryWithNextConfig(classification) {
-                const nextSelection = getRetryConfig(activeConfig, classification, failoverAttempt);
+                const nextSelection = getRetryConfig(
+                    activeConfig,
+                    classification,
+                    failoverAttempt,
+                    observeConvertedApiKeyResult
+                );
                 if (!nextSelection) {
                     return false;
                 }
@@ -1313,6 +1367,10 @@ function createClaudeMessagesHandler({
                             if (retryWithNextConfig(retryClassification)) {
                                 return;
                             }
+
+                            releaseCurrentConfigSelection();
+                            sendRetryableResponsesError(res, retryClassification);
+                            return;
                         }
 
                         if (isClientStream) {

@@ -225,6 +225,21 @@ test('server records buffered apikey success only after committing the response'
     bufferedSource.indexOf('writeBufferedUpstreamResponse('));
 });
 
+test('server switches apikey requests without passing removal controls', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const proxyStart = source.indexOf('function proxyRequest(');
+  const proxyEnd = source.indexOf('function createHandler(', proxyStart);
+  const proxySource = source.slice(proxyStart, proxyEnd);
+  const claudeStart = source.indexOf('handleRetryableUpstreamError:');
+  const claudeEnd = source.indexOf('observeResponseModel:', claudeStart);
+  const claudeSource = source.slice(claudeStart, claudeEnd);
+
+  assert.match(proxySource, /const nextLease = acquireFailoverLease\('apikey_upstream_failover'\)/);
+  assert.match(proxySource, /nextLease = acquireFailoverLease\('responses_failover'\)/);
+  assert.match(claudeSource, /acquireRetrySelection\('claude_direct_failover'\)/);
+  assert.doesNotMatch(source, /markUnavailable/);
+});
+
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {
   assert.equal(shouldForceResponsesStoreFalse({
     type: 'token',
@@ -878,6 +893,68 @@ test('image generations apikey business request keeps native Images forwarding',
     },
   ]);
   assert.equal(res.statusCode, 200);
+  assert.equal(res.writableEnded, true);
+});
+
+test('image generations keeps the only failed apikey available when no fallback exists', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'only image upstream',
+    apiKey: 'upstream-image-key',
+    apiBasePath: '',
+    baseUrl: 'https://images.example.com/v1',
+    support: ['gpt'],
+    runtime: { enabled: true, available: true },
+  };
+  const observations = [];
+  const accountManager = {
+    getActiveConfig(predicate) {
+      return predicate(config) ? config : null;
+    },
+    acquireConfig() {
+      return null;
+    },
+    ensureActiveConfig() {
+      return null;
+    },
+    recordApiKeyRequestResult(observedConfig, result) {
+      observations.push({ observedConfig, result });
+      return { unavailable: false, sampleSize: 3, failureCount: 3 };
+    },
+  };
+  const bodyText = JSON.stringify({
+    error: {
+      type: 'rate_limit_error',
+      message: 'request is rate limited',
+    },
+  });
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    requestBuffered: async () => ({
+      statusCode: 429,
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(bodyText),
+      bodyText,
+    }),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw a small red hat',
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(observations, [{
+    observedConfig: config,
+    result: {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    },
+  }]);
+  assert.equal(res.statusCode, 429);
   assert.equal(res.writableEnded, true);
 });
 
@@ -2341,6 +2418,78 @@ test('createClaudeMessagesHandler retries response.failed event names without pa
     },
   ]);
 });
+
+for (const stream of [false, true]) {
+  test(`createClaudeMessagesHandler records one apikey failure for response.failed without a fallback (${stream ? 'stream' : 'buffered'})`, async () => {
+    const config = {
+      type: 'apikey',
+      index: 0,
+      description: 'only gpt apikey',
+      apiKey: 'upstream-gpt-key',
+      baseUrl: 'https://openai.example.com/v1',
+      support: ['gpt'],
+    };
+    const observations = [];
+    const upstreamError = stream
+      ? {
+        code: 'usage_limit_reached',
+        message: 'You have hit your usage limit.',
+      }
+      : {
+        code: 'server_is_overloaded',
+        message: 'server overloaded',
+      };
+    const handler = createClaudeMessagesHandler({
+      getConfig: () => config,
+      handleRetryableUpstreamError: () => null,
+      observeApiKeyRequestResult: (observedConfig, result) => {
+        observations.push({ observedConfig, result });
+      },
+      createUpstreamRequest: () => ({
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, [
+          'event: response.failed',
+          `data: ${JSON.stringify({ response: { error: upstreamError } })}`,
+          '',
+        ].join('\n'))),
+        abort() {},
+      }),
+    });
+    const res = createJsonResponseRecorder();
+
+    await handler(createClaudeRequest({
+      model: 'claude-sonnet-4-5',
+      stream,
+      max_tokens: 32,
+      messages: [
+        {
+          role: 'user',
+          content: 'hello',
+        },
+      ],
+    }), res);
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(observations, [
+      {
+        observedConfig: config,
+        result: {
+          ok: false,
+          reason: stream ? 'responses_usage_limit_reached' : 'responses_unknown_error',
+          lastError: `stream:${upstreamError.code}`,
+          switchReason: 'apikey_upstream_failover',
+        },
+      },
+    ]);
+    assert.equal(res.statusCode, stream ? 429 : 502);
+    assert.equal(
+      res.payload.message,
+      stream ? '你已达到使用上限。请稍后再试。' : '上游服务暂时不可用，请稍后再试。',
+    );
+  });
+}
 
 test('createClaudeMessagesHandler retries converted responses stream errors before client commit', async () => {
   const configs = [

@@ -1158,6 +1158,17 @@ function createClaudeMessagesRequestHandler(options = {}) {
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
             const retryAllowed = !context || context.retryAllowed !== false;
+            function acquireRetrySelection(reason) {
+                if (!context || !retryAllowed) {
+                    return null;
+                }
+
+                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                    ? context.excludedConfigs
+                    : [config];
+                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, reason);
+            }
+
             if (isResponsesModelDowngradeClassification(classification)) {
                 warn(`claude responses 模型降级，自动切号: #${config.index + 1} ${config.description} (${classification.retryKey})`);
                 accountManager.observeResponseModel(config, {
@@ -1168,34 +1179,14 @@ function createClaudeMessagesRequestHandler(options = {}) {
                     downgraded: true,
                 });
 
-                if (!context) {
-                    return null;
-                }
-
-                if (!retryAllowed) {
-                    return null;
-                }
-
-                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
-                    ? context.excludedConfigs
-                    : [config];
-
-                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_model_downgrade');
+                return acquireRetrySelection('claude_responses_model_downgrade');
             }
 
             if (config && isDirectClaudeProxyConfig(config)) {
-                if (config.type === 'apikey') {
-                    const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
-                        ok: false,
-                        reason: classification.reason,
-                        lastError: `${classification.retrySource}:${classification.retryKey}`,
-                        switchReason: 'apikey_upstream_failover',
-                    });
-
-                    if (apiKeyResult.unavailable) {
-                        warn(`claude apikey 上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-                    }
-                } else {
+                const nextSelection = config.type === 'claude_token'
+                    ? null
+                    : acquireRetrySelection('claude_direct_failover');
+                if (config.type !== 'apikey') {
                     warn(`claude token 上游返回错误: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
                 }
 
@@ -1203,42 +1194,21 @@ function createClaudeMessagesRequestHandler(options = {}) {
                     return null;
                 }
 
-                if (!context) {
-                    return null;
-                }
-
-                if (!retryAllowed) {
-                    return null;
-                }
-
-                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
-                    ? context.excludedConfigs
-                    : [config];
-
-                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_direct_failover');
+                return nextSelection;
             }
 
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
+            const nextSelection = acquireRetrySelection('claude_responses_failover');
             if (shouldMarkResponsesFailoverUnavailable(classification)) {
-                accountManager.markConfigUnavailable(config, classification.reason, {
-                    lastError: `${classification.retrySource}:${classification.retryKey}`,
-                    switchReason: 'claude_responses_failover',
-                });
+                if (config.type !== 'apikey') {
+                    accountManager.markConfigUnavailable(config, classification.reason, {
+                        lastError: `${classification.retrySource}:${classification.retryKey}`,
+                        switchReason: 'claude_responses_failover',
+                    });
+                }
             }
 
-            if (!context) {
-                return null;
-            }
-
-            if (!retryAllowed) {
-                return null;
-            }
-
-            const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
-                ? context.excludedConfigs
-                : [config];
-
-            return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_failover');
+            return nextSelection;
         },
         observeResponseModel: (config, observation) => {
             if (accountManager && typeof accountManager.observeResponseModel === 'function') {
@@ -2668,19 +2638,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         const statusCode = Number(response.statusCode || 502);
         const apiKeyFailure = classifyApiKeyUpstreamFailure(config, statusCode);
         if (apiKeyFailure) {
-            const apiKeyResult = recordCurrentApiKeyRequestResult({
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+            recordCurrentApiKeyRequestResult({
                 ok: false,
                 reason: apiKeyFailure.reason,
                 lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
                 switchReason: 'apikey_upstream_failover',
             });
-
-            if (apiKeyResult.unavailable) {
-                warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-            }
-
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
-            const nextConfig = nextLease ? nextLease.config : null;
 
             if (!requestClosed && nextConfig && nextConfig !== config) {
                 responseFinished = true;
@@ -2721,6 +2686,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
 
             if (inspection.action === 'retry') {
                 const modelDowngraded = isResponsesModelDowngradeClassification(inspection.classification);
+                let nextLease = null;
+                let nextConfig = null;
+                let failoverSelectionAttempted = false;
+                if (config.type === 'apikey' && !modelDowngraded) {
+                    failoverSelectionAttempted = true;
+                    nextLease = acquireFailoverLease('responses_failover');
+                    nextConfig = nextLease ? nextLease.config : null;
+                }
                 warn(`${modelDowngraded ? 'responses 模型降级，自动切号' : 'responses 自动切号'}: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
                 if (modelDowngraded) {
                     observeCurrentResponseModel({
@@ -2731,15 +2704,12 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     });
                 } else if (shouldMarkResponsesFailoverUnavailable(inspection.classification)) {
                     if (config.type === 'apikey') {
-                        const apiKeyResult = recordCurrentApiKeyRequestResult({
+                        recordCurrentApiKeyRequestResult({
                             ok: false,
                             reason: inspection.classification.reason,
                             lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
                             switchReason: 'apikey_upstream_failover',
                         });
-                        if (apiKeyResult && apiKeyResult.unavailable) {
-                            warn(`apikey responses 上游不可用: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-                        }
                     } else {
                         accountManager.markConfigUnavailable(config, inspection.classification.reason, {
                             lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
@@ -2748,8 +2718,10 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     }
                 }
 
-                const nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
-                const nextConfig = nextLease ? nextLease.config : null;
+                if (!failoverSelectionAttempted) {
+                    nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
+                    nextConfig = nextLease ? nextLease.config : null;
+                }
 
                 if (!requestClosed && nextConfig && nextConfig !== config) {
                     responseFinished = true;
@@ -2866,19 +2838,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
 
         if (config && config.type === 'apikey') {
-            const apiKeyResult = recordCurrentApiKeyRequestResult({
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+            recordCurrentApiKeyRequestResult({
                 ok: false,
                 reason: 'apikey_upstream_error',
                 lastError: err.message,
                 switchReason: 'apikey_upstream_failover',
             });
-
-            if (apiKeyResult && apiKeyResult.unavailable) {
-                warn(`apikey 上游请求失败并标记不可用: #${config.index + 1} ${config.description} (${err.message}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-            }
-
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
-            const nextConfig = nextLease ? nextLease.config : null;
 
             if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
                 const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
@@ -3270,7 +3237,7 @@ function recordImageBusinessFailure(manager, config, classification, resultOrErr
         return;
     }
 
-    const apiKeyResult = manager.recordApiKeyRequestResult(config, {
+    manager.recordApiKeyRequestResult(config, {
         ok: false,
         reason: classification.reason,
         lastError: resultOrError instanceof Error
@@ -3278,10 +3245,6 @@ function recordImageBusinessFailure(manager, config, classification, resultOrErr
             : `${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}`,
         switchReason: 'apikey_upstream_failover',
     });
-
-    if (apiKeyResult && apiKeyResult.unavailable) {
-        warn(`apikey 图片上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-    }
 }
 
 function recordImageBusinessSuccess(manager, config) {
@@ -3371,13 +3334,14 @@ async function handleImageBusinessRequest(req, res, options = {}) {
             return;
         }
 
-        recordImageBusinessFailure(manager, config, attempt.classification, attempt.error || attempt.result);
         lastFailure = attempt;
         failedConfigs.push(config);
-        currentLease.release();
-        currentLease = failedConfigs.length <= MAX_REQUEST_FAILOVER_RETRIES
+        const nextLease = failedConfigs.length <= MAX_REQUEST_FAILOVER_RETRIES
             ? acquireImageBusinessLease(manager, sessionKey, failedConfigs)
             : null;
+        recordImageBusinessFailure(manager, config, attempt.classification, attempt.error || attempt.result);
+        currentLease.release();
+        currentLease = nextLease;
     }
 
     writeImageBusinessFailure(res, lastFailure);
