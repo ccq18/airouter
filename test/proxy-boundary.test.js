@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
@@ -19,6 +20,7 @@ const {
   isResponsesFailoverConfig,
   MAX_REQUEST_FAILOVER_RETRIES,
   normalizeProxyJsonBody,
+  sanitizeProxyHeadersForLog,
   shouldForceResponsesStoreFalse,
   createImageGenerationsHandler,
 } = require('../openai');
@@ -148,6 +150,102 @@ test('buildProxyHeaders strips local-only auth headers before forwarding upstrea
   assert.equal(headers.connection, undefined);
   assert.equal(headers['accept-language'], 'zh-CN');
   assert.equal(headers['content-length'], '27');
+});
+
+test('buildProxyHeaders applies Sub2API AgentAssertion and Codex identity headers', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const headers = buildProxyHeaders({
+    authorization: 'Bearer local-router-secret',
+    'chatgpt-account-id': 'local-account-id',
+    host: 'localhost:3009',
+    'content-type': 'application/json',
+  }, {
+    type: 'token',
+    subtype: 'sub2api',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: true,
+    },
+  }, 27);
+
+  assert.match(headers.authorization, /^AgentAssertion /);
+  assert.equal(headers['chatgpt-account-id'], 'account-example');
+  assert.equal(headers['openai-beta'], 'responses=experimental');
+  assert.equal(headers.originator, 'codex_cli_rs');
+  assert.equal(headers['x-openai-fedramp'], 'true');
+  assert.equal(headers.host, undefined);
+  assert.equal(headers['content-length'], '27');
+});
+
+test('buildProxyHeaders applies Sub2API quota headers for Wham requests', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+  };
+  const headers = buildProxyHeaders({}, config, undefined, { purpose: 'quota' });
+
+  assert.match(headers.authorization, /^AgentAssertion /);
+  assert.equal(headers['openai-beta'], 'codex-1');
+  assert.equal(headers['oai-language'], 'zh-CN');
+  assert.equal(headers.originator, 'Codex Desktop');
+  assert.equal(headers['sec-fetch-site'], 'none');
+  assert.equal(headers.priority, 'u=4, i');
+});
+
+test('access-log header sanitization removes AgentAssertion and account identifiers', () => {
+  const sanitized = sanitizeProxyHeadersForLog({
+    Authorization: 'AgentAssertion sensitive-envelope',
+    'ChatGPT-Account-Id': 'account-sensitive',
+    'X-API-Key': 'router-sensitive',
+    'content-type': 'application/json',
+  });
+
+  assert.deepEqual(sanitized, {
+    Authorization: '[REDACTED]',
+    'ChatGPT-Account-Id': '[REDACTED]',
+    'X-API-Key': '[REDACTED]',
+    'content-type': 'application/json',
+  });
+  assert.doesNotMatch(JSON.stringify(sanitized), /sensitive/);
+});
+
+test('proxyRequest contains one-shot Sub2API task recovery before normal Responses failover', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const proxyStart = source.indexOf('function proxyRequest(');
+  const proxyEnd = source.indexOf('function createHandler(', proxyStart);
+  const proxySource = source.slice(proxyStart, proxyEnd);
+
+  assert.match(proxySource, /agentTaskRecoveryAttempt < 1/);
+  assert.match(proxySource, /isSub2ApiTaskInvalidResponse\(statusCode, decodedBody\)/);
+  assert.match(proxySource, /sub2ApiAgentIdentityManager\.recoverTask\(config, expectedTaskId\)/);
+  assert.match(proxySource, /agentTaskRecoveryAttempt: agentTaskRecoveryAttempt \+ 1/);
+  assert.match(proxySource, /const authPurpose = isWhamPath\(req\.url\) \? 'quota' : 'responses'/);
+});
+
+test('Sub2API task persistence updates every config with the same account and runtime identity', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const persistStart = source.indexOf('function persistSub2ApiTaskForConfig(');
+  const persistEnd = source.indexOf('function triggerServiceCommand(', persistStart);
+  const persistSource = source.slice(persistStart, persistEnd);
+
+  assert.match(persistSource, /const matchingItems = parsed\.configs\.filter\(matchesIdentity\)/);
+  assert.match(persistSource, /for \(const item of matchingItems\)/);
+  assert.match(persistSource, /for \(const runtimeConfig of apiConfigs\.filter\(matchesIdentity\)\)/);
 });
 
 test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors and successful JSON', () => {
@@ -608,6 +706,94 @@ test('image generations token business request retries the next config before re
       },
     ],
   });
+});
+
+test('image generations retries the same Sub2API account once after task recovery', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    index: 0,
+    description: 'Sub2API image',
+    apiBasePath: '/backend-api/codex',
+    baseUrl: 'https://chatgpt.com',
+    account_id: 'account-example',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-old',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+    runtime: { available: true },
+  };
+  const events = [];
+  const requests = [];
+  const accountManager = {
+    acquireConfig(_reason, predicate, options = {}) {
+      return predicate(config) && !(options.exclude || []).includes(config)
+        ? { config, sessionKey: '', release() {} }
+        : null;
+    },
+    markConfigUnavailable() {
+      throw new Error('recovered Sub2API config must not be marked unavailable');
+    },
+  };
+  const successfulImageEvent = [
+    'event: response.output_item.done',
+    `data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      item: {
+        type: 'image_generation_call',
+        status: 'completed',
+        result: Buffer.from('image-data').toString('base64'),
+      },
+    })}`,
+    '',
+  ].join('\n');
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    ensureSub2ApiTask: async activeConfig => {
+      events.push(`ensure:${activeConfig.credentials.task_id}`);
+    },
+    recoverSub2ApiTask: async (activeConfig, expectedTaskId) => {
+      events.push(`recover:${expectedTaskId}`);
+      activeConfig.credentials.task_id = 'task-new';
+    },
+    requestBuffered: async request => {
+      requests.push(request);
+      if (requests.length === 1) {
+        const bodyText = JSON.stringify({ error: { code: 'invalid_task_id' } });
+        return {
+          statusCode: 401,
+          headers: { 'content-type': 'application/json' },
+          body: Buffer.from(bodyText),
+          bodyText,
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: Buffer.from(successfulImageEvent),
+        bodyText: successfulImageEvent,
+      };
+    },
+    now: () => 123000,
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw an example',
+  }), res);
+
+  assert.deepEqual(events, ['ensure:task-old', 'recover:task-old']);
+  assert.equal(requests.length, 2);
+  assert.equal(JSON.parse(Buffer.from(requests[0].headers.authorization.slice(15), 'base64url')).task_id, 'task-old');
+  assert.equal(JSON.parse(Buffer.from(requests[1].headers.authorization.slice(15), 'base64url')).task_id, 'task-new');
+  assert.equal(res.statusCode, 200);
 });
 
 test('image generations token business request retries malformed successful responses bodies', async () => {
@@ -1183,6 +1369,146 @@ test('createClaudeMessagesHandler normalizes MCP tool schemas for token-backed r
   assert.equal(upstreamBody.tools[0].name, 'mcp__chrome-devtools__click');
   assert.equal(clickParameters.additionalProperties, false);
   assert.equal(clickParameters.properties.options.additionalProperties, false);
+});
+
+test('createClaudeMessagesHandler retries the same Sub2API account once after invalid task', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    index: 0,
+    description: 'Sub2API messages',
+    apiBasePath: '/backend-api/codex',
+    baseUrl: 'https://chatgpt.com',
+    account_id: 'account-example',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-old',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+  };
+  const requests = [];
+  const events = [];
+  const errors = [];
+  const successfulEvents = [
+    'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}',
+    '',
+    'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+    '',
+    'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+    '',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"ok"}',
+    '',
+    'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+    '',
+    'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+    '',
+  ].join('\n');
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    ensureSub2ApiTask: async activeConfig => {
+      events.push(`ensure:${activeConfig.credentials.task_id}`);
+    },
+    recoverSub2ApiTask: async (activeConfig, expectedTaskId) => {
+      events.push(`recover:${expectedTaskId}`);
+      activeConfig.credentials.task_id = 'task-new';
+    },
+    createUpstreamRequest: request => {
+      requests.push(request);
+      const response = requests.length === 1
+        ? createUpstreamResponse(401, { 'content-type': 'application/json' }, '{"error":{"code":"invalid_task_id"}}')
+        : createUpstreamResponse(200, { 'content-type': 'text/event-stream' }, successfulEvents);
+      return {
+        responsePromise: Promise.resolve(response),
+        abort() {},
+      };
+    },
+    error: message => errors.push(message),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [{ role: 'user', content: 'hello' }],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(requests.length, 2);
+  assert.deepEqual(events, ['ensure:task-old', 'recover:task-old', 'ensure:task-new']);
+  assert.equal(JSON.parse(Buffer.from(requests[0].headers.authorization.slice(15), 'base64url')).task_id, 'task-old');
+  assert.equal(JSON.parse(Buffer.from(requests[1].headers.authorization.slice(15), 'base64url')).task_id, 'task-new');
+  assert.deepEqual(errors, []);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.content[0].text, 'ok');
+});
+
+test('createClaudeMessagesHandler does not start upstream after client closes during task preparation', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    index: 0,
+    description: 'Sub2API cancellation',
+    apiBasePath: '/backend-api/codex',
+    baseUrl: 'https://chatgpt.com',
+    account_id: 'account-example',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: '',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+  };
+  let releaseCount = 0;
+  let upstreamCount = 0;
+  let allowTaskPreparation;
+  let markTaskPreparationStarted;
+  const taskPreparationGate = new Promise(resolve => {
+    allowTaskPreparation = resolve;
+  });
+  const taskPreparationStarted = new Promise(resolve => {
+    markTaskPreparationStarted = resolve;
+  });
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      config,
+      release: () => {
+        releaseCount += 1;
+      },
+    }),
+    ensureSub2ApiTask: async () => {
+      markTaskPreparationStarted();
+      await taskPreparationGate;
+    },
+    createUpstreamRequest: () => {
+      upstreamCount += 1;
+      throw new Error('upstream must not start after cancellation');
+    },
+  });
+  const req = createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [{ role: 'user', content: 'hello' }],
+  });
+  const res = createJsonResponseRecorder();
+  const handling = handler(req, res);
+
+  await taskPreparationStarted;
+  res.emit('close');
+  allowTaskPreparation();
+  await handling;
+
+  assert.equal(releaseCount, 1);
+  assert.equal(upstreamCount, 0);
 });
 
 test('createClaudeMessagesHandler forwards apikey configs with claude support without responses conversion', async () => {

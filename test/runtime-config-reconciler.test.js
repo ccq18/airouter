@@ -60,6 +60,33 @@ test('getRuntimeConfigIdentity includes the token credentials for token configs'
     );
 });
 
+test('getRuntimeConfigIdentity keeps Sub2API identity stable across task and private-key changes', () => {
+    const config = createTokenConfig(0, {}, {
+        subtype: 'sub2api',
+        access_token: '',
+        account_id: 'account-agent',
+        credentials: {
+            agent_runtime_id: 'runtime-agent',
+            agent_private_key: 'private-key-a',
+            task_id: 'task-a',
+        },
+    });
+    const changed = {
+        ...config,
+        credentials: {
+            ...config.credentials,
+            agent_private_key: 'private-key-b',
+            task_id: 'task-b',
+        },
+    };
+
+    assert.equal(
+        getRuntimeConfigIdentity(config),
+        'token:sub2api:https://chatgpt.com:account-agent:runtime-agent'
+    );
+    assert.equal(getRuntimeConfigIdentity(changed), getRuntimeConfigIdentity(config));
+});
+
 test('reconcileRuntimeConfigs preserves existing runtime state for unchanged configs', () => {
     const previousConfigs = [
         createTokenConfig(0, { available: false, reason: 'quota_check_failed', lastCheckedAt: 1713337200000 }),

@@ -20,7 +20,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "blakejs": "^1.2.1",
     "express": "^4.21.2",
-    "http-proxy": "^1.18.1"
+    "http-proxy": "^1.18.1",
+    "tweetnacl": "^1.0.3"
   }
 }

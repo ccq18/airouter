@@ -13,5 +13,22 @@
     }
   },
   "configs": [],
-  "disabled_configs": []
+  "disabled_configs": [
+    {
+      "type": "token",
+      "subtype": "sub2api",
+      "description": "EXAMPLE ONLY - replace every credential before enabling",
+      "credentials": {
+        "auth_mode": "agentIdentity",
+        "agent_runtime_id": "agent-example",
+        "agent_private_key": "MC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "task_id": "task-example",
+        "chatgpt_account_id": "account-example",
+        "chatgpt_user_id": "user-example",
+        "chatgpt_account_is_fedramp": false,
+        "email": "user@example.com",
+        "plan_type": "team"
+      }
+    }
+  ]
 }

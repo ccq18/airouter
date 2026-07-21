@@ -4,6 +4,16 @@ function getRuntimeConfigIdentity(config) {
     }
 
     if (config.type === 'token') {
+        if (config.subtype === 'sub2api') {
+            return [
+                'token',
+                'sub2api',
+                config.baseUrl || '',
+                config.account_id || '',
+                config.credentials && config.credentials.agent_runtime_id || ''
+            ].join(':');
+        }
+
         return [
             'token',
             config.baseUrl || '',

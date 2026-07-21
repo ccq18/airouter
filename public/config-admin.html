@@ -1223,7 +1223,7 @@
         <div class="panel-head">
           <div>
             <h2 class="panel-title">新增 OpenAI token</h2>
-            <p class="panel-note">OpenAI token 默认参与 Responses / Codex 兼容主链路；列表顺序影响调度优先级。</p>
+            <p class="panel-note">支持 ChatGPT AuthSession 和 Sub2API Agent Identity 导出；列表顺序影响调度优先级。</p>
           </div>
         </div>
 
@@ -1246,12 +1246,12 @@
 
         <div id="tokenConfigPanel" class="config-panel">
           <div class="field">
-            <label class="field-label" for="rawJsonInput">AuthSession JSON</label>
+            <label class="field-label" for="rawJsonInput">AuthSession / Sub2API JSON</label>
             <textarea id="rawJsonInput" spellcheck="false"></textarea>
             <p class="field-hint">
               建议使用浏览器隐私模式登录 ChatGPT 后打开
               <button class="inline-copy-button" type="button" data-copy-url="https://chatgpt.com/api/auth/session">AuthSession 页面</button>
-              复制完整 JSON；粘贴后不要退出该登录态，否则 token 会失效。系统会自动提取 accessToken、refresh_token、account id 和邮箱备注。
+              复制完整 JSON；传统 AuthSession 不要退出该登录态，否则 token 会失效。也可以直接粘贴 Sub2API 导出的 OpenAI Agent Identity 对象或数组，系统会自动识别并保存为 `token / sub2api`。
             </p>
           </div>
         </div>
@@ -1876,6 +1876,9 @@
 
     function runtimeBadges(item) {
       const tags = [];
+      if (item.item && item.item.subtype === 'sub2api') {
+        tags.push('<span class="badge note">Sub2API Agent Identity</span>');
+      }
       const roles = Array.isArray(item.dispatch_roles)
         ? item.dispatch_roles
         : (item.dispatch_role ? [item.dispatch_role] : []);

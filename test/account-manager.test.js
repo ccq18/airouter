@@ -80,18 +80,21 @@ function createManager(configs, overrides = {}) {
     allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 3 * 60 * 1000,
     allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
     minRemainingPercent: 3,
-    buildAuthHeadersForConfig: config => ({
+    buildAuthHeadersForConfig: (config, headerOptions) => ({
       ...(config.type === 'apikey'
         ? { authorization: `Bearer ${config.apiKey}` }
         : {
           authorization: `Bearer ${config.access_token}`,
           'chatgpt-account-id': config.account_id,
+          ...(headerOptions && headerOptions.purpose === 'quota' ? { 'x-test-purpose': 'quota' } : {}),
         }),
     }),
     requestBufferedFn: overrides.requestBufferedFn,
     shouldUseQuotaMonitoring: overrides.shouldUseQuotaMonitoring || (type => type === 'token'),
     refreshTokenFn: overrides.refreshTokenFn,
     persistTokenRefreshFn: overrides.persistTokenRefreshFn,
+    ensureSub2ApiTaskFn: overrides.ensureSub2ApiTaskFn,
+    recoverSub2ApiTaskFn: overrides.recoverSub2ApiTaskFn,
     sleepFn: overrides.sleepFn,
     setIntervalFn: overrides.setIntervalFn,
     clearIntervalFn: overrides.clearIntervalFn,
@@ -1864,6 +1867,157 @@ test('refreshQuotas refreshes an expired token with refresh_token and retries qu
   assert.equal(configs[0].runtime.available, true);
   assert.equal(configs[0].runtime.reason, 'ok');
   assert.equal(configs[0].runtime.remainingPercent, 75);
+});
+
+test('refreshQuotas ensures a Sub2API task and retries one explicit invalid-task response', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      subtype: 'sub2api',
+      access_token: '',
+      credentials: {
+        task_id: 'task-old',
+      },
+    }),
+  ];
+  const events = [];
+  let requestIndex = 0;
+  let refreshCalled = false;
+  const { manager } = createManager(configs, {
+    ensureSub2ApiTaskFn: async config => {
+      events.push(`ensure:${config.credentials.task_id}`);
+    },
+    recoverSub2ApiTaskFn: async (config, expectedTaskId) => {
+      events.push(`recover:${expectedTaskId}`);
+      config.credentials.task_id = 'task-new';
+    },
+    requestBufferedFn: async requestOptions => {
+      events.push(`request:${requestOptions.headers['x-test-purpose']}`);
+      requestIndex += 1;
+      if (requestIndex === 1) {
+        return {
+          statusCode: 401,
+          bodyText: JSON.stringify({ error: { code: 'invalid_task_id' } }),
+        };
+      }
+
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 10 },
+          },
+        }),
+      };
+    },
+    refreshTokenFn: async () => {
+      refreshCalled = true;
+      return {};
+    },
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(refreshCalled, false);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.remainingPercent, 90);
+  assert.deepEqual(events, [
+    'ensure:task-old',
+    'request:quota',
+    'recover:task-old',
+    'ensure:task-new',
+    'request:quota',
+  ]);
+});
+
+test('refreshQuotas recovers Sub2API tasks from explicit plain-text task errors', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      subtype: 'sub2api',
+      access_token: '',
+      credentials: {
+        task_id: 'task-old',
+      },
+    }),
+  ];
+  let requestIndex = 0;
+  let recoveryCalls = 0;
+  const { manager } = createManager(configs, {
+    ensureSub2ApiTaskFn: async () => {},
+    recoverSub2ApiTaskFn: async config => {
+      recoveryCalls += 1;
+      config.credentials.task_id = 'task-new';
+    },
+    requestBufferedFn: async () => {
+      requestIndex += 1;
+      if (requestIndex === 1) {
+        return {
+          statusCode: 401,
+          bodyText: 'unknown task id',
+        };
+      }
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 20 },
+          },
+        }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(recoveryCalls, 1);
+  assert.equal(requestIndex, 2);
+  assert.equal(configs[0].runtime.remainingPercent, 80);
+});
+
+test('refreshQuotas treats successful non-JSON quota bodies as check failures', async () => {
+  const configs = [createConfig(0, { available: true, reason: 'ok' })];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => ({
+      statusCode: 200,
+      bodyText: 'not json',
+    }),
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
+  assert.match(configs[0].runtime.lastError, /not valid JSON/);
+});
+
+test('refreshQuotas does not recover Sub2API tasks on network or unrelated authorization errors', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      subtype: 'sub2api',
+      access_token: '',
+      credentials: {
+        task_id: 'task-old',
+      },
+    }),
+  ];
+  let recoveryCalls = 0;
+  const { manager } = createManager(configs, {
+    ensureSub2ApiTaskFn: async () => {},
+    recoverSub2ApiTaskFn: async () => {
+      recoveryCalls += 1;
+    },
+    requestBufferedFn: async () => ({
+      statusCode: 401,
+      bodyText: JSON.stringify({ error: { code: 'token_revoked' } }),
+    }),
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(recoveryCalls, 0);
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
 });
 
 test('refreshQuotas refreshes token on quota check 401 even when payload is not recognized', async () => {

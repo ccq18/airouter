@@ -69,6 +69,11 @@ const {
 } = require('./app/config-editor');
 const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
 const {
+    createSub2ApiAgentIdentityManager,
+    isSub2ApiConfig,
+    isSub2ApiTaskInvalidResponse,
+} = require('./app/sub2api-agent-identity');
+const {
     generateRandomSecret,
     getConfiguredApiKeys,
     getConfiguredClaudeTokenRequestAuthTokenHashes,
@@ -86,6 +91,10 @@ const {
 let runtimePort = normalizeRuntimePort(process.env.PORT, 3009);
 let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
+const sub2ApiAgentIdentityManager = createSub2ApiAgentIdentityManager({
+    requestBufferedFn: requestBuffered,
+    persistTaskFn: persistSub2ApiTaskForConfig,
+});
 const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
 const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
@@ -343,6 +352,22 @@ function formatRequestBody(bodyBuffer, headers) {
     return bodyText;
 }
 
+function sanitizeProxyHeadersForLog(headers) {
+    const sensitiveHeaders = new Set([
+        'authorization',
+        'chatgpt-account-id',
+        'cookie',
+        'proxy-authorization',
+        'set-cookie',
+        'x-api-key',
+    ]);
+    const sanitized = {};
+    for (const [name, value] of Object.entries(headers || {})) {
+        sanitized[name] = sensitiveHeaders.has(String(name).toLowerCase()) ? '[REDACTED]' : value;
+    }
+    return sanitized;
+}
+
 function logProxyRequestSnapshot(req, originalUrl, rewrittenUrl, config, headers, bodyBuffer) {
     if (!ACCESS_LOG_ENABLED) {
         return;
@@ -354,7 +379,7 @@ function logProxyRequestSnapshot(req, originalUrl, rewrittenUrl, config, headers
     log(`原始请求: ${req.method} ${originalUrl}`);
     log(`转发目标: ${req.method} ${config.baseUrl}${rewrittenUrl}`);
     log('请求头:');
-    console.log(JSON.stringify(headers, null, 2));
+    console.log(JSON.stringify(sanitizeProxyHeadersForLog(headers), null, 2));
 
     if (Buffer.isBuffer(bodyBuffer) && bodyBuffer.length > 0) {
         log('请求体:');
@@ -458,6 +483,11 @@ function decodeResponseBody(bodyBuffer, contentEncoding) {
 function isQuotaUsagePath(urlValue) {
     const parsedUrl = new URL(urlValue, 'http://localhost');
     return parsedUrl.pathname === QUOTA_CHECK_PATH;
+}
+
+function isWhamPath(urlValue) {
+    const parsedUrl = new URL(urlValue, 'http://localhost');
+    return parsedUrl.pathname === '/backend-api/wham' || parsedUrl.pathname.startsWith('/backend-api/wham/');
 }
 
 function getCurrentTimestamp() {
@@ -962,7 +992,9 @@ async function inspectResponsesEventStream(response, options = {}) {
 
 async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders, options = {}) {
     if (Number.isFinite(Number(statusCode)) && !isSuccessfulResponsesStatus(statusCode)) {
-        const bodyBuffer = await consumeResponseBody(response);
+        const bodyBuffer = Object.prototype.hasOwnProperty.call(options, 'bodyBuffer')
+            ? options.bodyBuffer
+            : await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
         const classification = classifyRetryableResponsesHttpError({
             statusCode,
@@ -1158,6 +1190,10 @@ function createClaudeMessagesRequestHandler(options = {}) {
         requestBodyLimitBytes: JSON_REQUEST_BODY_LIMIT_BYTES,
         requestBodyIdleTimeoutMs: REQUEST_BODY_IDLE_TIMEOUT_MS,
         cpaStyleCompatibility,
+        ensureSub2ApiTask: config => sub2ApiAgentIdentityManager.ensureTask(config),
+        recoverSub2ApiTask: (config, expectedTaskId) => (
+            sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId)
+        ),
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
             const retryAllowed = !context || context.retryAllowed !== false;
@@ -1258,6 +1294,10 @@ function applyLoadedConfig(loadedConfig) {
             timeoutMs: QUOTA_CHECK_TIMEOUT_MS
         }),
         persistTokenRefreshFn: persistTokenRefreshForConfig,
+        ensureSub2ApiTaskFn: config => sub2ApiAgentIdentityManager.ensureTask(config),
+        recoverSub2ApiTaskFn: (config, expectedTaskId) => (
+            sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId)
+        ),
         log,
         warn,
         now: getCurrentTimestamp
@@ -1511,6 +1551,63 @@ function persistTokenRefreshForConfig(update) {
     }
 
     return savedItem;
+}
+
+function persistSub2ApiTaskForConfig(update) {
+    const config = update && update.config;
+    const taskId = typeof update?.taskId === 'string' ? update.taskId.trim() : '';
+    const expectedTaskId = typeof update?.expectedTaskId === 'string' ? update.expectedTaskId.trim() : '';
+    if (!config || !Number.isInteger(config.index) || !isSub2ApiConfig(config)) {
+        throw new ConfigEditorError('Sub2API task 的配置项索引不合法');
+    }
+    if (!taskId) {
+        throw new ConfigEditorError('Sub2API task 注册响应缺少 task_id');
+    }
+
+    const parsed = readParsedConfigFile(CONFIG_FILE);
+    const targetItem = parsed.configs[config.index];
+    if (!targetItem || !isSub2ApiConfig(targetItem)) {
+        throw new ConfigEditorError('Sub2API task 的配置项不存在');
+    }
+
+    const persistedCredentials = targetItem.credentials || {};
+    const runtimeCredentials = config.credentials || {};
+    if (
+        persistedCredentials.agent_runtime_id !== runtimeCredentials.agent_runtime_id ||
+        persistedCredentials.chatgpt_account_id !== runtimeCredentials.chatgpt_account_id
+    ) {
+        throw new ConfigEditorError('Sub2API task 的运行时账号与持久化配置不一致');
+    }
+
+    const matchesIdentity = item => {
+        if (!item || !isSub2ApiConfig(item)) {
+            return false;
+        }
+        const credentials = item.credentials || {};
+        return credentials.agent_runtime_id === runtimeCredentials.agent_runtime_id &&
+            credentials.chatgpt_account_id === runtimeCredentials.chatgpt_account_id;
+    };
+    const matchingItems = parsed.configs.filter(matchesIdentity);
+    const alreadyPersistedTaskId = matchingItems
+        .map(item => typeof item.credentials.task_id === 'string' ? item.credentials.task_id.trim() : '')
+        .find(currentTaskId => currentTaskId && (!expectedTaskId || currentTaskId !== expectedTaskId));
+    const nextTaskId = alreadyPersistedTaskId || taskId;
+    for (const item of matchingItems) {
+        item.credentials = {
+            ...item.credentials,
+            task_id: nextTaskId,
+        };
+    }
+
+    const savedParsed = persistConfigWithoutRuntimeReload(parsed);
+    for (const runtimeConfig of apiConfigs.filter(matchesIdentity)) {
+        runtimeConfig.credentials = {
+            ...runtimeConfig.credentials,
+            task_id: nextTaskId,
+        };
+    }
+
+    return nextTaskId;
 }
 
 function triggerServiceCommand(command, options = {}) {
@@ -2214,12 +2311,12 @@ function deleteLocalOnlyHeaders(headers) {
     }
 }
 
-function buildProxyHeaders(reqHeaders, config, contentLength) {
+function buildProxyHeaders(reqHeaders, config, contentLength, options = {}) {
     const headers = { ...reqHeaders };
 
     deleteHeadersCaseInsensitive(headers, HOP_BY_HOP_HEADERS);
     deleteLocalOnlyHeaders(headers);
-    const authHeaders = buildAuthHeadersForConfig(config);
+    const authHeaders = buildAuthHeadersForConfig(config, options);
     for (const [name, value] of Object.entries(authHeaders)) {
         if (typeof value !== 'undefined') {
             headers[name] = value;
@@ -2233,7 +2330,12 @@ function buildProxyHeaders(reqHeaders, config, contentLength) {
         delete headers['content-length'];
     }
 
-    return applyForcedProxyHeaders(headers);
+    const forcedHeaders = applyForcedProxyHeaders(headers);
+    if (isSub2ApiConfig(config)) {
+        Object.assign(forcedHeaders, authHeaders);
+    }
+
+    return forcedHeaders;
 }
 
 function normalizeUpstreamResponseHeaders(rawHeaders) {
@@ -2459,6 +2561,7 @@ function createResponseModelObserver(options = {}) {
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
+    const agentTaskRecoveryAttempt = Number(options.agentTaskRecoveryAttempt || 0);
     const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const requestSessionKey = normalizeSessionKey(options.sessionKey);
     const requestPredicate = typeof options.predicate === 'function' ? options.predicate : () => true;
@@ -2471,8 +2574,11 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     let leaseReleased = false;
     const shouldObserveResponseModel = isResponsesPath(req.url);
     const requestedResponseModel = shouldObserveResponseModel ? extractRequestModelFromBody(body) : '';
+    const authPurpose = isWhamPath(req.url) ? 'quota' : 'responses';
     const headers = applyResponsesFailoverRequestHeaders(
-        buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined),
+        buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined, {
+            purpose: authPurpose,
+        }),
         req.url
     );
     logProxyRequestSnapshot(req, originalUrl, req.url, config, headers, hasBufferedBody ? body : Buffer.alloc(0));
@@ -2674,6 +2780,44 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
+        let prefetchedBodyBuffer = null;
+        if (isSub2ApiConfig(config) && statusCode === 401) {
+            prefetchedBodyBuffer = await consumeResponseBody(response);
+            const decodedBody = decodeResponseBody(
+                prefetchedBodyBuffer,
+                getHeaderValue(response.headers, 'content-encoding')
+            );
+            if (agentTaskRecoveryAttempt < 1 && isSub2ApiTaskInvalidResponse(statusCode, decodedBody)) {
+                const expectedTaskId = config.credentials && config.credentials.task_id || '';
+                try {
+                    await sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId);
+                    if (requestClosed) {
+                        releaseCurrentLease();
+                        return;
+                    }
+
+                    responseFinished = true;
+                    const retryLease = currentLease;
+                    currentLease = null;
+                    leaseReleased = true;
+                    proxyRequest(req, res, config, body, originalUrl, {
+                        failoverAttempt,
+                        agentTaskRecoveryAttempt: agentTaskRecoveryAttempt + 1,
+                        deadlineAt: requestDeadlineAt,
+                        lease: retryLease,
+                        sessionKey: requestSessionKey,
+                        predicate: requestPredicate,
+                        excludedConfigs,
+                        retrySelector,
+                        cpaStyleCompatibility,
+                    });
+                    return;
+                } catch (err) {
+                    warn(`Sub2API task 恢复失败: #${config.index + 1} ${config.description} (${err.message})`);
+                }
+            }
+        }
+
         const tokenFailure = classifyTokenUpstreamFailure(config, statusCode);
         const shouldInspectResponses = !apiKeyFailure
             && canAttemptResponsesFailover(config, req.url)
@@ -2684,6 +2828,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         if (shouldInspectResponses) {
             const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers, {
                 requestedModel: config.type === 'token' ? requestedResponseModel : '',
+                ...(prefetchedBodyBuffer ? { bodyBuffer: prefetchedBodyBuffer } : {}),
             });
 
             if (inspection.action === 'retry') {
@@ -2824,6 +2969,19 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
+        if (prefetchedBodyBuffer) {
+            upstreamResponseHeaders = writeBufferedUpstreamResponse(
+                res,
+                statusCode,
+                response.headers,
+                prefetchedBodyBuffer
+            ).headers;
+            headersApplied = true;
+            responseFinished = true;
+            releaseCurrentLease();
+            return;
+        }
+
         await startForwardingResponse(response, statusCode, response.headers);
     }).catch(err => {
         if (requestClosed) {
@@ -2941,12 +3099,24 @@ function createHandler(proxyPath = '', options = {}) {
             return acquireTokenThenGptApiKeyLease(accountManager, 'proxy_request', sessionKey, excludedConfigs);
         }
 
-        function forwardWithConfig(lease, body, jsonBody = null) {
+        async function forwardWithConfig(lease, body, jsonBody = null) {
             if (!lease || !lease.config) {
                 return createMissingConfigResponse(res);
             }
 
             const config = lease.config;
+            try {
+                await sub2ApiAgentIdentityManager.ensureTask(config);
+            } catch (err) {
+                lease.release();
+                error('Sub2API task 准备失败:', err.message);
+                res.status(502).json({
+                    error: 'Bad Gateway',
+                    message: err.message,
+                });
+                return;
+            }
+
             const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
             req.url = rewrittenUrl;
             if (ACCESS_LOG_ENABLED) {
@@ -3002,7 +3172,7 @@ function createHandler(proxyPath = '', options = {}) {
                 }
 
                 const sessionKey = getRequestSessionKey(req, incomingUrl, jsonBody);
-                forwardWithConfig(acquireProxyLease(sessionKey), body, jsonBody);
+                void forwardWithConfig(acquireProxyLease(sessionKey), body, jsonBody);
             }).catch(err => {
                 if (!res.headersSent) {
                     sendRequestBodyError(res, err);
@@ -3010,7 +3180,7 @@ function createHandler(proxyPath = '', options = {}) {
             });
         } else {
             const sessionKey = getRequestSessionKey(req, incomingUrl);
-            forwardWithConfig(acquireProxyLease(sessionKey), undefined);
+            void forwardWithConfig(acquireProxyLease(sessionKey), undefined);
         }
     };
 }
@@ -3163,7 +3333,9 @@ async function executeImageBusinessAttempt({
     body,
     deadlineAt,
     getTokenResponsesPayload,
-    requestBufferedImpl
+    requestBufferedImpl,
+    ensureSub2ApiTask,
+    recoverSub2ApiTask
 }) {
     if (config.type !== 'token') {
         const upstreamRequest = buildNativeImageUpstreamRequest(req, incomingUrl, config, body, deadlineAt);
@@ -3186,6 +3358,7 @@ async function executeImageBusinessAttempt({
         };
     }
 
+    await ensureSub2ApiTask(config);
     const responsesPayload = getTokenResponsesPayload();
     if (!responsesPayload.ok) {
         return {
@@ -3195,8 +3368,20 @@ async function executeImageBusinessAttempt({
         };
     }
 
-    const upstreamRequest = buildTokenImageUpstreamRequest(req, config, responsesPayload.payload, deadlineAt);
-    const result = await requestBufferedImpl(upstreamRequest);
+    let result;
+    for (let recoveryAttempt = 0; recoveryAttempt <= 1; recoveryAttempt += 1) {
+        const upstreamRequest = buildTokenImageUpstreamRequest(req, config, responsesPayload.payload, deadlineAt);
+        result = await requestBufferedImpl(upstreamRequest);
+        if (
+            recoveryAttempt === 0 &&
+            isSub2ApiTaskInvalidResponse(result.statusCode, result.bodyText)
+        ) {
+            const expectedTaskId = config.credentials && config.credentials.task_id || '';
+            await recoverSub2ApiTask(config, expectedTaskId);
+            continue;
+        }
+        break;
+    }
 
     if (!isSuccessfulResponsesStatus(result.statusCode)) {
         return {
@@ -3287,6 +3472,12 @@ function writeImageBusinessFailure(res, failure) {
 async function handleImageBusinessRequest(req, res, options = {}) {
     const manager = options.accountManager || accountManager;
     const requestBufferedImpl = options.requestBuffered || requestBuffered;
+    const ensureSub2ApiTask = options.ensureSub2ApiTask || (config => (
+        sub2ApiAgentIdentityManager.ensureTask(config)
+    ));
+    const recoverSub2ApiTask = options.recoverSub2ApiTask || ((config, expectedTaskId) => (
+        sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId)
+    ));
     const now = typeof options.now === 'function' ? options.now : Date.now;
     const incomingUrl = buildIncomingUrl(req);
     const deadlineAt = createUpstreamDeadlineAt();
@@ -3310,6 +3501,8 @@ async function handleImageBusinessRequest(req, res, options = {}) {
                 deadlineAt,
                 getTokenResponsesPayload,
                 requestBufferedImpl,
+                ensureSub2ApiTask,
+                recoverSub2ApiTask,
             });
         } catch (err) {
             attempt = {
@@ -4158,6 +4351,7 @@ if (require.main === module) {
 
 module.exports = {
     buildProxyHeaders,
+    sanitizeProxyHeadersForLog,
     classifyApiKeyUpstreamFailure,
     classifyTokenUpstreamFailure,
     deleteHeadersCaseInsensitive,

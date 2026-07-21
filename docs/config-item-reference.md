@@ -43,6 +43,22 @@
         "organization_uuid": "organization-uuid",
         "local_auth_token": "airouter-oauth-local-token",
         "description": "Claude OAuth account"
+      },
+      {
+        "type": "token",
+        "subtype": "sub2api",
+        "description": "Sub2API Agent Identity account",
+        "credentials": {
+          "auth_mode": "agentIdentity",
+          "agent_runtime_id": "agent-example",
+          "agent_private_key": "<Base64 PKCS#8 Ed25519 private key>",
+          "task_id": "task-example",
+          "chatgpt_account_id": "account-example",
+          "chatgpt_user_id": "user-example",
+          "chatgpt_account_is_fedramp": false,
+          "email": "user@example.com",
+          "plan_type": "team"
+        }
       }
     ],
   "disabled_configs": []
@@ -125,6 +141,59 @@
 - `access_token <- accessToken`
 
 也支持直接粘贴已经整理好的最小配置项 JSON。
+
+## Sub2API Agent Identity 配置项
+
+Sub2API 新版 OpenAI OAuth 导出使用 Agent Identity 时，Airouter 会将其保存为 `type=token`、`subtype=sub2api`。它仍属于 OpenAI token 主链路，会参与额度轮询、会话粘性调度、匿名请求并发分配、Responses/Messages/Images failover；`sub2api` 不是新的顶层配置类型。
+
+可直接在管理页粘贴 Sub2API 导出的单个对象或对象数组。服务端只接受 `platform=openai`、`type=oauth`、`credentials.auth_mode=agentIdentity` 的 Agent Identity 导出，并规范化为：
+
+```json
+{
+  "type": "token",
+  "subtype": "sub2api",
+  "description": "user@example.com",
+  "credentials": {
+    "auth_mode": "agentIdentity",
+    "agent_runtime_id": "agent-example",
+    "agent_private_key": "<Base64 PKCS#8 Ed25519 private key>",
+    "task_id": "task-example",
+    "chatgpt_account_id": "account-example",
+    "chatgpt_user_id": "user-example",
+    "chatgpt_account_is_fedramp": false,
+    "email": "user@example.com",
+    "plan_type": "team"
+  }
+}
+```
+
+字段说明：
+
+- `subtype` 固定为 `sub2api`；没有 `subtype` 的历史 token 继续使用 Bearer token
+- `credentials.auth_mode` 固定为 `agentIdentity`
+- `agent_runtime_id` 是签名和 task 注册使用的 Agent runtime 标识
+- `agent_private_key` 必须是 Base64 编码的 PKCS#8 Ed25519 私钥，仅在本地用于签名
+- `task_id` 用于生成请求断言，导入时可以缺失；首次额度或业务请求前会自动注册并原子写回配置文件
+- `chatgpt_account_id` 会写入 `ChatGPT-Account-Id` 请求头
+- `chatgpt_user_id` 是 Agent Identity 的用户标识，导入校验必填
+- `chatgpt_account_is_fedramp=true` 时额外写入 `X-OpenAI-FedRAMP: true`
+- `email`、`plan_type` 只用于本地描述和保留导出元数据，不参与签名
+- 导出对象顶层的 `concurrency`、`priority`、`rate_multiplier`、`auto_pause_on_expired` 会被保留；当前 Airouter 调度仍以既有 token 池顺序、会话粘性和 `inFlight` 分配为准
+
+每次请求都会用当前 UTC 时间重新签名，不复用旧断言。Responses 路径的核心请求头为：
+
+```text
+Authorization: AgentAssertion <base64url-envelope>
+ChatGPT-Account-Id: <account-id>
+OpenAI-Beta: responses=experimental
+Originator: codex_cli_rs
+User-Agent: codex_cli_rs/0.144.1 ...
+Version: 0.144.1
+```
+
+额度查询仍请求 `GET https://chatgpt.com/backend-api/wham/usage`，并使用 `OpenAI-Beta: codex-1`、`OAI-Language: zh-CN`、`Originator: Codex Desktop`、`Sec-Fetch-*` 和 `Priority: u=4, i` 等 Sub2API 兼容头。
+
+如果 Responses、Messages 转换、Images 或额度接口返回 HTTP 401 且错误明确为 `invalid_task_id`、`task_not_found`、`task_expired` 等 task 失效类型，Airouter 会按 runtime 注册新 task。并发恢复会按账号合并；新 task 必须先写入配置文件，原请求才会在同一账号上重试一次。网络超时、普通 401 或 token 错误不会触发 task 注册，也不会进入传统 refresh token 流程。
 
 ## apikey 配置项
 
@@ -225,7 +294,8 @@
 
 ## 安全说明
 
-- `access_token`、`refresh_token`、`apikey` 都属于敏感信息
+- `access_token`、`refresh_token`、`apikey`、`agent_private_key` 和动态 `AgentAssertion` 都属于敏感信息
 - 顶层 `apikeys`、`auth_token` 也属于敏感信息
 - 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
+- 管理页只有通过 `auth_token` 后才能查看和复制完整配置；普通运行态摘要不会展示 Agent Identity 私钥、task ID 或动态断言
 - 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效

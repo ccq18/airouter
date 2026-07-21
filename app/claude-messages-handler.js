@@ -1,6 +1,8 @@
 const { createUpstreamRequest } = require('./upstream-request');
 const { readRequestBody } = require('./request-body');
 const { writeWithBackpressure } = require('./stream-backpressure');
+const { buildAuthHeadersForConfig } = require('./openai-config');
+const { isSub2ApiTaskInvalidResponse } = require('./sub2api-agent-identity');
 const {
     transformClaudeMessagesRequest,
     transformResponsesResponseToClaudeMessage,
@@ -166,8 +168,7 @@ function buildUpstreamHeaders(reqHeaders, config, contentLength, isStream, clien
     if (config.type === 'apikey') {
         headers.authorization = `Bearer ${config.apiKey}`;
     } else {
-        headers.authorization = `Bearer ${config.access_token}`;
-        headers['chatgpt-account-id'] = config.account_id;
+        Object.assign(headers, buildAuthHeadersForConfig(config));
         headers.version = clientVersion;
     }
 
@@ -861,6 +862,8 @@ function createClaudeMessagesHandler({
     getSessionKey = () => '',
     observeResponseModel = null,
     observeApiKeyRequestResult = null,
+    ensureSub2ApiTask = async () => '',
+    recoverSub2ApiTask = async () => '',
     cpaStyleCompatibility = false,
     maxFailoverRetries = DEFAULT_MAX_FAILOVER_RETRIES
 }) {
@@ -954,7 +957,16 @@ function createClaudeMessagesHandler({
         let streamInitialized = false;
         let currentConfigSelection = null;
         let currentConfigReleased = false;
+        let pendingConfigSelection = null;
         const failedConfigs = [];
+
+        function releasePendingConfigSelection() {
+            const pendingSelection = pendingConfigSelection;
+            pendingConfigSelection = null;
+            if (pendingSelection && typeof pendingSelection.release === 'function') {
+                pendingSelection.release();
+            }
+        }
 
         function getRetryConfig(
             activeConfig,
@@ -1079,7 +1091,7 @@ function createClaudeMessagesHandler({
             }
         }
 
-        function startAttempt(activeSelection, failoverAttempt = 0) {
+        async function startAttempt(activeSelection, failoverAttempt = 0, agentTaskRecoveryAttempt = 0) {
             const normalizedSelection = normalizeConfigSelection(activeSelection);
             const activeConfig = normalizedSelection.config;
             if (!activeConfig) {
@@ -1092,6 +1104,23 @@ function createClaudeMessagesHandler({
                 });
                 return;
             }
+
+            pendingConfigSelection = normalizedSelection;
+            try {
+                await ensureSub2ApiTask(activeConfig);
+            } catch (err) {
+                releasePendingConfigSelection();
+                sendJsonError(res, 502, {
+                    error: 'Bad Gateway',
+                    message: err.message
+                });
+                return;
+            }
+            if (requestClosed) {
+                releasePendingConfigSelection();
+                return;
+            }
+            pendingConfigSelection = null;
 
             if (configSupportsClaudeMessages(activeConfig)) {
                 forwardDirectClaudeMessagesRequest({
@@ -1119,7 +1148,9 @@ function createClaudeMessagesHandler({
                             observeApiKeyFailure
                         )
                         : null,
-                    retryWithSelection: nextSelection => startAttempt(nextSelection, failoverAttempt + 1),
+                    retryWithSelection: nextSelection => {
+                        void startAttempt(nextSelection, failoverAttempt + 1);
+                    },
                     releaseConfig: normalizedSelection.release,
                     error
                 });
@@ -1130,10 +1161,10 @@ function createClaudeMessagesHandler({
                 return;
             }
 
-            startUpstreamAttempt(normalizedSelection, failoverAttempt);
+            startUpstreamAttempt(normalizedSelection, failoverAttempt, agentTaskRecoveryAttempt);
         }
 
-        function startUpstreamAttempt(activeSelection, failoverAttempt = 0) {
+        function startUpstreamAttempt(activeSelection, failoverAttempt = 0, agentTaskRecoveryAttempt = 0) {
             const normalizedSelection = setCurrentConfigSelection(activeSelection);
             const activeConfig = normalizedSelection.config;
             const attemptTarget = resolveResponsesTarget(activeConfig, clientVersion);
@@ -1253,7 +1284,7 @@ function createClaudeMessagesHandler({
                 responseFinished = false;
                 clearClientBackpressure();
                 releaseCurrentConfigSelection();
-                startAttempt(nextSelection, failoverAttempt + 1);
+                void startAttempt(nextSelection, failoverAttempt + 1);
                 return true;
             }
 
@@ -1350,7 +1381,7 @@ function createClaudeMessagesHandler({
                     }
                 });
 
-                response.on('end', () => {
+                response.on('end', async () => {
                     responseFinished = true;
                     clearClientBackpressure();
 
@@ -1410,6 +1441,24 @@ function createClaudeMessagesHandler({
 
                     const responseText = Buffer.concat(responseBodyChunks).toString('utf8');
                     const upstreamContentType = upstreamMeta.headers['content-type'] || '';
+                    if (
+                        agentTaskRecoveryAttempt < 1 &&
+                        isSub2ApiTaskInvalidResponse(upstreamMeta.statusCode, responseText)
+                    ) {
+                        const expectedTaskId = activeConfig.credentials && activeConfig.credentials.task_id || '';
+                        try {
+                            await recoverSub2ApiTask(activeConfig, expectedTaskId);
+                            if (requestClosed) {
+                                return;
+                            }
+                            responseFinished = false;
+                            void startAttempt(normalizedSelection, failoverAttempt, agentTaskRecoveryAttempt + 1);
+                            return;
+                        } catch (err) {
+                            error(`Sub2API task 恢复失败: ${err.message}`);
+                        }
+                    }
+
                     const classification = classifyRetryableResponsesHttpError({
                         statusCode: upstreamMeta.statusCode,
                         bodyText: responseText
@@ -1475,10 +1524,9 @@ function createClaudeMessagesHandler({
             });
         }
 
-        startAttempt(configSelection);
-
         const closeUpstream = () => {
             requestClosed = true;
+            releasePendingConfigSelection();
             releaseCurrentConfigSelection();
             if (!responseFinished && currentUpstream) {
                 currentUpstream.abort(new Error('client closed request'));
@@ -1487,6 +1535,7 @@ function createClaudeMessagesHandler({
 
         req.on('aborted', closeUpstream);
         res.on('close', closeUpstream);
+        await startAttempt(configSelection);
     };
 }
 

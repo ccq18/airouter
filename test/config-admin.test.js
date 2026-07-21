@@ -37,6 +37,7 @@ const {
   getConfigRole,
   getRouteLanes,
   getConfigType,
+  getConfigSubtype,
   configSupports,
 } = require('../public/config-admin.js');
 
@@ -712,6 +713,65 @@ test('normalizeOAuthExportInput extracts oauth export arrays into token items', 
   ]);
 });
 
+test('normalizeOAuthExportInput converts Sub2API Agent Identity exports', () => {
+  const parsed = normalizeOAuthExportInput(JSON.stringify({
+    name: 'sub2api-account',
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: 'base64-pkcs8-private-key',
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+      email: 'agent@example.com',
+      plan_type: 'team',
+    },
+    concurrency: 10,
+    priority: 1,
+  }));
+
+  assert.deepEqual(parsed, [{
+    type: 'token',
+    subtype: 'sub2api',
+    description: 'agent@example.com',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: 'base64-pkcs8-private-key',
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+      email: 'agent@example.com',
+      plan_type: 'team',
+    },
+    concurrency: 10,
+    priority: 1,
+  }]);
+  assert.equal(getConfigSubtype(parsed[0]), 'sub2api');
+  assert.deepEqual(getConfigRole(parsed[0]), {
+    key: 'openai-token',
+    label: 'Sub2API Agent Identity',
+    lane: 'Responses',
+    priority: '主链路',
+    tone: 'ok',
+  });
+});
+
+test('normalizeOAuthExportInput rejects incomplete Sub2API Agent Identity exports', () => {
+  assert.throws(() => normalizeOAuthExportInput(JSON.stringify({
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+    },
+  })), /agent_private_key.*chatgpt_account_id.*chatgpt_user_id/);
+});
+
 test('normalizeOAuthExportInput tolerates trailing commas in pasted oauth exports', () => {
   const parsed = normalizeOAuthExportInput(`[
     {
@@ -1263,6 +1323,24 @@ test('getConfigIdentityValue shows base_url and masks upstream config secrets', 
       },
     ),
     'https://api.anthropic.com (air-...oken)',
+  );
+  assert.equal(
+    getConfigIdentityValue(
+      { mode: 'token' },
+      {
+        item: {
+          type: 'token',
+          subtype: 'sub2api',
+          credentials: {
+            chatgpt_account_id: 'account-example',
+            agent_runtime_id: 'runtime-sensitive',
+            agent_private_key: 'private-key-sensitive',
+            task_id: 'task-sensitive',
+          },
+        },
+      },
+    ),
+    'Sub2API (account-example)',
   );
 });
 

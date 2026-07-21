@@ -266,14 +266,23 @@
   }
 
   function isOAuthExportItem(value) {
+    const credentials = value && value.credentials && typeof value.credentials === 'object' &&
+      !Array.isArray(value.credentials)
+      ? value.credentials
+      : null;
     return Boolean(
       value &&
       typeof value === 'object' &&
       !Array.isArray(value) &&
-      value.credentials &&
-      typeof value.credentials === 'object' &&
-      !Array.isArray(value.credentials) &&
-      normalizeText(value.credentials.access_token)
+      credentials &&
+      (
+        normalizeText(credentials.access_token) ||
+        (
+          normalizeText(value.platform).toLowerCase() === 'openai' &&
+          normalizeText(value.type).toLowerCase() === 'oauth' &&
+          normalizeText(credentials.auth_mode).toLowerCase() === 'agentidentity'
+        )
+      )
     );
   }
 
@@ -282,6 +291,53 @@
     const extra = item.extra && typeof item.extra === 'object' && !Array.isArray(item.extra)
       ? item.extra
       : {};
+    const isAgentIdentity = normalizeText(item.platform).toLowerCase() === 'openai' &&
+      normalizeText(item.type).toLowerCase() === 'oauth' &&
+      normalizeText(credentials.auth_mode).toLowerCase() === 'agentidentity';
+    if (isAgentIdentity) {
+      const normalizedCredentials = {
+        auth_mode: 'agentIdentity',
+        agent_runtime_id: normalizeText(credentials.agent_runtime_id),
+        agent_private_key: normalizeText(credentials.agent_private_key),
+        task_id: normalizeText(credentials.task_id),
+        chatgpt_account_id: normalizeText(credentials.chatgpt_account_id || credentials.account_id ||
+          extra.chatgpt_account_id || extra.account_id),
+        chatgpt_user_id: normalizeText(credentials.chatgpt_user_id),
+        chatgpt_account_is_fedramp: credentials.chatgpt_account_is_fedramp === true,
+        email: normalizeText(credentials.email || extra.email),
+        plan_type: normalizeText(credentials.plan_type),
+      };
+      const requiredFields = [
+        'agent_runtime_id',
+        'agent_private_key',
+        'chatgpt_account_id',
+        'chatgpt_user_id',
+      ];
+      const missingFields = requiredFields.filter(field => !normalizedCredentials[field]);
+      if (missingFields.length > 0) {
+        throw new Error(`Sub2API Agent Identity 缺少必填字段: ${missingFields.join(', ')}`);
+      }
+      for (const field of ['task_id', 'email', 'plan_type']) {
+        if (!normalizedCredentials[field]) {
+          delete normalizedCredentials[field];
+        }
+      }
+
+      const imported = {
+        type: 'token',
+        subtype: 'sub2api',
+        description: normalizeText(item.description) || normalizedCredentials.email ||
+          normalizeText(item.name) || normalizedCredentials.chatgpt_account_id,
+        credentials: normalizedCredentials,
+      };
+      for (const field of ['concurrency', 'priority', 'rate_multiplier', 'auto_pause_on_expired']) {
+        if (Object.prototype.hasOwnProperty.call(item, field)) {
+          imported[field] = item[field];
+        }
+      }
+      return imported;
+    }
+
     const accessToken = normalizeText(credentials.access_token);
     const accountId = normalizeText(credentials.chatgpt_account_id) ||
       normalizeText(credentials.account_id) ||
@@ -316,7 +372,7 @@
     const items = Array.isArray(parsed) ? parsed : [parsed];
 
     if (!items.every(isOAuthExportItem)) {
-      throw new Error('OAuth 导出 JSON 必须是包含 credentials.access_token 的对象或对象数组');
+      throw new Error('OAuth 导出 JSON 必须是传统 access token 或 Sub2API Agent Identity 对象/数组');
     }
 
     return items.map(normalizeOAuthExportItem);
@@ -445,6 +501,11 @@
     return type || 'token';
   }
 
+  function getConfigSubtype(item) {
+    const configItem = getConfigItem(item);
+    return normalizeText(configItem && configItem.subtype).toLowerCase();
+  }
+
   function getApiKeySupport(item) {
     const configItem = getConfigItem(item);
     return normalizeSupport(configItem && configItem.support);
@@ -524,9 +585,10 @@
       };
     }
 
+    const subtype = getConfigSubtype(item);
     return {
       key: 'openai-token',
-      label: 'OpenAI token',
+      label: subtype === 'sub2api' ? 'Sub2API Agent Identity' : 'OpenAI token',
       lane: 'Responses',
       priority: '主链路',
       tone: 'ok',
@@ -616,6 +678,14 @@
       const identity = configItem.local_auth_token || configItem.account_uuid || configItem.access_token;
 
       return `${baseUrl} (${maskSecret(identity)})`;
+    }
+
+    if (getConfigSubtype(configItem) === 'sub2api') {
+      const credentials = configItem.credentials && typeof configItem.credentials === 'object'
+        ? configItem.credentials
+        : {};
+      const accountId = normalizeText(credentials.chatgpt_account_id);
+      return accountId ? `Sub2API (${accountId})` : 'Sub2API Agent Identity';
     }
 
     const value = configItem && configItem.account_id;
@@ -1311,6 +1381,7 @@
     getConfigRole,
     getRouteLanes,
     getConfigType,
+    getConfigSubtype,
     configSupports,
     getConfigIdentityColumnLabel,
     getConfigIdentityValue,

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const {
   ConfigEditorError,
@@ -250,6 +251,92 @@ test('buildImportedConfigItem supports oauth export credential JSON', () => {
     access_token: 'access-token-from-export',
     refresh_token: 'refresh-token-from-export',
     client_id: 'client-from-credentials',
+  });
+});
+
+test('buildImportedConfigItem converts Sub2API Agent Identity exports to token subtype configs', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const agentPrivateKey = privateKey.export({
+    format: 'der',
+    type: 'pkcs8',
+  }).toString('base64');
+  const imported = buildImportedConfigItem('token', {
+    name: 'sub2api-export',
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: agentPrivateKey,
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+      email: 'agent@example.com',
+      plan_type: 'team',
+    },
+    concurrency: 10,
+    priority: 1,
+    rate_multiplier: 1,
+    auto_pause_on_expired: true,
+  });
+
+  assert.deepEqual(imported, {
+    type: 'token',
+    subtype: 'sub2api',
+    description: 'agent@example.com',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: agentPrivateKey,
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+      email: 'agent@example.com',
+      plan_type: 'team',
+    },
+    concurrency: 10,
+    priority: 1,
+    rate_multiplier: 1,
+    auto_pause_on_expired: true,
+  });
+});
+
+test('buildImportedConfigItem accepts Sub2API Agent Identity without task_id', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const imported = buildImportedConfigItem('token', {
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+    },
+  });
+
+  assert.equal(imported.subtype, 'sub2api');
+  assert.equal(imported.credentials.task_id, undefined);
+});
+
+test('buildImportedConfigItem rejects malformed Sub2API private keys without exposing them', () => {
+  assert.throws(() => buildImportedConfigItem('token', {
+    platform: 'openai',
+    type: 'oauth',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: 'not-a-private-key',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+    },
+  }), err => {
+    assert.equal(err instanceof ConfigEditorError, true);
+    assert.match(err.message, /agent_private_key/);
+    assert.doesNotMatch(err.message, /not-a-private-key/);
+    return true;
   });
 });
 
