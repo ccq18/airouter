@@ -80,18 +80,21 @@ function createManager(configs, overrides = {}) {
     allQuotaCheckIntervalMs: overrides.allQuotaCheckIntervalMs ?? 3 * 60 * 1000,
     allQuotaCheckDelayMs: overrides.allQuotaCheckDelayMs ?? 1000,
     minRemainingPercent: 3,
-    buildAuthHeadersForConfig: config => ({
+    buildAuthHeadersForConfig: (config, headerOptions) => ({
       ...(config.type === 'apikey'
         ? { authorization: `Bearer ${config.apiKey}` }
         : {
           authorization: `Bearer ${config.access_token}`,
           'chatgpt-account-id': config.account_id,
+          ...(headerOptions && headerOptions.purpose === 'quota' ? { 'x-test-purpose': 'quota' } : {}),
         }),
     }),
     requestBufferedFn: overrides.requestBufferedFn,
     shouldUseQuotaMonitoring: overrides.shouldUseQuotaMonitoring || (type => type === 'token'),
     refreshTokenFn: overrides.refreshTokenFn,
     persistTokenRefreshFn: overrides.persistTokenRefreshFn,
+    ensureSub2ApiTaskFn: overrides.ensureSub2ApiTaskFn,
+    recoverSub2ApiTaskFn: overrides.recoverSub2ApiTaskFn,
     sleepFn: overrides.sleepFn,
     setIntervalFn: overrides.setIntervalFn,
     clearIntervalFn: overrides.clearIntervalFn,
@@ -363,9 +366,14 @@ test('ensureActiveStaticConfig keeps OpenAI and Claude apikey focus separate', (
     });
   }
 
-  const claudeBackup = manager.ensureActiveStaticConfig('claude_apikey', 'claude_direct_failover', isClaudeApiKey);
+  const claudeBackup = manager.ensureActiveStaticConfig(
+    'claude_apikey',
+    'claude_direct_failover',
+    config => isClaudeApiKey(config) && config !== configs[1],
+  );
 
   assert.equal(claudeBackup, configs[3]);
+  assert.equal(configs[1].runtime.available, true);
   assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
   assert.equal(manager.getActiveConfig(), configs[0]);
 });
@@ -824,9 +832,8 @@ test('getAccountStatus exposes token quota failure and apikey request window sum
   assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRequestWindow, {
     failureCount: 1,
     sampleSize: 2,
-    failureThreshold: 3,
-    windowSize: 10,
-    sampleTtlMs: 30 * 60 * 1000,
+    errorRate: 0.5,
+    windowSize: 100,
   });
   assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRecovery, {
     enabled: true,
@@ -1107,99 +1114,7 @@ test('markConfigUnavailable keeps the current account when no alternative is ava
   assert.match(warnings[0], /没有可用账号，继续使用当前账号 #1 account-1 \(responses_failover\)/);
 });
 
-test('recordApiKeyRequestResult marks apikey unavailable when recent failures reach three in a ten-request window', () => {
-  const configs = [
-    createConfig(0, { reason: 'apikey' }, {
-      type: 'apikey',
-      baseUrl: 'https://api.example.com/v1',
-      apiBasePath: '',
-      apiKey: 'sk-1',
-      support: ['gpt'],
-    }),
-    createConfig(1, { available: true, reason: 'ok' }),
-  ];
-  const { manager, warnings } = createManager(configs);
-
-  for (let index = 0; index < 2; index += 1) {
-    manager.recordApiKeyRequestResult(configs[0], {
-      ok: false,
-      reason: 'apikey_rate_limited',
-      lastError: 'http:429',
-      switchReason: 'apikey_upstream_failover',
-    });
-  }
-  for (let index = 0; index < 6; index += 1) {
-    manager.recordApiKeyRequestResult(configs[0], {
-      ok: true,
-    });
-  }
-
-  assert.equal(configs[0].runtime.available, true);
-  assert.equal(configs[0].runtime.reason, 'apikey');
-  assert.equal(manager.getActiveConfig(), configs[0]);
-
-  const result = manager.recordApiKeyRequestResult(configs[0], {
-    ok: false,
-    reason: 'apikey_rate_limited',
-    lastError: 'http:429',
-    switchReason: 'apikey_upstream_failover',
-  });
-
-  assert.equal(result.unavailable, true);
-  assert.equal(result.failureCount, 3);
-  assert.equal(result.sampleSize, 9);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'apikey_rate_limited');
-  assert.equal(configs[0].runtime.lastError, 'http:429');
-  assert.equal(manager.getActiveConfig(), configs[1]);
-  assert.equal(warnings.some(line => /账号切换: #1 account-1 -> #2 account-2 \(apikey_upstream_failover\)/.test(line)), true);
-});
-
-test('recordApiKeyRequestResult marks apikey unavailable after three consecutive failed requests even before the window is full', () => {
-  const configs = [
-    createConfig(0, { reason: 'apikey' }, {
-      type: 'apikey',
-      baseUrl: 'https://api.example.com/v1',
-      apiBasePath: '',
-      apiKey: 'sk-1',
-      support: ['gpt'],
-    }),
-    createConfig(1, { available: true, reason: 'ok' }),
-  ];
-  const { manager } = createManager(configs);
-
-  manager.recordApiKeyRequestResult(configs[0], {
-    ok: false,
-    reason: 'apikey_upstream_5xx',
-    lastError: 'http:500',
-    switchReason: 'apikey_upstream_failover',
-  });
-  manager.recordApiKeyRequestResult(configs[0], {
-    ok: false,
-    reason: 'apikey_upstream_5xx',
-    lastError: 'http:500',
-    switchReason: 'apikey_upstream_failover',
-  });
-
-  assert.equal(configs[0].runtime.available, true);
-  assert.equal(manager.getActiveConfig(), configs[0]);
-
-  const result = manager.recordApiKeyRequestResult(configs[0], {
-    ok: false,
-    reason: 'apikey_upstream_5xx',
-    lastError: 'http:500',
-    switchReason: 'apikey_upstream_failover',
-  });
-
-  assert.equal(result.unavailable, true);
-  assert.equal(result.failureCount, 3);
-  assert.equal(result.sampleSize, 3);
-  assert.equal(configs[0].runtime.available, false);
-  assert.equal(configs[0].runtime.reason, 'apikey_upstream_5xx');
-  assert.equal(manager.getActiveConfig(), configs[1]);
-});
-
-test('recordApiKeyRequestResult only counts failures in the latest ten apikey requests', () => {
+test('recordApiKeyRequestResult reports the error rate for completed apikey requests', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
       type: 'apikey',
@@ -1211,20 +1126,8 @@ test('recordApiKeyRequestResult only counts failures in the latest ten apikey re
   ];
   const { manager } = createManager(configs);
 
-  for (let index = 0; index < 2; index += 1) {
-    manager.recordApiKeyRequestResult(configs[0], {
-      ok: false,
-      reason: 'apikey_rate_limited',
-      lastError: 'http:429',
-      switchReason: 'apikey_upstream_failover',
-    });
-  }
-  for (let index = 0; index < 9; index += 1) {
-    manager.recordApiKeyRequestResult(configs[0], {
-      ok: true,
-    });
-  }
-
+  manager.recordApiKeyRequestResult(configs[0], { ok: true });
+  manager.recordApiKeyRequestResult(configs[0], { ok: true });
   const result = manager.recordApiKeyRequestResult(configs[0], {
     ok: false,
     reason: 'apikey_rate_limited',
@@ -1234,11 +1137,14 @@ test('recordApiKeyRequestResult only counts failures in the latest ten apikey re
 
   assert.equal(result.unavailable, false);
   assert.equal(result.failureCount, 1);
-  assert.equal(result.sampleSize, 10);
+  assert.equal(result.sampleSize, 3);
+  assert.equal(result.errorRate, 1 / 3);
+  assert.equal(result.windowSize, 100);
   assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.reason, 'apikey');
 });
 
-test('recordApiKeyRequestResult expires old apikey failures outside the TTL window', () => {
+test('recordApiKeyRequestResult only uses the latest one hundred apikey requests', () => {
   const configs = [
     createConfig(0, { reason: 'apikey' }, {
       type: 'apikey',
@@ -1247,34 +1153,204 @@ test('recordApiKeyRequestResult expires old apikey failures outside the TTL wind
       apiKey: 'sk-1',
       support: ['gpt'],
     }),
-    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  const { manager } = createManager(configs);
+
+  for (let index = 0; index < 10; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+  for (let index = 0; index < 100; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: true,
+    });
+  }
+
+  const result = manager.recordApiKeyRequestResult(configs[0], { ok: true });
+
+  assert.equal(result.failureCount, 0);
+  assert.equal(result.sampleSize, 100);
+  assert.equal(result.errorRate, 0);
+  assert.equal(configs[0].runtime.apiKeyRequestResults.length, 100);
+});
+
+test('recordApiKeyRequestResult keeps older samples until the one hundred request window evicts them', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
   ];
   let currentTime = 1713337200000;
   const { manager } = createManager(configs, {
     now: () => currentTime,
   });
 
-  for (let index = 0; index < 2; index += 1) {
-    manager.recordApiKeyRequestResult(configs[0], {
-      ok: false,
-      reason: 'apikey_rate_limited',
-      lastError: 'http:429',
-      switchReason: 'apikey_upstream_failover',
-    });
-  }
-
-  currentTime += 31 * 60 * 1000;
-  const result = manager.recordApiKeyRequestResult(configs[0], {
+  manager.recordApiKeyRequestResult(configs[0], {
     ok: false,
     reason: 'apikey_rate_limited',
     lastError: 'http:429',
     switchReason: 'apikey_upstream_failover',
   });
+  currentTime += 24 * 60 * 60 * 1000;
+  const result = manager.recordApiKeyRequestResult(configs[0], { ok: true });
 
-  assert.equal(result.unavailable, false);
   assert.equal(result.failureCount, 1);
-  assert.equal(result.sampleSize, 1);
+  assert.equal(result.sampleSize, 2);
+  assert.equal(result.errorRate, 0.5);
+});
+
+test('ensureActiveStaticConfig switches to the available apikey with the lowest error rate', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey', apiKeyRequestResults: [{ ok: false }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-current.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-current',
+      support: ['gpt'],
+    }),
+    createConfig(1, { reason: 'apikey', apiKeyRequestResults: [{ ok: false }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-half.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-half',
+      support: ['gpt'],
+    }),
+    createConfig(2, { reason: 'apikey', apiKeyRequestResults: [{ ok: false }, { ok: true }, { ok: true }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-quarter.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-quarter',
+      support: ['gpt'],
+    }),
+    createConfig(3, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api-unused.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-unused',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+
+  const selected = manager.ensureActiveStaticConfig(
+    'openai_apikey',
+    'apikey_upstream_failover',
+    config => isGptApiKey(config) && config !== configs[0],
+  );
+
+  assert.equal(selected, configs[3]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[3]);
   assert.equal(configs[0].runtime.available, true);
+});
+
+test('ensureActiveStaticConfig can prefer the lowest error rate over an available static focus', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey', apiKeyRequestResults: [{ ok: false }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-focus.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-focus',
+      support: ['gpt'],
+    }),
+    createConfig(1, { reason: 'apikey', apiKeyRequestResults: [{ ok: true }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-healthiest.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-healthiest',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const isGptApiKey = config => config.type === 'apikey' && config.support.includes('gpt');
+
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[0]);
+
+  const selected = manager.ensureActiveStaticConfig(
+    'openai_apikey',
+    'token_upstream_failover',
+    isGptApiKey,
+    { preferLowestErrorRate: true },
+  );
+
+  assert.equal(selected, configs[1]);
+  assert.equal(manager.getActiveStaticConfig('openai_apikey', isGptApiKey), configs[1]);
+});
+
+test('ensureActiveStaticConfig keeps config order when apikey error rates are equal', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api-current.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-current',
+      support: ['gpt'],
+    }),
+    createConfig(1, { reason: 'apikey', apiKeyRequestResults: [{ ok: false }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-first.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-first',
+      support: ['gpt'],
+    }),
+    createConfig(2, { reason: 'apikey', apiKeyRequestResults: [{ ok: true }, { ok: false }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-second.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-second',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const selected = manager.ensureActiveStaticConfig(
+    'openai_apikey',
+    'apikey_upstream_failover',
+    config => config.type === 'apikey' && config !== configs[0],
+  );
+
+  assert.equal(selected, configs[1]);
+});
+
+test('ensureActiveStaticConfig skips unavailable apikeys even when their error rate is lower', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api-current.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-current',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: false, reason: 'disabled' }, {
+      type: 'apikey',
+      baseUrl: 'https://api-unavailable.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-unavailable',
+      support: ['gpt'],
+    }),
+    createConfig(2, { reason: 'apikey', apiKeyRequestResults: [{ ok: false }, { ok: true }] }, {
+      type: 'apikey',
+      baseUrl: 'https://api-available.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-available',
+      support: ['gpt'],
+    }),
+  ];
+  const { manager } = createManager(configs);
+  const selected = manager.ensureActiveStaticConfig(
+    'openai_apikey',
+    'apikey_upstream_failover',
+    config => config.type === 'apikey' && config !== configs[0],
+  );
+
+  assert.equal(selected, configs[2]);
 });
 
 test('activateConfig restores an unavailable apikey config before switching to it', () => {
@@ -1793,6 +1869,157 @@ test('refreshQuotas refreshes an expired token with refresh_token and retries qu
   assert.equal(configs[0].runtime.remainingPercent, 75);
 });
 
+test('refreshQuotas ensures a Sub2API task and retries one explicit invalid-task response', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      subtype: 'sub2api',
+      access_token: '',
+      credentials: {
+        task_id: 'task-old',
+      },
+    }),
+  ];
+  const events = [];
+  let requestIndex = 0;
+  let refreshCalled = false;
+  const { manager } = createManager(configs, {
+    ensureSub2ApiTaskFn: async config => {
+      events.push(`ensure:${config.credentials.task_id}`);
+    },
+    recoverSub2ApiTaskFn: async (config, expectedTaskId) => {
+      events.push(`recover:${expectedTaskId}`);
+      config.credentials.task_id = 'task-new';
+    },
+    requestBufferedFn: async requestOptions => {
+      events.push(`request:${requestOptions.headers['x-test-purpose']}`);
+      requestIndex += 1;
+      if (requestIndex === 1) {
+        return {
+          statusCode: 401,
+          bodyText: JSON.stringify({ error: { code: 'invalid_task_id' } }),
+        };
+      }
+
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 10 },
+          },
+        }),
+      };
+    },
+    refreshTokenFn: async () => {
+      refreshCalled = true;
+      return {};
+    },
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(refreshCalled, false);
+  assert.equal(configs[0].runtime.available, true);
+  assert.equal(configs[0].runtime.remainingPercent, 90);
+  assert.deepEqual(events, [
+    'ensure:task-old',
+    'request:quota',
+    'recover:task-old',
+    'ensure:task-new',
+    'request:quota',
+  ]);
+});
+
+test('refreshQuotas recovers Sub2API tasks from explicit plain-text task errors', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      subtype: 'sub2api',
+      access_token: '',
+      credentials: {
+        task_id: 'task-old',
+      },
+    }),
+  ];
+  let requestIndex = 0;
+  let recoveryCalls = 0;
+  const { manager } = createManager(configs, {
+    ensureSub2ApiTaskFn: async () => {},
+    recoverSub2ApiTaskFn: async config => {
+      recoveryCalls += 1;
+      config.credentials.task_id = 'task-new';
+    },
+    requestBufferedFn: async () => {
+      requestIndex += 1;
+      if (requestIndex === 1) {
+        return {
+          statusCode: 401,
+          bodyText: 'unknown task id',
+        };
+      }
+      return {
+        statusCode: 200,
+        bodyText: JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: 20 },
+          },
+        }),
+      };
+    },
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(recoveryCalls, 1);
+  assert.equal(requestIndex, 2);
+  assert.equal(configs[0].runtime.remainingPercent, 80);
+});
+
+test('refreshQuotas treats successful non-JSON quota bodies as check failures', async () => {
+  const configs = [createConfig(0, { available: true, reason: 'ok' })];
+  const { manager } = createManager(configs, {
+    requestBufferedFn: async () => ({
+      statusCode: 200,
+      bodyText: 'not json',
+    }),
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
+  assert.match(configs[0].runtime.lastError, /not valid JSON/);
+});
+
+test('refreshQuotas does not recover Sub2API tasks on network or unrelated authorization errors', async () => {
+  const configs = [
+    createConfig(0, { available: true, reason: 'ok' }, {
+      subtype: 'sub2api',
+      access_token: '',
+      credentials: {
+        task_id: 'task-old',
+      },
+    }),
+  ];
+  let recoveryCalls = 0;
+  const { manager } = createManager(configs, {
+    ensureSub2ApiTaskFn: async () => {},
+    recoverSub2ApiTaskFn: async () => {
+      recoveryCalls += 1;
+    },
+    requestBufferedFn: async () => ({
+      statusCode: 401,
+      bodyText: JSON.stringify({ error: { code: 'token_revoked' } }),
+    }),
+  });
+
+  await manager.refreshQuotas('poll');
+
+  assert.equal(recoveryCalls, 0);
+  assert.equal(configs[0].runtime.quotaCheckFailures, 1);
+});
+
 test('refreshQuotas refreshes token on quota check 401 even when payload is not recognized', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }, {
@@ -1910,7 +2137,7 @@ test('refreshQuotas keeps missing_credentials when refresh_token is unavailable'
   assert.equal(configs[0].runtime.reason, 'missing_credentials');
 });
 
-test('all-account polls probe only the active GPT apikey fallback focus', async () => {
+test('all-account polls do not probe an apikey with recorded business failures', async () => {
   const configs = [
     createConfig(0, { available: true, reason: 'ok' }, {
       type: 'apikey',
@@ -1962,8 +2189,7 @@ test('all-account polls probe only the active GPT apikey fallback focus', async 
   assert.equal(manager.ensureActiveStaticConfig('openai_apikey', 'openai_failover', isGptApiKey), configs[0]);
   await manager.refreshQuotas('all_poll');
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].targetUrl, 'https://openai-primary.example.com/v1/responses');
+  assert.equal(calls.length, 0);
   assert.equal(configs[0].runtime.available, true);
   assert.equal(configs[1].runtime.available, false);
   assert.equal(configs[2].runtime.available, false);

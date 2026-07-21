@@ -1,6 +1,8 @@
 const { createUpstreamRequest } = require('./upstream-request');
 const { readRequestBody } = require('./request-body');
 const { writeWithBackpressure } = require('./stream-backpressure');
+const { buildAuthHeadersForConfig } = require('./openai-config');
+const { isSub2ApiTaskInvalidResponse } = require('./sub2api-agent-identity');
 const {
     transformClaudeMessagesRequest,
     transformResponsesResponseToClaudeMessage,
@@ -9,12 +11,18 @@ const {
 const {
     classifyRetryableResponsesHttpError,
     classifyRetryableResponsesStreamPayload,
+    isResponsesModelDowngradeClassification,
     isSuccessfulResponsesStatus
 } = require('./responses-failover');
 
 const DEFAULT_RESPONSES_API_PATH = '/backend-api/codex/responses';
 const CLAUDE_RESPONSES_COMPAT_MODEL = 'gpt-5.5';
 const DEFAULT_MAX_FAILOVER_RETRIES = 2;
+const RESPONSES_USAGE_LIMIT_REASONS = new Set([
+    'responses_insufficient_quota',
+    'responses_usage_limit_reached',
+    'responses_usage_not_included'
+]);
 const HOP_BY_HOP_HEADERS = new Set([
     'host',
     'connection',
@@ -160,8 +168,7 @@ function buildUpstreamHeaders(reqHeaders, config, contentLength, isStream, clien
     if (config.type === 'apikey') {
         headers.authorization = `Bearer ${config.apiKey}`;
     } else {
-        headers.authorization = `Bearer ${config.access_token}`;
-        headers['chatgpt-account-id'] = config.account_id;
+        Object.assign(headers, buildAuthHeadersForConfig(config));
         headers.version = clientVersion;
     }
 
@@ -225,6 +232,21 @@ function sendJsonError(res, status, payload) {
     }
 
     res.status(status).json(payload);
+}
+
+function sendRetryableResponsesError(res, classification) {
+    if (RESPONSES_USAGE_LIMIT_REASONS.has(classification && classification.reason)) {
+        sendJsonError(res, 429, {
+            error: 'Too Many Requests',
+            message: '你已达到使用上限。请稍后再试。'
+        });
+        return;
+    }
+
+    sendJsonError(res, 502, {
+        error: 'Bad Gateway',
+        message: '上游服务暂时不可用，请稍后再试。'
+    });
 }
 
 function sendUpstreamError(res, status, contentType, bodyText) {
@@ -660,7 +682,7 @@ function forwardDirectClaudeMessagesRequest({
         }
 
         result.handled = true;
-        const nextSelection = getRetryConfig(config, classification);
+        const nextSelection = getRetryConfig(config, classification, observeDirectApiKeyResult);
         if (!nextSelection || !nextSelection.config || nextSelection.config === config) {
             if (nextSelection && typeof nextSelection.release === 'function') {
                 nextSelection.release();
@@ -840,6 +862,8 @@ function createClaudeMessagesHandler({
     getSessionKey = () => '',
     observeResponseModel = null,
     observeApiKeyRequestResult = null,
+    ensureSub2ApiTask = async () => '',
+    recoverSub2ApiTask = async () => '',
     cpaStyleCompatibility = false,
     maxFailoverRetries = DEFAULT_MAX_FAILOVER_RETRIES
 }) {
@@ -933,9 +957,23 @@ function createClaudeMessagesHandler({
         let streamInitialized = false;
         let currentConfigSelection = null;
         let currentConfigReleased = false;
+        let pendingConfigSelection = null;
         const failedConfigs = [];
 
-        function getRetryConfig(activeConfig, classification, failoverAttempt) {
+        function releasePendingConfigSelection() {
+            const pendingSelection = pendingConfigSelection;
+            pendingConfigSelection = null;
+            if (pendingSelection && typeof pendingSelection.release === 'function') {
+                pendingSelection.release();
+            }
+        }
+
+        function getRetryConfig(
+            activeConfig,
+            classification,
+            failoverAttempt,
+            observeApiKeyFailure = null
+        ) {
             if (
                 typeof handleRetryableUpstreamError !== 'function' ||
                 res.headersSent ||
@@ -957,6 +995,24 @@ function createClaudeMessagesHandler({
                 failedConfigs: [...failedConfigs],
                 excludedConfigs: [...failedConfigs]
             }));
+            const hasFailoverCandidate = Boolean(
+                retryAllowed &&
+                nextSelection.config &&
+                nextSelection.config !== activeConfig &&
+                !failedConfigs.includes(nextSelection.config)
+            );
+            if (
+                activeConfig.type === 'apikey' &&
+                !isResponsesModelDowngradeClassification(classification) &&
+                typeof observeApiKeyFailure === 'function'
+            ) {
+                observeApiKeyFailure({
+                    ok: false,
+                    reason: classification.reason,
+                    lastError: `${classification.retrySource}:${classification.retryKey}`,
+                    switchReason: 'apikey_upstream_failover'
+                });
+            }
             if (!retryAllowed) {
                 if (typeof nextSelection.release === 'function') {
                     nextSelection.release();
@@ -964,7 +1020,7 @@ function createClaudeMessagesHandler({
                 return null;
             }
 
-            if (nextSelection.config && nextSelection.config !== activeConfig && !failedConfigs.includes(nextSelection.config)) {
+            if (hasFailoverCandidate) {
                 return nextSelection;
             }
 
@@ -1035,7 +1091,7 @@ function createClaudeMessagesHandler({
             }
         }
 
-        function startAttempt(activeSelection, failoverAttempt = 0) {
+        async function startAttempt(activeSelection, failoverAttempt = 0, agentTaskRecoveryAttempt = 0) {
             const normalizedSelection = normalizeConfigSelection(activeSelection);
             const activeConfig = normalizedSelection.config;
             if (!activeConfig) {
@@ -1048,6 +1104,23 @@ function createClaudeMessagesHandler({
                 });
                 return;
             }
+
+            pendingConfigSelection = normalizedSelection;
+            try {
+                await ensureSub2ApiTask(activeConfig);
+            } catch (err) {
+                releasePendingConfigSelection();
+                sendJsonError(res, 502, {
+                    error: 'Bad Gateway',
+                    message: err.message
+                });
+                return;
+            }
+            if (requestClosed) {
+                releasePendingConfigSelection();
+                return;
+            }
+            pendingConfigSelection = null;
 
             if (configSupportsClaudeMessages(activeConfig)) {
                 forwardDirectClaudeMessagesRequest({
@@ -1068,9 +1141,16 @@ function createClaudeMessagesHandler({
                     handleRetryableUpstreamError,
                     observeApiKeyRequestResult,
                     getRetryConfig: typeof handleRetryableUpstreamError === 'function'
-                        ? (failedConfig, classification) => getRetryConfig(failedConfig, classification, failoverAttempt)
+                        ? (failedConfig, classification, observeApiKeyFailure) => getRetryConfig(
+                            failedConfig,
+                            classification,
+                            failoverAttempt,
+                            observeApiKeyFailure
+                        )
                         : null,
-                    retryWithSelection: nextSelection => startAttempt(nextSelection, failoverAttempt + 1),
+                    retryWithSelection: nextSelection => {
+                        void startAttempt(nextSelection, failoverAttempt + 1);
+                    },
                     releaseConfig: normalizedSelection.release,
                     error
                 });
@@ -1081,10 +1161,10 @@ function createClaudeMessagesHandler({
                 return;
             }
 
-            startUpstreamAttempt(normalizedSelection, failoverAttempt);
+            startUpstreamAttempt(normalizedSelection, failoverAttempt, agentTaskRecoveryAttempt);
         }
 
-        function startUpstreamAttempt(activeSelection, failoverAttempt = 0) {
+        function startUpstreamAttempt(activeSelection, failoverAttempt = 0, agentTaskRecoveryAttempt = 0) {
             const normalizedSelection = setCurrentConfigSelection(activeSelection);
             const activeConfig = normalizedSelection.config;
             const attemptTarget = resolveResponsesTarget(activeConfig, clientVersion);
@@ -1191,7 +1271,12 @@ function createClaudeMessagesHandler({
             }
 
             function retryWithNextConfig(classification) {
-                const nextSelection = getRetryConfig(activeConfig, classification, failoverAttempt);
+                const nextSelection = getRetryConfig(
+                    activeConfig,
+                    classification,
+                    failoverAttempt,
+                    observeConvertedApiKeyResult
+                );
                 if (!nextSelection) {
                     return false;
                 }
@@ -1199,7 +1284,7 @@ function createClaudeMessagesHandler({
                 responseFinished = false;
                 clearClientBackpressure();
                 releaseCurrentConfigSelection();
-                startAttempt(nextSelection, failoverAttempt + 1);
+                void startAttempt(nextSelection, failoverAttempt + 1);
                 return true;
             }
 
@@ -1296,7 +1381,7 @@ function createClaudeMessagesHandler({
                     }
                 });
 
-                response.on('end', () => {
+                response.on('end', async () => {
                     responseFinished = true;
                     clearClientBackpressure();
 
@@ -1313,6 +1398,10 @@ function createClaudeMessagesHandler({
                             if (retryWithNextConfig(retryClassification)) {
                                 return;
                             }
+
+                            releaseCurrentConfigSelection();
+                            sendRetryableResponsesError(res, retryClassification);
+                            return;
                         }
 
                         if (isClientStream) {
@@ -1352,6 +1441,24 @@ function createClaudeMessagesHandler({
 
                     const responseText = Buffer.concat(responseBodyChunks).toString('utf8');
                     const upstreamContentType = upstreamMeta.headers['content-type'] || '';
+                    if (
+                        agentTaskRecoveryAttempt < 1 &&
+                        isSub2ApiTaskInvalidResponse(upstreamMeta.statusCode, responseText)
+                    ) {
+                        const expectedTaskId = activeConfig.credentials && activeConfig.credentials.task_id || '';
+                        try {
+                            await recoverSub2ApiTask(activeConfig, expectedTaskId);
+                            if (requestClosed) {
+                                return;
+                            }
+                            responseFinished = false;
+                            void startAttempt(normalizedSelection, failoverAttempt, agentTaskRecoveryAttempt + 1);
+                            return;
+                        } catch (err) {
+                            error(`Sub2API task 恢复失败: ${err.message}`);
+                        }
+                    }
+
                     const classification = classifyRetryableResponsesHttpError({
                         statusCode: upstreamMeta.statusCode,
                         bodyText: responseText
@@ -1417,10 +1524,9 @@ function createClaudeMessagesHandler({
             });
         }
 
-        startAttempt(configSelection);
-
         const closeUpstream = () => {
             requestClosed = true;
+            releasePendingConfigSelection();
             releaseCurrentConfigSelection();
             if (!responseFinished && currentUpstream) {
                 currentUpstream.abort(new Error('client closed request'));
@@ -1429,6 +1535,7 @@ function createClaudeMessagesHandler({
 
         req.on('aborted', closeUpstream);
         res.on('close', closeUpstream);
+        await startAttempt(configSelection);
     };
 }
 

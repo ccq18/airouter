@@ -43,6 +43,22 @@
         "organization_uuid": "organization-uuid",
         "local_auth_token": "airouter-oauth-local-token",
         "description": "Claude OAuth account"
+      },
+      {
+        "type": "token",
+        "subtype": "sub2api",
+        "description": "Sub2API Agent Identity account",
+        "credentials": {
+          "auth_mode": "agentIdentity",
+          "agent_runtime_id": "agent-example",
+          "agent_private_key": "<Base64 PKCS#8 Ed25519 private key>",
+          "task_id": "task-example",
+          "chatgpt_account_id": "account-example",
+          "chatgpt_user_id": "user-example",
+          "chatgpt_account_is_fedramp": false,
+          "email": "user@example.com",
+          "plan_type": "team"
+        }
       }
     ],
   "disabled_configs": []
@@ -89,7 +105,7 @@
 - `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
 - 每分钟额度轮询只检查当前活动配置（当前活动配置为 `token` 时）；每 3 分钟全量校正会检查所有 `token` 配置项
 - 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
-- `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换；最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用
+- `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，会在本次请求内排除当前配置并切到错误率最低的可用 apikey；错误率按最近 100 个已完成真实请求计算，无样本按 0%，同率保持配置顺序。没有下一候选时继续使用当前配置，且不会摘除 apikey 或把 `runtime.available` 改为 `false`
 - 每 3 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.4-mini`，可通过该配置项的 `health.model` 覆盖
 - token 请求调度：OpenAI token 和 Claude token 不再依赖手动“切换”焦点，只按运行态可用/不可用参与对应链路选择。OpenAI token 有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择。Claude token 按配置顺序选择当前可用账号，绑定本地 fake token 的请求只会使用绑定且可用的 Claude token
 - 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
@@ -125,6 +141,59 @@
 - `access_token <- accessToken`
 
 也支持直接粘贴已经整理好的最小配置项 JSON。
+
+## Sub2API Agent Identity 配置项
+
+Sub2API 新版 OpenAI OAuth 导出使用 Agent Identity 时，Airouter 会将其保存为 `type=token`、`subtype=sub2api`。它仍属于 OpenAI token 主链路，会参与额度轮询、会话粘性调度、匿名请求并发分配、Responses/Messages/Images failover；`sub2api` 不是新的顶层配置类型。
+
+可直接在管理页粘贴 Sub2API 导出的单个对象或对象数组。服务端只接受 `platform=openai`、`type=oauth`、`credentials.auth_mode=agentIdentity` 的 Agent Identity 导出，并规范化为：
+
+```json
+{
+  "type": "token",
+  "subtype": "sub2api",
+  "description": "user@example.com",
+  "credentials": {
+    "auth_mode": "agentIdentity",
+    "agent_runtime_id": "agent-example",
+    "agent_private_key": "<Base64 PKCS#8 Ed25519 private key>",
+    "task_id": "task-example",
+    "chatgpt_account_id": "account-example",
+    "chatgpt_user_id": "user-example",
+    "chatgpt_account_is_fedramp": false,
+    "email": "user@example.com",
+    "plan_type": "team"
+  }
+}
+```
+
+字段说明：
+
+- `subtype` 固定为 `sub2api`；没有 `subtype` 的历史 token 继续使用 Bearer token
+- `credentials.auth_mode` 固定为 `agentIdentity`
+- `agent_runtime_id` 是签名和 task 注册使用的 Agent runtime 标识
+- `agent_private_key` 必须是 Base64 编码的 PKCS#8 Ed25519 私钥，仅在本地用于签名
+- `task_id` 用于生成请求断言，导入时可以缺失；首次额度或业务请求前会自动注册并原子写回配置文件
+- `chatgpt_account_id` 会写入 `ChatGPT-Account-Id` 请求头
+- `chatgpt_user_id` 是 Agent Identity 的用户标识，导入校验必填
+- `chatgpt_account_is_fedramp=true` 时额外写入 `X-OpenAI-FedRAMP: true`
+- `email`、`plan_type` 只用于本地描述和保留导出元数据，不参与签名
+- 导出对象顶层的 `concurrency`、`priority`、`rate_multiplier`、`auto_pause_on_expired` 会被保留；当前 Airouter 调度仍以既有 token 池顺序、会话粘性和 `inFlight` 分配为准
+
+每次请求都会用当前 UTC 时间重新签名，不复用旧断言。Responses 路径的核心请求头为：
+
+```text
+Authorization: AgentAssertion <base64url-envelope>
+ChatGPT-Account-Id: <account-id>
+OpenAI-Beta: responses=experimental
+Originator: codex_cli_rs
+User-Agent: codex_cli_rs/0.144.1 ...
+Version: 0.144.1
+```
+
+额度查询仍请求 `GET https://chatgpt.com/backend-api/wham/usage`，并使用 `OpenAI-Beta: codex-1`、`OAI-Language: zh-CN`、`Originator: Codex Desktop`、`Sec-Fetch-*` 和 `Priority: u=4, i` 等 Sub2API 兼容头。
+
+如果 Responses、Messages 转换、Images 或额度接口返回 HTTP 401 且错误明确为 `invalid_task_id`、`task_not_found`、`task_expired` 等 task 失效类型，Airouter 会按 runtime 注册新 task。并发恢复会按账号合并；新 task 必须先写入配置文件，原请求才会在同一账号上重试一次。网络超时、普通 401 或 token 错误不会触发 task 注册，也不会进入传统 refresh token 流程。
 
 ## apikey 配置项
 
@@ -166,7 +235,7 @@
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
-- `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；如果没有可切换配置，才透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。是否临时标记为不可用仍按最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败判断
+- `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，会在本次请求内排除当前配置并选择错误率最低的下一候选。如果没有可切换配置，则继续使用当前配置并透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。错误率只统计最近 100 个已完成真实请求，不会临时标记 apikey 为不可用
 - 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `30000ms`（30 秒），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
@@ -225,7 +294,8 @@
 
 ## 安全说明
 
-- `access_token`、`refresh_token`、`apikey` 都属于敏感信息
+- `access_token`、`refresh_token`、`apikey`、`agent_private_key` 和动态 `AgentAssertion` 都属于敏感信息
 - 顶层 `apikeys`、`auth_token` 也属于敏感信息
 - 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
+- 管理页只有通过 `auth_token` 后才能查看和复制完整配置；普通运行态摘要不会展示 Agent Identity 私钥、task ID 或动态断言
 - 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效

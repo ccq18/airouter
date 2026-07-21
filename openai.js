@@ -69,6 +69,11 @@ const {
 } = require('./app/config-editor');
 const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
 const {
+    createSub2ApiAgentIdentityManager,
+    isSub2ApiConfig,
+    isSub2ApiTaskInvalidResponse,
+} = require('./app/sub2api-agent-identity');
+const {
     generateRandomSecret,
     getConfiguredApiKeys,
     getConfiguredClaudeTokenRequestAuthTokenHashes,
@@ -86,6 +91,10 @@ const {
 let runtimePort = normalizeRuntimePort(process.env.PORT, 3009);
 let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
 const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
+const sub2ApiAgentIdentityManager = createSub2ApiAgentIdentityManager({
+    requestBufferedFn: requestBuffered,
+    persistTaskFn: persistSub2ApiTaskForConfig,
+});
 const CONTROL_TOKEN = process.env.AIROUTER_CONTROL_TOKEN || '';
 const CONTROL_REQUEST_FILE = process.env.AIROUTER_CONTROL_REQUEST_FILE || '';
 const QUOTA_CHECK_PATH = '/backend-api/wham/usage';
@@ -343,6 +352,22 @@ function formatRequestBody(bodyBuffer, headers) {
     return bodyText;
 }
 
+function sanitizeProxyHeadersForLog(headers) {
+    const sensitiveHeaders = new Set([
+        'authorization',
+        'chatgpt-account-id',
+        'cookie',
+        'proxy-authorization',
+        'set-cookie',
+        'x-api-key',
+    ]);
+    const sanitized = {};
+    for (const [name, value] of Object.entries(headers || {})) {
+        sanitized[name] = sensitiveHeaders.has(String(name).toLowerCase()) ? '[REDACTED]' : value;
+    }
+    return sanitized;
+}
+
 function logProxyRequestSnapshot(req, originalUrl, rewrittenUrl, config, headers, bodyBuffer) {
     if (!ACCESS_LOG_ENABLED) {
         return;
@@ -354,7 +379,7 @@ function logProxyRequestSnapshot(req, originalUrl, rewrittenUrl, config, headers
     log(`原始请求: ${req.method} ${originalUrl}`);
     log(`转发目标: ${req.method} ${config.baseUrl}${rewrittenUrl}`);
     log('请求头:');
-    console.log(JSON.stringify(headers, null, 2));
+    console.log(JSON.stringify(sanitizeProxyHeadersForLog(headers), null, 2));
 
     if (Buffer.isBuffer(bodyBuffer) && bodyBuffer.length > 0) {
         log('请求体:');
@@ -458,6 +483,11 @@ function decodeResponseBody(bodyBuffer, contentEncoding) {
 function isQuotaUsagePath(urlValue) {
     const parsedUrl = new URL(urlValue, 'http://localhost');
     return parsedUrl.pathname === QUOTA_CHECK_PATH;
+}
+
+function isWhamPath(urlValue) {
+    const parsedUrl = new URL(urlValue, 'http://localhost');
+    return parsedUrl.pathname === '/backend-api/wham' || parsedUrl.pathname.startsWith('/backend-api/wham/');
 }
 
 function getCurrentTimestamp() {
@@ -651,16 +681,19 @@ function acquireFirstAvailableStaticConfigLease(manager, predicate, sessionKey =
 
 function acquireAvailableStaticConfigLease(manager, reason, predicate, sessionKey = '', excludedConfigs = [], poolKey = 'default') {
     const isCandidate = item => predicate(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+    const preferLowestErrorRate = excludedConfigs.length > 0;
     if (
         typeof manager.getActiveStaticConfig === 'function' &&
         typeof manager.ensureActiveStaticConfig === 'function'
     ) {
         const currentConfig = manager.getActiveStaticConfig(poolKey, isCandidate);
-        if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
+        if (!preferLowestErrorRate && currentConfig && isRuntimeConfigAvailable(currentConfig)) {
             return createStaticConfigLease(currentConfig, sessionKey);
         }
 
-        const nextConfig = manager.ensureActiveStaticConfig(poolKey, reason, isCandidate);
+        const nextConfig = manager.ensureActiveStaticConfig(poolKey, reason, isCandidate, {
+            preferLowestErrorRate,
+        });
         if (nextConfig && isRuntimeConfigAvailable(nextConfig)) {
             return createStaticConfigLease(nextConfig, sessionKey);
         }
@@ -709,13 +742,27 @@ function acquireTokenThenGptApiKeyLease(manager, reason, sessionKey, excludedCon
     });
 }
 
+function isResponsesFailoverConfig(config, requestUrl) {
+    return Boolean(
+        config &&
+        (config.type === 'token' || config.type === 'apikey') &&
+        isResponsesPath(requestUrl)
+    );
+}
+
 function canAttemptResponsesFailover(config, requestUrl) {
     return Boolean(
         accountManager &&
-        config &&
-        config.type === 'token' &&
-        isResponsesPath(requestUrl)
+        isResponsesFailoverConfig(config, requestUrl)
     );
+}
+
+function getResponsesRetryForwardStatusCode(statusCode, classification) {
+    return isSuccessfulResponsesStatus(statusCode) &&
+        classification &&
+        classification.reason === 'responses_usage_limit_reached'
+        ? 429
+        : statusCode;
 }
 
 function canAttemptTokenFailover(config) {
@@ -945,7 +992,9 @@ async function inspectResponsesEventStream(response, options = {}) {
 
 async function inspectResponsesUpstreamForFailover(response, statusCode, rawHeaders, options = {}) {
     if (Number.isFinite(Number(statusCode)) && !isSuccessfulResponsesStatus(statusCode)) {
-        const bodyBuffer = await consumeResponseBody(response);
+        const bodyBuffer = Object.prototype.hasOwnProperty.call(options, 'bodyBuffer')
+            ? options.bodyBuffer
+            : await consumeResponseBody(response);
         const bodyText = decodeResponseBody(bodyBuffer, getHeaderValue(rawHeaders, 'content-encoding'));
         const classification = classifyRetryableResponsesHttpError({
             statusCode,
@@ -1141,9 +1190,24 @@ function createClaudeMessagesRequestHandler(options = {}) {
         requestBodyLimitBytes: JSON_REQUEST_BODY_LIMIT_BYTES,
         requestBodyIdleTimeoutMs: REQUEST_BODY_IDLE_TIMEOUT_MS,
         cpaStyleCompatibility,
+        ensureSub2ApiTask: config => sub2ApiAgentIdentityManager.ensureTask(config),
+        recoverSub2ApiTask: (config, expectedTaskId) => (
+            sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId)
+        ),
         getSessionKey: ({ req, incomingUrl, body }) => getRequestSessionKey(req, incomingUrl, body),
         handleRetryableUpstreamError: (config, classification, context = null) => {
             const retryAllowed = !context || context.retryAllowed !== false;
+            function acquireRetrySelection(reason) {
+                if (!context || !retryAllowed) {
+                    return null;
+                }
+
+                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
+                    ? context.excludedConfigs
+                    : [config];
+                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, reason);
+            }
+
             if (isResponsesModelDowngradeClassification(classification)) {
                 warn(`claude responses 模型降级，自动切号: #${config.index + 1} ${config.description} (${classification.retryKey})`);
                 accountManager.observeResponseModel(config, {
@@ -1154,34 +1218,14 @@ function createClaudeMessagesRequestHandler(options = {}) {
                     downgraded: true,
                 });
 
-                if (!context) {
-                    return null;
-                }
-
-                if (!retryAllowed) {
-                    return null;
-                }
-
-                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
-                    ? context.excludedConfigs
-                    : [config];
-
-                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_model_downgrade');
+                return acquireRetrySelection('claude_responses_model_downgrade');
             }
 
             if (config && isDirectClaudeProxyConfig(config)) {
-                if (config.type === 'apikey') {
-                    const apiKeyResult = accountManager.recordApiKeyRequestResult(config, {
-                        ok: false,
-                        reason: classification.reason,
-                        lastError: `${classification.retrySource}:${classification.retryKey}`,
-                        switchReason: 'apikey_upstream_failover',
-                    });
-
-                    if (apiKeyResult.unavailable) {
-                        warn(`claude apikey 上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-                    }
-                } else {
+                const nextSelection = config.type === 'claude_token'
+                    ? null
+                    : acquireRetrySelection('claude_direct_failover');
+                if (config.type !== 'apikey') {
                     warn(`claude token 上游返回错误: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
                 }
 
@@ -1189,42 +1233,21 @@ function createClaudeMessagesRequestHandler(options = {}) {
                     return null;
                 }
 
-                if (!context) {
-                    return null;
-                }
-
-                if (!retryAllowed) {
-                    return null;
-                }
-
-                const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
-                    ? context.excludedConfigs
-                    : [config];
-
-                return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_direct_failover');
+                return nextSelection;
             }
 
             warn(`claude responses 自动切号: #${config.index + 1} ${config.description} (${classification.retrySource}:${classification.retryKey})`);
+            const nextSelection = acquireRetrySelection('claude_responses_failover');
             if (shouldMarkResponsesFailoverUnavailable(classification)) {
-                accountManager.markConfigUnavailable(config, classification.reason, {
-                    lastError: `${classification.retrySource}:${classification.retryKey}`,
-                    switchReason: 'claude_responses_failover',
-                });
+                if (config.type !== 'apikey') {
+                    accountManager.markConfigUnavailable(config, classification.reason, {
+                        lastError: `${classification.retrySource}:${classification.retryKey}`,
+                        switchReason: 'claude_responses_failover',
+                    });
+                }
             }
 
-            if (!context) {
-                return null;
-            }
-
-            if (!retryAllowed) {
-                return null;
-            }
-
-            const excludedConfigs = Array.isArray(context.excludedConfigs) && context.excludedConfigs.length > 0
-                ? context.excludedConfigs
-                : [config];
-
-            return acquireClaudeMessagesConfig(context.sessionKey, excludedConfigs, 'claude_responses_failover');
+            return nextSelection;
         },
         observeResponseModel: (config, observation) => {
             if (accountManager && typeof accountManager.observeResponseModel === 'function') {
@@ -1271,6 +1294,10 @@ function applyLoadedConfig(loadedConfig) {
             timeoutMs: QUOTA_CHECK_TIMEOUT_MS
         }),
         persistTokenRefreshFn: persistTokenRefreshForConfig,
+        ensureSub2ApiTaskFn: config => sub2ApiAgentIdentityManager.ensureTask(config),
+        recoverSub2ApiTaskFn: (config, expectedTaskId) => (
+            sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId)
+        ),
         log,
         warn,
         now: getCurrentTimestamp
@@ -1526,6 +1553,63 @@ function persistTokenRefreshForConfig(update) {
     return savedItem;
 }
 
+function persistSub2ApiTaskForConfig(update) {
+    const config = update && update.config;
+    const taskId = typeof update?.taskId === 'string' ? update.taskId.trim() : '';
+    const expectedTaskId = typeof update?.expectedTaskId === 'string' ? update.expectedTaskId.trim() : '';
+    if (!config || !Number.isInteger(config.index) || !isSub2ApiConfig(config)) {
+        throw new ConfigEditorError('Sub2API task 的配置项索引不合法');
+    }
+    if (!taskId) {
+        throw new ConfigEditorError('Sub2API task 注册响应缺少 task_id');
+    }
+
+    const parsed = readParsedConfigFile(CONFIG_FILE);
+    const targetItem = parsed.configs[config.index];
+    if (!targetItem || !isSub2ApiConfig(targetItem)) {
+        throw new ConfigEditorError('Sub2API task 的配置项不存在');
+    }
+
+    const persistedCredentials = targetItem.credentials || {};
+    const runtimeCredentials = config.credentials || {};
+    if (
+        persistedCredentials.agent_runtime_id !== runtimeCredentials.agent_runtime_id ||
+        persistedCredentials.chatgpt_account_id !== runtimeCredentials.chatgpt_account_id
+    ) {
+        throw new ConfigEditorError('Sub2API task 的运行时账号与持久化配置不一致');
+    }
+
+    const matchesIdentity = item => {
+        if (!item || !isSub2ApiConfig(item)) {
+            return false;
+        }
+        const credentials = item.credentials || {};
+        return credentials.agent_runtime_id === runtimeCredentials.agent_runtime_id &&
+            credentials.chatgpt_account_id === runtimeCredentials.chatgpt_account_id;
+    };
+    const matchingItems = parsed.configs.filter(matchesIdentity);
+    const alreadyPersistedTaskId = matchingItems
+        .map(item => typeof item.credentials.task_id === 'string' ? item.credentials.task_id.trim() : '')
+        .find(currentTaskId => currentTaskId && (!expectedTaskId || currentTaskId !== expectedTaskId));
+    const nextTaskId = alreadyPersistedTaskId || taskId;
+    for (const item of matchingItems) {
+        item.credentials = {
+            ...item.credentials,
+            task_id: nextTaskId,
+        };
+    }
+
+    const savedParsed = persistConfigWithoutRuntimeReload(parsed);
+    for (const runtimeConfig of apiConfigs.filter(matchesIdentity)) {
+        runtimeConfig.credentials = {
+            ...runtimeConfig.credentials,
+            task_id: nextTaskId,
+        };
+    }
+
+    return nextTaskId;
+}
+
 function triggerServiceCommand(command, options = {}) {
     const spawnImpl = options.spawnImpl || spawn;
     const cwd = options.cwd || __dirname;
@@ -1647,9 +1731,8 @@ function serializeAccountStatus(accountStatus) {
         api_key_request_window: accountStatus.apiKeyRequestWindow ? {
             failure_count: accountStatus.apiKeyRequestWindow.failureCount,
             sample_size: accountStatus.apiKeyRequestWindow.sampleSize,
-            failure_threshold: accountStatus.apiKeyRequestWindow.failureThreshold,
+            error_rate: accountStatus.apiKeyRequestWindow.errorRate,
             window_size: accountStatus.apiKeyRequestWindow.windowSize,
-            sample_ttl_ms: accountStatus.apiKeyRequestWindow.sampleTtlMs,
         } : null,
         api_key_recovery: accountStatus.apiKeyRecovery ? {
             enabled: accountStatus.apiKeyRecovery.enabled,
@@ -2228,12 +2311,12 @@ function deleteLocalOnlyHeaders(headers) {
     }
 }
 
-function buildProxyHeaders(reqHeaders, config, contentLength) {
+function buildProxyHeaders(reqHeaders, config, contentLength, options = {}) {
     const headers = { ...reqHeaders };
 
     deleteHeadersCaseInsensitive(headers, HOP_BY_HOP_HEADERS);
     deleteLocalOnlyHeaders(headers);
-    const authHeaders = buildAuthHeadersForConfig(config);
+    const authHeaders = buildAuthHeadersForConfig(config, options);
     for (const [name, value] of Object.entries(authHeaders)) {
         if (typeof value !== 'undefined') {
             headers[name] = value;
@@ -2247,7 +2330,12 @@ function buildProxyHeaders(reqHeaders, config, contentLength) {
         delete headers['content-length'];
     }
 
-    return applyForcedProxyHeaders(headers);
+    const forcedHeaders = applyForcedProxyHeaders(headers);
+    if (isSub2ApiConfig(config)) {
+        Object.assign(forcedHeaders, authHeaders);
+    }
+
+    return forcedHeaders;
 }
 
 function normalizeUpstreamResponseHeaders(rawHeaders) {
@@ -2473,6 +2561,7 @@ function createResponseModelObserver(options = {}) {
 function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     const hasBufferedBody = Buffer.isBuffer(body);
     const failoverAttempt = Number(options.failoverAttempt || 0);
+    const agentTaskRecoveryAttempt = Number(options.agentTaskRecoveryAttempt || 0);
     const cpaStyleCompatibility = options.cpaStyleCompatibility === true;
     const requestSessionKey = normalizeSessionKey(options.sessionKey);
     const requestPredicate = typeof options.predicate === 'function' ? options.predicate : () => true;
@@ -2485,8 +2574,11 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
     let leaseReleased = false;
     const shouldObserveResponseModel = isResponsesPath(req.url);
     const requestedResponseModel = shouldObserveResponseModel ? extractRequestModelFromBody(body) : '';
+    const authPurpose = isWhamPath(req.url) ? 'quota' : 'responses';
     const headers = applyResponsesFailoverRequestHeaders(
-        buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined),
+        buildProxyHeaders(req.headers, config, hasBufferedBody ? body.length : undefined, {
+            purpose: authPurpose,
+        }),
         req.url
     );
     logProxyRequestSnapshot(req, originalUrl, req.url, config, headers, hasBufferedBody ? body : Buffer.alloc(0));
@@ -2654,19 +2746,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         const statusCode = Number(response.statusCode || 502);
         const apiKeyFailure = classifyApiKeyUpstreamFailure(config, statusCode);
         if (apiKeyFailure) {
-            const apiKeyResult = recordCurrentApiKeyRequestResult({
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+            recordCurrentApiKeyRequestResult({
                 ok: false,
                 reason: apiKeyFailure.reason,
                 lastError: `${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}`,
                 switchReason: 'apikey_upstream_failover',
             });
-
-            if (apiKeyResult.unavailable) {
-                warn(`apikey 上游不可用: #${config.index + 1} ${config.description} (${apiKeyFailure.retrySource}:${apiKeyFailure.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-            }
-
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
-            const nextConfig = nextLease ? nextLease.config : null;
 
             if (!requestClosed && nextConfig && nextConfig !== config) {
                 responseFinished = true;
@@ -2693,19 +2780,67 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
+        let prefetchedBodyBuffer = null;
+        if (isSub2ApiConfig(config) && statusCode === 401) {
+            prefetchedBodyBuffer = await consumeResponseBody(response);
+            const decodedBody = decodeResponseBody(
+                prefetchedBodyBuffer,
+                getHeaderValue(response.headers, 'content-encoding')
+            );
+            if (agentTaskRecoveryAttempt < 1 && isSub2ApiTaskInvalidResponse(statusCode, decodedBody)) {
+                const expectedTaskId = config.credentials && config.credentials.task_id || '';
+                try {
+                    await sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId);
+                    if (requestClosed) {
+                        releaseCurrentLease();
+                        return;
+                    }
+
+                    responseFinished = true;
+                    const retryLease = currentLease;
+                    currentLease = null;
+                    leaseReleased = true;
+                    proxyRequest(req, res, config, body, originalUrl, {
+                        failoverAttempt,
+                        agentTaskRecoveryAttempt: agentTaskRecoveryAttempt + 1,
+                        deadlineAt: requestDeadlineAt,
+                        lease: retryLease,
+                        sessionKey: requestSessionKey,
+                        predicate: requestPredicate,
+                        excludedConfigs,
+                        retrySelector,
+                        cpaStyleCompatibility,
+                    });
+                    return;
+                } catch (err) {
+                    warn(`Sub2API task 恢复失败: #${config.index + 1} ${config.description} (${err.message})`);
+                }
+            }
+        }
+
         const tokenFailure = classifyTokenUpstreamFailure(config, statusCode);
-        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url)
+        const shouldInspectResponses = !apiKeyFailure
+            && canAttemptResponsesFailover(config, req.url)
             && isResponsesFailoverInspectionCandidate(statusCode, response.headers, {
                 requestedModel: requestedResponseModel,
             });
 
         if (shouldInspectResponses) {
             const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers, {
-                requestedModel: requestedResponseModel,
+                requestedModel: config.type === 'token' ? requestedResponseModel : '',
+                ...(prefetchedBodyBuffer ? { bodyBuffer: prefetchedBodyBuffer } : {}),
             });
 
             if (inspection.action === 'retry') {
                 const modelDowngraded = isResponsesModelDowngradeClassification(inspection.classification);
+                let nextLease = null;
+                let nextConfig = null;
+                let failoverSelectionAttempted = false;
+                if (config.type === 'apikey' && !modelDowngraded) {
+                    failoverSelectionAttempted = true;
+                    nextLease = acquireFailoverLease('responses_failover');
+                    nextConfig = nextLease ? nextLease.config : null;
+                }
                 warn(`${modelDowngraded ? 'responses 模型降级，自动切号' : 'responses 自动切号'}: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey})`);
                 if (modelDowngraded) {
                     observeCurrentResponseModel({
@@ -2715,14 +2850,25 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         downgraded: true,
                     });
                 } else if (shouldMarkResponsesFailoverUnavailable(inspection.classification)) {
-                    accountManager.markConfigUnavailable(config, inspection.classification.reason, {
-                        lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
-                        switchReason: 'responses_failover',
-                    });
+                    if (config.type === 'apikey') {
+                        recordCurrentApiKeyRequestResult({
+                            ok: false,
+                            reason: inspection.classification.reason,
+                            lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                            switchReason: 'apikey_upstream_failover',
+                        });
+                    } else {
+                        accountManager.markConfigUnavailable(config, inspection.classification.reason, {
+                            lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                            switchReason: 'responses_failover',
+                        });
+                    }
                 }
 
-                const nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
-                const nextConfig = nextLease ? nextLease.config : null;
+                if (!failoverSelectionAttempted) {
+                    nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
+                    nextConfig = nextLease ? nextLease.config : null;
+                }
 
                 if (!requestClosed && nextConfig && nextConfig !== config) {
                     responseFinished = true;
@@ -2748,11 +2894,12 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     nextLease.release();
                 }
 
+                const forwardStatusCode = getResponsesRetryForwardStatusCode(statusCode, inspection.classification);
                 if (inspection.forwardMode === 'buffered') {
-                    observeBufferedResponseModel(statusCode, response.headers, inspection.bodyBuffer || Buffer.alloc(0));
+                    observeBufferedResponseModel(forwardStatusCode, response.headers, inspection.bodyBuffer || Buffer.alloc(0));
                     upstreamResponseHeaders = writeBufferedUpstreamResponse(
                         res,
-                        statusCode,
+                        forwardStatusCode,
                         response.headers,
                         inspection.bodyBuffer || Buffer.alloc(0)
                     ).headers;
@@ -2762,7 +2909,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     return;
                 }
 
-                await startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
+                await startForwardingResponse(response, forwardStatusCode, response.headers, inspection.initialChunks || []);
                 return;
             }
 
@@ -2774,6 +2921,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     response.headers,
                     inspection.bodyBuffer || Buffer.alloc(0)
                 ).headers;
+                recordCurrentApiKeyRequestResult({ ok: true });
                 headersApplied = true;
                 responseFinished = true;
                 releaseCurrentLease();
@@ -2821,6 +2969,19 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
             }
         }
 
+        if (prefetchedBodyBuffer) {
+            upstreamResponseHeaders = writeBufferedUpstreamResponse(
+                res,
+                statusCode,
+                response.headers,
+                prefetchedBodyBuffer
+            ).headers;
+            headersApplied = true;
+            responseFinished = true;
+            releaseCurrentLease();
+            return;
+        }
+
         await startForwardingResponse(response, statusCode, response.headers);
     }).catch(err => {
         if (requestClosed) {
@@ -2837,19 +2998,14 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
 
         if (config && config.type === 'apikey') {
-            const apiKeyResult = recordCurrentApiKeyRequestResult({
+            const nextLease = acquireFailoverLease('apikey_upstream_failover');
+            const nextConfig = nextLease ? nextLease.config : null;
+            recordCurrentApiKeyRequestResult({
                 ok: false,
                 reason: 'apikey_upstream_error',
                 lastError: err.message,
                 switchReason: 'apikey_upstream_failover',
             });
-
-            if (apiKeyResult && apiKeyResult.unavailable) {
-                warn(`apikey 上游请求失败并标记不可用: #${config.index + 1} ${config.description} (${err.message}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-            }
-
-            const nextLease = acquireFailoverLease('apikey_upstream_failover');
-            const nextConfig = nextLease ? nextLease.config : null;
 
             if (!headersApplied && !res.headersSent && nextConfig && nextConfig !== config) {
                 const nextBody = prepareFailoverRequest(req, nextConfig, body, originalUrl, {
@@ -2943,12 +3099,24 @@ function createHandler(proxyPath = '', options = {}) {
             return acquireTokenThenGptApiKeyLease(accountManager, 'proxy_request', sessionKey, excludedConfigs);
         }
 
-        function forwardWithConfig(lease, body, jsonBody = null) {
+        async function forwardWithConfig(lease, body, jsonBody = null) {
             if (!lease || !lease.config) {
                 return createMissingConfigResponse(res);
             }
 
             const config = lease.config;
+            try {
+                await sub2ApiAgentIdentityManager.ensureTask(config);
+            } catch (err) {
+                lease.release();
+                error('Sub2API task 准备失败:', err.message);
+                res.status(502).json({
+                    error: 'Bad Gateway',
+                    message: err.message,
+                });
+                return;
+            }
+
             const rewrittenUrl = rewriteProxyUrl(incomingUrl, config);
             req.url = rewrittenUrl;
             if (ACCESS_LOG_ENABLED) {
@@ -3004,7 +3172,7 @@ function createHandler(proxyPath = '', options = {}) {
                 }
 
                 const sessionKey = getRequestSessionKey(req, incomingUrl, jsonBody);
-                forwardWithConfig(acquireProxyLease(sessionKey), body, jsonBody);
+                void forwardWithConfig(acquireProxyLease(sessionKey), body, jsonBody);
             }).catch(err => {
                 if (!res.headersSent) {
                     sendRequestBodyError(res, err);
@@ -3012,7 +3180,7 @@ function createHandler(proxyPath = '', options = {}) {
             });
         } else {
             const sessionKey = getRequestSessionKey(req, incomingUrl);
-            forwardWithConfig(acquireProxyLease(sessionKey), undefined);
+            void forwardWithConfig(acquireProxyLease(sessionKey), undefined);
         }
     };
 }
@@ -3165,7 +3333,9 @@ async function executeImageBusinessAttempt({
     body,
     deadlineAt,
     getTokenResponsesPayload,
-    requestBufferedImpl
+    requestBufferedImpl,
+    ensureSub2ApiTask,
+    recoverSub2ApiTask
 }) {
     if (config.type !== 'token') {
         const upstreamRequest = buildNativeImageUpstreamRequest(req, incomingUrl, config, body, deadlineAt);
@@ -3188,6 +3358,7 @@ async function executeImageBusinessAttempt({
         };
     }
 
+    await ensureSub2ApiTask(config);
     const responsesPayload = getTokenResponsesPayload();
     if (!responsesPayload.ok) {
         return {
@@ -3197,8 +3368,20 @@ async function executeImageBusinessAttempt({
         };
     }
 
-    const upstreamRequest = buildTokenImageUpstreamRequest(req, config, responsesPayload.payload, deadlineAt);
-    const result = await requestBufferedImpl(upstreamRequest);
+    let result;
+    for (let recoveryAttempt = 0; recoveryAttempt <= 1; recoveryAttempt += 1) {
+        const upstreamRequest = buildTokenImageUpstreamRequest(req, config, responsesPayload.payload, deadlineAt);
+        result = await requestBufferedImpl(upstreamRequest);
+        if (
+            recoveryAttempt === 0 &&
+            isSub2ApiTaskInvalidResponse(result.statusCode, result.bodyText)
+        ) {
+            const expectedTaskId = config.credentials && config.credentials.task_id || '';
+            await recoverSub2ApiTask(config, expectedTaskId);
+            continue;
+        }
+        break;
+    }
 
     if (!isSuccessfulResponsesStatus(result.statusCode)) {
         return {
@@ -3241,7 +3424,7 @@ function recordImageBusinessFailure(manager, config, classification, resultOrErr
         return;
     }
 
-    const apiKeyResult = manager.recordApiKeyRequestResult(config, {
+    manager.recordApiKeyRequestResult(config, {
         ok: false,
         reason: classification.reason,
         lastError: resultOrError instanceof Error
@@ -3249,10 +3432,6 @@ function recordImageBusinessFailure(manager, config, classification, resultOrErr
             : `${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}`,
         switchReason: 'apikey_upstream_failover',
     });
-
-    if (apiKeyResult && apiKeyResult.unavailable) {
-        warn(`apikey 图片上游不可用: #${config.index + 1} ${config.description} (${classification.retrySource || 'upstream'}:${classification.retryKey || 'error'}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
-    }
 }
 
 function recordImageBusinessSuccess(manager, config) {
@@ -3293,6 +3472,12 @@ function writeImageBusinessFailure(res, failure) {
 async function handleImageBusinessRequest(req, res, options = {}) {
     const manager = options.accountManager || accountManager;
     const requestBufferedImpl = options.requestBuffered || requestBuffered;
+    const ensureSub2ApiTask = options.ensureSub2ApiTask || (config => (
+        sub2ApiAgentIdentityManager.ensureTask(config)
+    ));
+    const recoverSub2ApiTask = options.recoverSub2ApiTask || ((config, expectedTaskId) => (
+        sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId)
+    ));
     const now = typeof options.now === 'function' ? options.now : Date.now;
     const incomingUrl = buildIncomingUrl(req);
     const deadlineAt = createUpstreamDeadlineAt();
@@ -3316,6 +3501,8 @@ async function handleImageBusinessRequest(req, res, options = {}) {
                 deadlineAt,
                 getTokenResponsesPayload,
                 requestBufferedImpl,
+                ensureSub2ApiTask,
+                recoverSub2ApiTask,
             });
         } catch (err) {
             attempt = {
@@ -3342,13 +3529,14 @@ async function handleImageBusinessRequest(req, res, options = {}) {
             return;
         }
 
-        recordImageBusinessFailure(manager, config, attempt.classification, attempt.error || attempt.result);
         lastFailure = attempt;
         failedConfigs.push(config);
-        currentLease.release();
-        currentLease = failedConfigs.length <= MAX_REQUEST_FAILOVER_RETRIES
+        const nextLease = failedConfigs.length <= MAX_REQUEST_FAILOVER_RETRIES
             ? acquireImageBusinessLease(manager, sessionKey, failedConfigs)
             : null;
+        recordImageBusinessFailure(manager, config, attempt.classification, attempt.error || attempt.result);
+        currentLease.release();
+        currentLease = nextLease;
     }
 
     writeImageBusinessFailure(res, lastFailure);
@@ -4163,6 +4351,7 @@ if (require.main === module) {
 
 module.exports = {
     buildProxyHeaders,
+    sanitizeProxyHeadersForLog,
     classifyApiKeyUpstreamFailure,
     classifyTokenUpstreamFailure,
     deleteHeadersCaseInsensitive,
@@ -4170,6 +4359,7 @@ module.exports = {
     LOCAL_ONLY_AUTH_HEADERS,
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
+    getResponsesRetryForwardStatusCode,
     MAX_REQUEST_FAILOVER_RETRIES,
     hasRequestFailoverRetriesRemaining,
     createResponseModelObserver,
@@ -4177,6 +4367,7 @@ module.exports = {
     extractResponseModelFromPayload,
     isStreamingResponsesRequest,
     isResponsesFailoverInspectionCandidate,
+    isResponsesFailoverConfig,
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,
     createImageGenerationsHandler,

@@ -62,6 +62,40 @@ test('classifyRetryableResponsesHttpError falls back to usage limit messages whe
   });
 });
 
+test('classifyRetryableResponsesPayloadError detects localized usage limit messages', () => {
+  const result = classifyRetryableResponsesPayloadError({
+    bodyText: JSON.stringify({
+      error: {
+        message: '你已达到使用上限。请稍后再试。',
+      },
+    }),
+  });
+
+  assert.deepEqual(result, {
+    reason: 'responses_usage_limit_reached',
+    retryKey: 'usage_limit_reached',
+    retrySource: 'body',
+  });
+});
+
+test('classifyRetryableResponsesPayloadError ignores localized usage limit text in successful output', () => {
+  const result = classifyRetryableResponsesPayloadError({
+    bodyText: JSON.stringify({
+      id: 'resp-ok',
+      status: 'completed',
+      output: [{
+        type: 'message',
+        content: [{
+          type: 'output_text',
+          text: '你已达到使用上限。请稍后再试。',
+        }],
+      }],
+    }),
+  });
+
+  assert.equal(result, null);
+});
+
 test('classifyRetryableResponsesHttpError treats unknown 429 error types as failed', () => {
   const result = classifyRetryableResponsesHttpError({
     statusCode: 429,

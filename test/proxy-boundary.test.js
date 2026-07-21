@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
@@ -12,11 +13,14 @@ const {
   createResponseModelObserver,
   defaultContentTypeForProxyResponse,
   extractResponseModelFromPayload,
+  getResponsesRetryForwardStatusCode,
   hasRequestFailoverRetriesRemaining,
   isStreamingResponsesRequest,
   isResponsesFailoverInspectionCandidate,
+  isResponsesFailoverConfig,
   MAX_REQUEST_FAILOVER_RETRIES,
   normalizeProxyJsonBody,
+  sanitizeProxyHeadersForLog,
   shouldForceResponsesStoreFalse,
   createImageGenerationsHandler,
 } = require('../openai');
@@ -148,6 +152,102 @@ test('buildProxyHeaders strips local-only auth headers before forwarding upstrea
   assert.equal(headers['content-length'], '27');
 });
 
+test('buildProxyHeaders applies Sub2API AgentAssertion and Codex identity headers', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const headers = buildProxyHeaders({
+    authorization: 'Bearer local-router-secret',
+    'chatgpt-account-id': 'local-account-id',
+    host: 'localhost:3009',
+    'content-type': 'application/json',
+  }, {
+    type: 'token',
+    subtype: 'sub2api',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: true,
+    },
+  }, 27);
+
+  assert.match(headers.authorization, /^AgentAssertion /);
+  assert.equal(headers['chatgpt-account-id'], 'account-example');
+  assert.equal(headers['openai-beta'], 'responses=experimental');
+  assert.equal(headers.originator, 'codex_cli_rs');
+  assert.equal(headers['x-openai-fedramp'], 'true');
+  assert.equal(headers.host, undefined);
+  assert.equal(headers['content-length'], '27');
+});
+
+test('buildProxyHeaders applies Sub2API quota headers for Wham requests', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-example',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+  };
+  const headers = buildProxyHeaders({}, config, undefined, { purpose: 'quota' });
+
+  assert.match(headers.authorization, /^AgentAssertion /);
+  assert.equal(headers['openai-beta'], 'codex-1');
+  assert.equal(headers['oai-language'], 'zh-CN');
+  assert.equal(headers.originator, 'Codex Desktop');
+  assert.equal(headers['sec-fetch-site'], 'none');
+  assert.equal(headers.priority, 'u=4, i');
+});
+
+test('access-log header sanitization removes AgentAssertion and account identifiers', () => {
+  const sanitized = sanitizeProxyHeadersForLog({
+    Authorization: 'AgentAssertion sensitive-envelope',
+    'ChatGPT-Account-Id': 'account-sensitive',
+    'X-API-Key': 'router-sensitive',
+    'content-type': 'application/json',
+  });
+
+  assert.deepEqual(sanitized, {
+    Authorization: '[REDACTED]',
+    'ChatGPT-Account-Id': '[REDACTED]',
+    'X-API-Key': '[REDACTED]',
+    'content-type': 'application/json',
+  });
+  assert.doesNotMatch(JSON.stringify(sanitized), /sensitive/);
+});
+
+test('proxyRequest contains one-shot Sub2API task recovery before normal Responses failover', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const proxyStart = source.indexOf('function proxyRequest(');
+  const proxyEnd = source.indexOf('function createHandler(', proxyStart);
+  const proxySource = source.slice(proxyStart, proxyEnd);
+
+  assert.match(proxySource, /agentTaskRecoveryAttempt < 1/);
+  assert.match(proxySource, /isSub2ApiTaskInvalidResponse\(statusCode, decodedBody\)/);
+  assert.match(proxySource, /sub2ApiAgentIdentityManager\.recoverTask\(config, expectedTaskId\)/);
+  assert.match(proxySource, /agentTaskRecoveryAttempt: agentTaskRecoveryAttempt \+ 1/);
+  assert.match(proxySource, /const authPurpose = isWhamPath\(req\.url\) \? 'quota' : 'responses'/);
+});
+
+test('Sub2API task persistence updates every config with the same account and runtime identity', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const persistStart = source.indexOf('function persistSub2ApiTaskForConfig(');
+  const persistEnd = source.indexOf('function triggerServiceCommand(', persistStart);
+  const persistSource = source.slice(persistStart, persistEnd);
+
+  assert.match(persistSource, /const matchingItems = parsed\.configs\.filter\(matchesIdentity\)/);
+  assert.match(persistSource, /for \(const item of matchingItems\)/);
+  assert.match(persistSource, /for \(const runtimeConfig of apiConfigs\.filter\(matchesIdentity\)\)/);
+});
+
 test('isResponsesFailoverInspectionCandidate inspects upstream HTTP errors and successful JSON', () => {
   assert.equal(isResponsesFailoverInspectionCandidate(401, {
     'content-type': 'application/json',
@@ -187,6 +287,55 @@ test('server classifies retryable errors in successful Responses JSON before for
 
   assert.match(inspectionSource, /const payloadClassification = classifyRetryableResponsesPayloadError\(\{\s*bodyText,/);
   assert.match(inspectionSource, /action: 'retry',\s*classification: payloadClassification/);
+});
+
+test('server inspects apikey Responses payload errors and records them in the failure window', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const retryStart = source.indexOf("if (inspection.action === 'retry')");
+  const retryEnd = source.indexOf("if (inspection.action === 'forward-buffered')", retryStart);
+  const retrySource = source.slice(retryStart, retryEnd);
+
+  assert.equal(isResponsesFailoverConfig({ type: 'apikey' }, '/v1/responses'), true);
+  assert.equal(isResponsesFailoverConfig({ type: 'token' }, '/backend-api/codex/responses'), true);
+  assert.equal(isResponsesFailoverConfig({ type: 'claude_token' }, '/v1/responses'), false);
+  assert.equal(isResponsesFailoverConfig({ type: 'apikey' }, '/v1/chat/completions'), false);
+  assert.equal(getResponsesRetryForwardStatusCode(200, {
+    reason: 'responses_usage_limit_reached',
+  }), 429);
+  assert.equal(getResponsesRetryForwardStatusCode(429, {
+    reason: 'responses_usage_limit_reached',
+  }), 429);
+  assert.equal(getResponsesRetryForwardStatusCode(200, {
+    reason: 'responses_model_downgraded',
+  }), 200);
+  assert.match(retrySource, /config\.type === 'apikey'/);
+  assert.match(retrySource, /recordCurrentApiKeyRequestResult\(\{\s*ok: false,/);
+});
+
+test('server records buffered apikey success only after committing the response', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const bufferedStart = source.indexOf("if (inspection.action === 'forward-buffered')");
+  const bufferedEnd = source.indexOf("if (inspection.action === 'forward-stream')", bufferedStart);
+  const bufferedSource = source.slice(bufferedStart, bufferedEnd);
+
+  assert.ok(bufferedSource.indexOf('writeBufferedUpstreamResponse(') >= 0);
+  assert.ok(bufferedSource.indexOf('recordCurrentApiKeyRequestResult({ ok: true })') >
+    bufferedSource.indexOf('writeBufferedUpstreamResponse('));
+});
+
+test('server switches apikey requests without passing removal controls', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const proxyStart = source.indexOf('function proxyRequest(');
+  const proxyEnd = source.indexOf('function createHandler(', proxyStart);
+  const proxySource = source.slice(proxyStart, proxyEnd);
+  const claudeStart = source.indexOf('handleRetryableUpstreamError:');
+  const claudeEnd = source.indexOf('observeResponseModel:', claudeStart);
+  const claudeSource = source.slice(claudeStart, claudeEnd);
+
+  assert.match(proxySource, /const nextLease = acquireFailoverLease\('apikey_upstream_failover'\)/);
+  assert.match(proxySource, /nextLease = acquireFailoverLease\('responses_failover'\)/);
+  assert.match(claudeSource, /acquireRetrySelection\('claude_direct_failover'\)/);
+  assert.doesNotMatch(source, /markUnavailable/);
 });
 
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {
@@ -559,6 +708,94 @@ test('image generations token business request retries the next config before re
   });
 });
 
+test('image generations retries the same Sub2API account once after task recovery', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    index: 0,
+    description: 'Sub2API image',
+    apiBasePath: '/backend-api/codex',
+    baseUrl: 'https://chatgpt.com',
+    account_id: 'account-example',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-old',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+    runtime: { available: true },
+  };
+  const events = [];
+  const requests = [];
+  const accountManager = {
+    acquireConfig(_reason, predicate, options = {}) {
+      return predicate(config) && !(options.exclude || []).includes(config)
+        ? { config, sessionKey: '', release() {} }
+        : null;
+    },
+    markConfigUnavailable() {
+      throw new Error('recovered Sub2API config must not be marked unavailable');
+    },
+  };
+  const successfulImageEvent = [
+    'event: response.output_item.done',
+    `data: ${JSON.stringify({
+      type: 'response.output_item.done',
+      item: {
+        type: 'image_generation_call',
+        status: 'completed',
+        result: Buffer.from('image-data').toString('base64'),
+      },
+    })}`,
+    '',
+  ].join('\n');
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    ensureSub2ApiTask: async activeConfig => {
+      events.push(`ensure:${activeConfig.credentials.task_id}`);
+    },
+    recoverSub2ApiTask: async (activeConfig, expectedTaskId) => {
+      events.push(`recover:${expectedTaskId}`);
+      activeConfig.credentials.task_id = 'task-new';
+    },
+    requestBuffered: async request => {
+      requests.push(request);
+      if (requests.length === 1) {
+        const bodyText = JSON.stringify({ error: { code: 'invalid_task_id' } });
+        return {
+          statusCode: 401,
+          headers: { 'content-type': 'application/json' },
+          body: Buffer.from(bodyText),
+          bodyText,
+        };
+      }
+
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+        body: Buffer.from(successfulImageEvent),
+        bodyText: successfulImageEvent,
+      };
+    },
+    now: () => 123000,
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw an example',
+  }), res);
+
+  assert.deepEqual(events, ['ensure:task-old', 'recover:task-old']);
+  assert.equal(requests.length, 2);
+  assert.equal(JSON.parse(Buffer.from(requests[0].headers.authorization.slice(15), 'base64url')).task_id, 'task-old');
+  assert.equal(JSON.parse(Buffer.from(requests[1].headers.authorization.slice(15), 'base64url')).task_id, 'task-new');
+  assert.equal(res.statusCode, 200);
+});
+
 test('image generations token business request retries malformed successful responses bodies', async () => {
   const configs = [
     {
@@ -845,6 +1082,68 @@ test('image generations apikey business request keeps native Images forwarding',
   assert.equal(res.writableEnded, true);
 });
 
+test('image generations keeps the only failed apikey available when no fallback exists', async () => {
+  const config = {
+    type: 'apikey',
+    index: 0,
+    description: 'only image upstream',
+    apiKey: 'upstream-image-key',
+    apiBasePath: '',
+    baseUrl: 'https://images.example.com/v1',
+    support: ['gpt'],
+    runtime: { enabled: true, available: true },
+  };
+  const observations = [];
+  const accountManager = {
+    getActiveConfig(predicate) {
+      return predicate(config) ? config : null;
+    },
+    acquireConfig() {
+      return null;
+    },
+    ensureActiveConfig() {
+      return null;
+    },
+    recordApiKeyRequestResult(observedConfig, result) {
+      observations.push({ observedConfig, result });
+      return { unavailable: false, sampleSize: 3, failureCount: 3 };
+    },
+  };
+  const bodyText = JSON.stringify({
+    error: {
+      type: 'rate_limit_error',
+      message: 'request is rate limited',
+    },
+  });
+  const handler = createImageGenerationsHandler({
+    accountManager,
+    requestBuffered: async () => ({
+      statusCode: 429,
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from(bodyText),
+      bodyText,
+    }),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createJsonRequest('/v1/images/generations', {
+    prompt: 'draw a small red hat',
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(observations, [{
+    observedConfig: config,
+    result: {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    },
+  }]);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.writableEnded, true);
+});
+
 test('server uses phased proxy timeouts within the official SDK total timeout window', () => {
   const openaiSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
   const upstreamSource = fs.readFileSync(path.join(__dirname, '..', 'app/upstream-request.js'), 'utf8');
@@ -891,6 +1190,17 @@ test('generic OpenAI proxy tries token configs before GPT apikey fallback', () =
   assert.notEqual(acquireProxyLeaseIndex, -1);
   assert.match(acquireProxyLeaseBody, /return acquireTokenThenGptApiKeyLease\(accountManager, 'proxy_request', sessionKey, excludedConfigs\)/);
   assert.doesNotMatch(acquireProxyLeaseBody, /getActiveConfig\(item => isGptApiKeyProxyConfig/);
+});
+
+test('apikey failover forces lowest-error-rate selection even when the static focus remains available', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const acquireStart = source.indexOf('function acquireAvailableStaticConfigLease(');
+  const acquireEnd = source.indexOf('function acquireTokenThenGptApiKeyLease(', acquireStart);
+  const acquireSource = source.slice(acquireStart, acquireEnd);
+
+  assert.match(acquireSource, /const preferLowestErrorRate = excludedConfigs\.length > 0/);
+  assert.match(acquireSource, /if \(!preferLowestErrorRate && currentConfig && isRuntimeConfigAvailable\(currentConfig\)\)/);
+  assert.match(acquireSource, /preferLowestErrorRate,/);
 });
 
 test('createClaudeMessagesHandler converts apikey configs without claude support through responses compatibility', async () => {
@@ -1059,6 +1369,146 @@ test('createClaudeMessagesHandler normalizes MCP tool schemas for token-backed r
   assert.equal(upstreamBody.tools[0].name, 'mcp__chrome-devtools__click');
   assert.equal(clickParameters.additionalProperties, false);
   assert.equal(clickParameters.properties.options.additionalProperties, false);
+});
+
+test('createClaudeMessagesHandler retries the same Sub2API account once after invalid task', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    index: 0,
+    description: 'Sub2API messages',
+    apiBasePath: '/backend-api/codex',
+    baseUrl: 'https://chatgpt.com',
+    account_id: 'account-example',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: 'task-old',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+  };
+  const requests = [];
+  const events = [];
+  const errors = [];
+  const successfulEvents = [
+    'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5"}}',
+    '',
+    'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}',
+    '',
+    'data: {"type":"response.content_part.added","item_id":"msg_1","content_index":0,"part":{"type":"output_text"}}',
+    '',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","content_index":0,"delta":"ok"}',
+    '',
+    'data: {"type":"response.content_part.done","item_id":"msg_1","content_index":0}',
+    '',
+    'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}',
+    '',
+  ].join('\n');
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => config,
+    ensureSub2ApiTask: async activeConfig => {
+      events.push(`ensure:${activeConfig.credentials.task_id}`);
+    },
+    recoverSub2ApiTask: async (activeConfig, expectedTaskId) => {
+      events.push(`recover:${expectedTaskId}`);
+      activeConfig.credentials.task_id = 'task-new';
+    },
+    createUpstreamRequest: request => {
+      requests.push(request);
+      const response = requests.length === 1
+        ? createUpstreamResponse(401, { 'content-type': 'application/json' }, '{"error":{"code":"invalid_task_id"}}')
+        : createUpstreamResponse(200, { 'content-type': 'text/event-stream' }, successfulEvents);
+      return {
+        responsePromise: Promise.resolve(response),
+        abort() {},
+      };
+    },
+    error: message => errors.push(message),
+  });
+  const res = createJsonResponseRecorder();
+
+  await handler(createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [{ role: 'user', content: 'hello' }],
+  }), res);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(requests.length, 2);
+  assert.deepEqual(events, ['ensure:task-old', 'recover:task-old', 'ensure:task-new']);
+  assert.equal(JSON.parse(Buffer.from(requests[0].headers.authorization.slice(15), 'base64url')).task_id, 'task-old');
+  assert.equal(JSON.parse(Buffer.from(requests[1].headers.authorization.slice(15), 'base64url')).task_id, 'task-new');
+  assert.deepEqual(errors, []);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.content[0].text, 'ok');
+});
+
+test('createClaudeMessagesHandler does not start upstream after client closes during task preparation', async () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const config = {
+    type: 'token',
+    subtype: 'sub2api',
+    index: 0,
+    description: 'Sub2API cancellation',
+    apiBasePath: '/backend-api/codex',
+    baseUrl: 'https://chatgpt.com',
+    account_id: 'account-example',
+    credentials: {
+      auth_mode: 'agentIdentity',
+      agent_runtime_id: 'agent-runtime-example',
+      agent_private_key: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+      task_id: '',
+      chatgpt_account_id: 'account-example',
+      chatgpt_user_id: 'user-example',
+      chatgpt_account_is_fedramp: false,
+    },
+  };
+  let releaseCount = 0;
+  let upstreamCount = 0;
+  let allowTaskPreparation;
+  let markTaskPreparationStarted;
+  const taskPreparationGate = new Promise(resolve => {
+    allowTaskPreparation = resolve;
+  });
+  const taskPreparationStarted = new Promise(resolve => {
+    markTaskPreparationStarted = resolve;
+  });
+  const handler = createClaudeMessagesHandler({
+    getConfig: () => ({
+      config,
+      release: () => {
+        releaseCount += 1;
+      },
+    }),
+    ensureSub2ApiTask: async () => {
+      markTaskPreparationStarted();
+      await taskPreparationGate;
+    },
+    createUpstreamRequest: () => {
+      upstreamCount += 1;
+      throw new Error('upstream must not start after cancellation');
+    },
+  });
+  const req = createClaudeRequest({
+    model: 'claude-sonnet-4',
+    max_tokens: 32,
+    messages: [{ role: 'user', content: 'hello' }],
+  });
+  const res = createJsonResponseRecorder();
+  const handling = handler(req, res);
+
+  await taskPreparationStarted;
+  res.emit('close');
+  allowTaskPreparation();
+  await handling;
+
+  assert.equal(releaseCount, 1);
+  assert.equal(upstreamCount, 0);
 });
 
 test('createClaudeMessagesHandler forwards apikey configs with claude support without responses conversion', async () => {
@@ -2305,6 +2755,78 @@ test('createClaudeMessagesHandler retries response.failed event names without pa
     },
   ]);
 });
+
+for (const stream of [false, true]) {
+  test(`createClaudeMessagesHandler records one apikey failure for response.failed without a fallback (${stream ? 'stream' : 'buffered'})`, async () => {
+    const config = {
+      type: 'apikey',
+      index: 0,
+      description: 'only gpt apikey',
+      apiKey: 'upstream-gpt-key',
+      baseUrl: 'https://openai.example.com/v1',
+      support: ['gpt'],
+    };
+    const observations = [];
+    const upstreamError = stream
+      ? {
+        code: 'usage_limit_reached',
+        message: 'You have hit your usage limit.',
+      }
+      : {
+        code: 'server_is_overloaded',
+        message: 'server overloaded',
+      };
+    const handler = createClaudeMessagesHandler({
+      getConfig: () => config,
+      handleRetryableUpstreamError: () => null,
+      observeApiKeyRequestResult: (observedConfig, result) => {
+        observations.push({ observedConfig, result });
+      },
+      createUpstreamRequest: () => ({
+        responsePromise: Promise.resolve(createUpstreamResponse(200, {
+          'content-type': 'text/event-stream',
+        }, [
+          'event: response.failed',
+          `data: ${JSON.stringify({ response: { error: upstreamError } })}`,
+          '',
+        ].join('\n'))),
+        abort() {},
+      }),
+    });
+    const res = createJsonResponseRecorder();
+
+    await handler(createClaudeRequest({
+      model: 'claude-sonnet-4-5',
+      stream,
+      max_tokens: 32,
+      messages: [
+        {
+          role: 'user',
+          content: 'hello',
+        },
+      ],
+    }), res);
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(observations, [
+      {
+        observedConfig: config,
+        result: {
+          ok: false,
+          reason: stream ? 'responses_usage_limit_reached' : 'responses_unknown_error',
+          lastError: `stream:${upstreamError.code}`,
+          switchReason: 'apikey_upstream_failover',
+        },
+      },
+    ]);
+    assert.equal(res.statusCode, stream ? 429 : 502);
+    assert.equal(
+      res.payload.message,
+      stream ? '你已达到使用上限。请稍后再试。' : '上游服务暂时不可用，请稍后再试。',
+    );
+  });
+}
 
 test('createClaudeMessagesHandler retries converted responses stream errors before client commit', async () => {
   const configs = [

@@ -121,7 +121,11 @@ function getUsageLimitMessageKey(...values) {
     normalized.includes("you've hit your usage limit") ||
     normalized.includes('you have hit your usage limit') ||
     normalized.includes('codex/settings/usage') ||
-    normalized.includes('purchase more credits')
+    normalized.includes('purchase more credits') ||
+    (
+      normalized.includes('你已达到使用上限') &&
+      normalized.includes('请稍后再试')
+    )
   ) {
     return 'usage_limit_reached';
   }
@@ -197,6 +201,7 @@ function getAuthFailureKey(payload, bodyText) {
 
 function classifyRetryableResponsesPayloadError({ bodyText, retrySource = 'body' } = {}) {
   const payload = parseJsonObject(bodyText);
+  const rawBodyFallback = payload ? '' : bodyText;
   const errorType = payload && payload.error && typeof payload.error.type === 'string'
     ? payload.error.type
     : '';
@@ -207,12 +212,12 @@ function classifyRetryableResponsesPayloadError({ bodyText, retrySource = 'body'
   const messageKey = getUsageLimitMessageKey(
     getPayloadString(payload, ['error', 'message']),
     getPayloadString(payload, ['message']),
-    bodyText,
+    rawBodyFallback,
   );
   const capacityKey = getModelCapacityMessageKey(
     getPayloadString(payload, ['error', 'message']),
     getPayloadString(payload, ['message']),
-    bodyText,
+    rawBodyFallback,
   );
   const typedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorType) ? errorType : '';
   const codedRetryKey = RETRYABLE_HTTP_ERROR_TYPES.has(errorCode) ? errorCode : '';

@@ -14,9 +14,9 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 当前自动切号主要对以下请求生效：
 
 - 路径命中 `/responses`
-- 当前账号类型是 `token`
+- 当前账号类型是 `token` 或 `apikey`
 
-普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。token-backed Responses 即使收到 HTTP 200，也会检查 JSON 错误对象；其中 `Selected model is at capacity` 会触发同一套账号临时摘除与重放逻辑。`apikey` 配置项不走 Codex responses 事件解析，但直连上游在响应提交前出现非成功状态、请求异常或响应体中断时，也会找同能力池的下一个可用 apikey。
+普通 token 代理请求如果还没把响应提交给客户端，遇到上游非成功 HTTP 状态或请求异常，也会按同样的请求级 failover 规则切到下一个可用配置。Responses 即使收到 HTTP 200，也会检查 JSON/SSE 错误内容；其中 `Selected model is at capacity` 和“你已达到使用上限。请稍后再试。”等已知错误会触发请求级切换。token 会按现有规则直接摘除；apikey 会记录最近 100 个已完成真实请求的错误率，但不会被摘除或改成不可用。切换时选择错误率最低的可用 apikey，无样本按 0%，同率保持配置顺序；没有可切换配置时继续使用当前 apikey。HTTP 200 中识别出的使用上限错误仍改用 HTTP 429 返回。
 
 同一个请求会排除已经失败的账号继续重试，最多重放 2 次；达到上限、没有新的可用配置或响应已经开始写回客户端后，不再继续切号。
 
@@ -26,6 +26,7 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 - HTTP `429` 且 `error.type == "usage_limit_reached"`
 - HTTP `429` 且 `error.type == "usage_not_included"`
+- HTTP 200 JSON/SSE 错误内容包含“你已达到使用上限”且同时包含“请稍后再试”
 - HTTP 非 `200` 且 `error.code == "model_at_capacity"`，或错误消息包含 `Selected model is at capacity`
 - HTTP `401/403` 且能识别为 `unauthorized` / `token_revoked`
 - 其他 HTTP 非 `200` 响应，包括 `201`、`400`、`500`、`503` 等
@@ -104,9 +105,9 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 
 ## 6. 触发切号后的行为
 
-一旦命中第 2 节里的任一条件，当前逻辑会先按请求级调度寻找重试账号。额度错误、上游错误会把当前账号整体摘除；模型降级只排除当前请求里的这个账号，不改变账号可用性。
+一旦命中第 2 节里的任一条件，当前逻辑会先按请求级调度寻找重试账号。token 的额度错误、上游错误会把当前账号整体摘除；apikey 的错误先计入滑动窗口；模型降级只排除当前请求里的这个账号，不改变账号可用性。
 
-额度错误或上游错误会：
+token 的额度错误或上游错误会：
 
 1. 调用 `markConfigUnavailable(...)`
 2. 把当前账号的：
@@ -115,6 +116,14 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
    - `runtime.lastError = <retrySource>:<retryKey>`
    - `runtime.unavailableUntil = now + token 冷却时间`
 3. 调度会跳过仍在冷却期内的 token 账号
+
+apikey 的错误会：
+
+1. 把本次请求结果记入最近 100 个已完成真实请求的计数窗口并更新错误率
+2. 当前请求排除这个 apikey，在剩余可用 apikey 中选择错误率最低者
+3. 无历史样本的候选按 0% 错误率处理，同错误率按配置顺序选择
+4. apikey 不使用 token 的 `runtime.unavailableUntil` 冷却期
+5. apikey 只执行请求级切换，不因业务错误摘除；没有下一候选时继续使用当前 apikey
 
 模型降级会：
 
@@ -133,9 +142,10 @@ Images 业务接口的 token 兼容路径也会调用 Codex Responses，但它�
 也就是说：
 
 - `usage_not_included` 当前和其他额度类错误一致
-- 命中额度或上游错误后会把当前账号整体摘除并进入冷却
+- token 命中额度或上游错误后会把当前账号整体摘除并进入冷却
+- apikey 命中错误后为当前请求选择最近 100 个请求错误率最低的下一候选；不整体摘除，没有候选时继续使用当前配置
 - 命中 `responses_model_downgraded` 后只切走本次请求，并标记模型观测为已降级
-- 冷却结束后允许作为无可用账号时的 fallback 探测；额度刷新成功会直接恢复并清空冷却
+- token 冷却结束后允许作为无可用账号时的 fallback 探测；额度刷新成功会直接恢复并清空冷却
 
 ## 7. 无可用账号或无法重试时的退化行为
 

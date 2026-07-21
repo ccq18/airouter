@@ -6,6 +6,11 @@ const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
 const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const SUPPORTED_APIKEY_CAPABILITIES = new Set(['gpt', 'claude']);
 const SUPPORTED_CONFIG_TYPES = new Set(['token', 'apikey', 'claude_token']);
+const {
+    buildSub2ApiAuthHeaders,
+    isSub2ApiConfig,
+    normalizeSub2ApiCredentials,
+} = require('./sub2api-agent-identity');
 
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -285,6 +290,18 @@ function validateConfigItemArray(configs, fieldName) {
                 throw new Error(`配置文件 ${fieldName}[${index}] ${err.message}`);
             }
         }
+
+        if (configType === 'token' && normalizeString(config.subtype)) {
+            if (!isSub2ApiConfig(config)) {
+                throw new Error(`配置文件 ${fieldName}[${index}] token subtype 仅支持 sub2api`);
+            }
+
+            try {
+                normalizeSub2ApiCredentials(config.credentials);
+            } catch (err) {
+                throw new Error(`配置文件 ${fieldName}[${index}] ${err.message}`);
+            }
+        }
     }
 }
 
@@ -321,6 +338,31 @@ function resolveResponsesOptions(parsed) {
 }
 
 function createTokenRuntimeConfig(config, index) {
+    if (isSub2ApiConfig(config)) {
+        const credentials = normalizeSub2ApiCredentials(config.credentials);
+        const enabled = Boolean(
+            credentials.agent_runtime_id &&
+            credentials.agent_private_key &&
+            credentials.chatgpt_account_id &&
+            credentials.chatgpt_user_id
+        );
+
+        return {
+            type: 'token',
+            subtype: 'sub2api',
+            index,
+            baseUrl: CHATGPT_BASE_URL,
+            apiBasePath: CODEX_API_BASE_PATH,
+            access_token: '',
+            refresh_token: '',
+            client_id: '',
+            account_id: credentials.chatgpt_account_id,
+            credentials,
+            description: config.description || credentials.email || `Sub2API 配置 #${index + 1}`,
+            runtime: createDefaultTokenRuntime(enabled)
+        };
+    }
+
     const enabled = Boolean(config.access_token && config.account_id);
 
     return {
@@ -408,7 +450,7 @@ function createRuntimeConfigs(parsed) {
     });
 }
 
-function buildAuthHeadersForConfig(config) {
+function buildAuthHeadersForConfig(config, options = {}) {
     if (config.type === 'apikey') {
         return {
             authorization: `Bearer ${config.apiKey}`
@@ -419,6 +461,10 @@ function buildAuthHeadersForConfig(config) {
         return {
             authorization: `Bearer ${config.access_token}`
         };
+    }
+
+    if (isSub2ApiConfig(config)) {
+        return buildSub2ApiAuthHeaders(config, options);
     }
 
     return {

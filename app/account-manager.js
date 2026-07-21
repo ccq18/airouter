@@ -1,12 +1,14 @@
 const { requestBuffered } = require('./upstream-request');
 const { isSuccessfulResponsesStatus } = require('./responses-failover');
 const crypto = require('node:crypto');
+const {
+  isSub2ApiConfig,
+  isSub2ApiTaskInvalidResponse,
+} = require('./sub2api-agent-identity');
 
 const SESSION_HASH_LENGTH = 12;
 const APIKEY_RECOVERY_RESPONSES_PATH = '/v1/responses';
-const APIKEY_REQUEST_WINDOW_SIZE = 10;
-const APIKEY_REQUEST_FAILURE_THRESHOLD = 3;
-const APIKEY_REQUEST_SAMPLE_TTL_MS = 30 * 60 * 1000;
+const APIKEY_REQUEST_WINDOW_SIZE = 100;
 const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
 const DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS = 60 * 60 * 1000;
 const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 30 * 1000;
@@ -38,6 +40,8 @@ function createAccountManager(options) {
     shouldUseQuotaMonitoring,
     refreshTokenFn = null,
     persistTokenRefreshFn = async () => {},
+    ensureSub2ApiTaskFn = async () => '',
+    recoverSub2ApiTaskFn = async () => '',
     sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
@@ -485,11 +489,9 @@ function createAccountManager(options) {
     };
   }
 
-  function pruneApiKeyRequestResults(config, observedAt = now()) {
-    const cutoff = observedAt - APIKEY_REQUEST_SAMPLE_TTL_MS;
+  function trimApiKeyRequestResults(config, observedAt = now()) {
     const results = getApiKeyRequestResults(config)
-      .map(sample => normalizeApiKeyRequestSample(sample, observedAt))
-      .filter(sample => sample.at >= cutoff);
+      .map(sample => normalizeApiKeyRequestSample(sample, observedAt));
     if (results.length > APIKEY_REQUEST_WINDOW_SIZE) {
       results.splice(0, results.length - APIKEY_REQUEST_WINDOW_SIZE);
     }
@@ -498,17 +500,21 @@ function createAccountManager(options) {
     return results;
   }
 
-  function summarizeApiKeyRequestResults(config) {
-    const results = pruneApiKeyRequestResults(config);
+  function buildApiKeyRequestSummary(results) {
     const failureCount = results.reduce((count, sample) => sample.ok ? count : count + 1, 0);
+    const sampleSize = results.length;
 
     return {
       failureCount,
-      sampleSize: results.length,
-      failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+      sampleSize,
+      errorRate: sampleSize > 0 ? failureCount / sampleSize : 0,
       windowSize: APIKEY_REQUEST_WINDOW_SIZE,
-      sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
     };
+  }
+
+  function summarizeApiKeyRequestResults(config) {
+    const results = trimApiKeyRequestResults(config);
+    return buildApiKeyRequestSummary(results);
   }
 
   function summarizeApiKeyRecovery(config) {
@@ -551,13 +557,13 @@ function createAccountManager(options) {
         unavailable: false,
         failureCount: 0,
         sampleSize: 0,
-        failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+        errorRate: 0,
         windowSize: APIKEY_REQUEST_WINDOW_SIZE,
       };
     }
 
     const observedAt = now();
-    const results = pruneApiKeyRequestResults(config, observedAt);
+    const results = trimApiKeyRequestResults(config, observedAt);
     results.push({
       ok: Boolean(result.ok),
       at: observedAt,
@@ -569,29 +575,12 @@ function createAccountManager(options) {
     }
     config.runtime.apiKeyRequestResults = results;
 
-    const failureCount = results.reduce((count, sample) => sample.ok ? count : count + 1, 0);
-    const summary = {
-      failureCount,
-      sampleSize: results.length,
-      failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
-      windowSize: APIKEY_REQUEST_WINDOW_SIZE,
-      sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
-    };
-    const unavailable = summary.failureCount >= APIKEY_REQUEST_FAILURE_THRESHOLD;
-    let selectedConfig = config;
-
-    if (unavailable && config.runtime.available !== false) {
-      selectedConfig = markConfigUnavailable(config, result.reason || 'apikey_upstream_error', {
-        allowSwitch: result.allowSwitch,
-        lastError: result.lastError || null,
-        switchReason: result.switchReason || 'apikey_upstream_failover',
-      });
-    }
+    const summary = buildApiKeyRequestSummary(results);
 
     return {
       ...summary,
-      unavailable,
-      selectedConfig,
+      unavailable: false,
+      selectedConfig: config,
     };
   }
 
@@ -613,6 +602,26 @@ function createAccountManager(options) {
     }
 
     return -1;
+  }
+
+  function findLowestErrorRateAvailableApiKeyIndex(predicate = () => true) {
+    let selectedIndex = -1;
+    let selectedErrorRate = Number.POSITIVE_INFINITY;
+
+    for (let index = 0; index < configs.length; index += 1) {
+      const config = configs[index];
+      if (config.type !== 'apikey' || !predicate(config) || !isConfigAvailable(config)) {
+        continue;
+      }
+
+      const errorRate = summarizeApiKeyRequestResults(config).errorRate;
+      if (errorRate < selectedErrorRate) {
+        selectedIndex = index;
+        selectedErrorRate = errorRate;
+      }
+    }
+
+    return selectedIndex;
   }
 
   /**
@@ -639,17 +648,17 @@ function createAccountManager(options) {
     return Number.isInteger(staticIndex) ? staticIndex : null;
   }
 
-  function ensureActiveStaticConfig(poolKey, reason = 'select', predicate = () => true) {
+  function ensureActiveStaticConfig(poolKey, reason = 'select', predicate = () => true, options = {}) {
     const normalizedPoolKey = normalizeStaticPoolKey(poolKey);
     const currentConfig = getActiveStaticConfig(normalizedPoolKey, predicate);
-    if (currentConfig && isConfigAvailable(currentConfig)) {
+    if (!options.preferLowestErrorRate && currentConfig && isConfigAvailable(currentConfig)) {
       return currentConfig;
     }
 
-    const priorityIndex = findHighestPriorityAvailableConfigIndex(predicate);
-    if (priorityIndex !== -1) {
-      const nextConfig = configs[priorityIndex];
-      staticActiveConfigIndices.set(normalizedPoolKey, priorityIndex);
+    const lowestErrorRateIndex = findLowestErrorRateAvailableApiKeyIndex(predicate);
+    if (lowestErrorRateIndex !== -1) {
+      const nextConfig = configs[lowestErrorRateIndex];
+      staticActiveConfigIndices.set(normalizedPoolKey, lowestErrorRateIndex);
       if (currentConfig && currentConfig !== nextConfig && reason !== 'startup') {
         warn(`账号切换: ${getAccountLabel(currentConfig)} -> ${getAccountLabel(nextConfig)} (${reason})`);
       }
@@ -1137,18 +1146,28 @@ function createAccountManager(options) {
   }
 
   async function requestQuotaPayload(config, targetUrl) {
+    await ensureSub2ApiTaskFn(config);
     const result = await withQuotaCheckTimeout(requestBufferedFn({
       method: 'GET',
       targetUrl,
-      headers: buildAuthHeadersForConfig(config),
+      headers: buildAuthHeadersForConfig(config, { purpose: 'quota' }),
       timeoutMs: quotaCheckTimeoutMs,
       maxRedirects: 5,
     }));
 
-    return {
-      result,
-      payload: JSON.parse(result.bodyText),
-    };
+    try {
+      return {
+        result,
+        payload: JSON.parse(result.bodyText),
+        payloadParseError: null,
+      };
+    } catch (err) {
+      return {
+        result,
+        payload: null,
+        payloadParseError: new Error('quota check response is not valid JSON'),
+      };
+    }
   }
 
   async function refreshConfigAccessToken(config) {
@@ -1240,10 +1259,23 @@ function createAccountManager(options) {
     const targetUrl = new URL(quotaCheckPath, config.baseUrl).toString();
 
     try {
-      let { result, payload } = await requestQuotaPayload(config, targetUrl);
+      let { result, payload, payloadParseError } = await requestQuotaPayload(config, targetUrl);
       if (result.statusCode < 200 || result.statusCode >= 300) {
+        if (isSub2ApiConfig(config) && isSub2ApiTaskInvalidResponse(result.statusCode, result.bodyText)) {
+          const expectedTaskId = normalizeString(config.credentials && config.credentials.task_id);
+          await recoverSub2ApiTaskFn(config, expectedTaskId);
+          ({ result, payload, payloadParseError } = await requestQuotaPayload(config, targetUrl));
+          if (result.statusCode >= 200 && result.statusCode < 300) {
+            if (payloadParseError) {
+              throw payloadParseError;
+            }
+            applyQuotaPayload(config, payload, { allowSwitch });
+            return config.runtime;
+          }
+        }
+
         const missingCredentials = isMissingCredentialsPayload(payload);
-        if (isRefreshableQuotaAuthFailure(result, payload)) {
+        if (!isSub2ApiConfig(config) && isRefreshableQuotaAuthFailure(result, payload)) {
           let refreshed = false;
           try {
             refreshed = await refreshConfigAccessToken(config);
@@ -1252,8 +1284,11 @@ function createAccountManager(options) {
             return config.runtime;
           }
           if (refreshed) {
-            ({ result, payload } = await requestQuotaPayload(config, targetUrl));
+            ({ result, payload, payloadParseError } = await requestQuotaPayload(config, targetUrl));
             if (result.statusCode >= 200 && result.statusCode < 300) {
+              if (payloadParseError) {
+                throw payloadParseError;
+              }
               applyQuotaPayload(config, payload, { allowSwitch });
               return config.runtime;
             }
@@ -1268,6 +1303,9 @@ function createAccountManager(options) {
         throw new Error(`quota check status ${result.statusCode}`);
       }
 
+      if (payloadParseError) {
+        throw payloadParseError;
+      }
       applyQuotaPayload(config, payload, { allowSwitch });
     } catch (err) {
       recordQuotaCheckFailure(config, err);
