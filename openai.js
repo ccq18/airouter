@@ -651,16 +651,19 @@ function acquireFirstAvailableStaticConfigLease(manager, predicate, sessionKey =
 
 function acquireAvailableStaticConfigLease(manager, reason, predicate, sessionKey = '', excludedConfigs = [], poolKey = 'default') {
     const isCandidate = item => predicate(item) && !isExcludedRuntimeConfig(item, excludedConfigs);
+    const preferLowestErrorRate = excludedConfigs.length > 0;
     if (
         typeof manager.getActiveStaticConfig === 'function' &&
         typeof manager.ensureActiveStaticConfig === 'function'
     ) {
         const currentConfig = manager.getActiveStaticConfig(poolKey, isCandidate);
-        if (currentConfig && isRuntimeConfigAvailable(currentConfig)) {
+        if (!preferLowestErrorRate && currentConfig && isRuntimeConfigAvailable(currentConfig)) {
             return createStaticConfigLease(currentConfig, sessionKey);
         }
 
-        const nextConfig = manager.ensureActiveStaticConfig(poolKey, reason, isCandidate);
+        const nextConfig = manager.ensureActiveStaticConfig(poolKey, reason, isCandidate, {
+            preferLowestErrorRate,
+        });
         if (nextConfig && isRuntimeConfigAvailable(nextConfig)) {
             return createStaticConfigLease(nextConfig, sessionKey);
         }
@@ -1631,9 +1634,8 @@ function serializeAccountStatus(accountStatus) {
         api_key_request_window: accountStatus.apiKeyRequestWindow ? {
             failure_count: accountStatus.apiKeyRequestWindow.failureCount,
             sample_size: accountStatus.apiKeyRequestWindow.sampleSize,
-            failure_threshold: accountStatus.apiKeyRequestWindow.failureThreshold,
+            error_rate: accountStatus.apiKeyRequestWindow.errorRate,
             window_size: accountStatus.apiKeyRequestWindow.windowSize,
-            sample_ttl_ms: accountStatus.apiKeyRequestWindow.sampleTtlMs,
         } : null,
         api_key_recovery: accountStatus.apiKeyRecovery ? {
             enabled: accountStatus.apiKeyRecovery.enabled,

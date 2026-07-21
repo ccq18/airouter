@@ -1006,6 +1006,17 @@ test('generic OpenAI proxy tries token configs before GPT apikey fallback', () =
   assert.doesNotMatch(acquireProxyLeaseBody, /getActiveConfig\(item => isGptApiKeyProxyConfig/);
 });
 
+test('apikey failover forces lowest-error-rate selection even when the static focus remains available', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const acquireStart = source.indexOf('function acquireAvailableStaticConfigLease(');
+  const acquireEnd = source.indexOf('function acquireTokenThenGptApiKeyLease(', acquireStart);
+  const acquireSource = source.slice(acquireStart, acquireEnd);
+
+  assert.match(acquireSource, /const preferLowestErrorRate = excludedConfigs\.length > 0/);
+  assert.match(acquireSource, /if \(!preferLowestErrorRate && currentConfig && isRuntimeConfigAvailable\(currentConfig\)\)/);
+  assert.match(acquireSource, /preferLowestErrorRate,/);
+});
+
 test('createClaudeMessagesHandler converts apikey configs without claude support through responses compatibility', async () => {
   const upstreamRequests = [];
   const apiKeyResults = [];

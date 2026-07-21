@@ -4,9 +4,7 @@ const crypto = require('node:crypto');
 
 const SESSION_HASH_LENGTH = 12;
 const APIKEY_RECOVERY_RESPONSES_PATH = '/v1/responses';
-const APIKEY_REQUEST_WINDOW_SIZE = 10;
-const APIKEY_REQUEST_FAILURE_THRESHOLD = 3;
-const APIKEY_REQUEST_SAMPLE_TTL_MS = 5 * 60 * 1000;
+const APIKEY_REQUEST_WINDOW_SIZE = 100;
 const TOKEN_QUOTA_CHECK_FAILURE_THRESHOLD = 3;
 const DEFAULT_TOKEN_UNAVAILABLE_COOLDOWN_MS = 60 * 60 * 1000;
 const DEFAULT_APIKEY_RECOVERY_TIMEOUT_MS = 30 * 1000;
@@ -485,11 +483,9 @@ function createAccountManager(options) {
     };
   }
 
-  function pruneApiKeyRequestResults(config, observedAt = now()) {
-    const cutoff = observedAt - APIKEY_REQUEST_SAMPLE_TTL_MS;
+  function trimApiKeyRequestResults(config, observedAt = now()) {
     const results = getApiKeyRequestResults(config)
-      .map(sample => normalizeApiKeyRequestSample(sample, observedAt))
-      .filter(sample => sample.at >= cutoff);
+      .map(sample => normalizeApiKeyRequestSample(sample, observedAt));
     if (results.length > APIKEY_REQUEST_WINDOW_SIZE) {
       results.splice(0, results.length - APIKEY_REQUEST_WINDOW_SIZE);
     }
@@ -498,17 +494,21 @@ function createAccountManager(options) {
     return results;
   }
 
-  function summarizeApiKeyRequestResults(config) {
-    const results = pruneApiKeyRequestResults(config);
+  function buildApiKeyRequestSummary(results) {
     const failureCount = results.reduce((count, sample) => sample.ok ? count : count + 1, 0);
+    const sampleSize = results.length;
 
     return {
       failureCount,
-      sampleSize: results.length,
-      failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+      sampleSize,
+      errorRate: sampleSize > 0 ? failureCount / sampleSize : 0,
       windowSize: APIKEY_REQUEST_WINDOW_SIZE,
-      sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
     };
+  }
+
+  function summarizeApiKeyRequestResults(config) {
+    const results = trimApiKeyRequestResults(config);
+    return buildApiKeyRequestSummary(results);
   }
 
   function summarizeApiKeyRecovery(config) {
@@ -551,13 +551,13 @@ function createAccountManager(options) {
         unavailable: false,
         failureCount: 0,
         sampleSize: 0,
-        failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
+        errorRate: 0,
         windowSize: APIKEY_REQUEST_WINDOW_SIZE,
       };
     }
 
     const observedAt = now();
-    const results = pruneApiKeyRequestResults(config, observedAt);
+    const results = trimApiKeyRequestResults(config, observedAt);
     results.push({
       ok: Boolean(result.ok),
       at: observedAt,
@@ -569,21 +569,10 @@ function createAccountManager(options) {
     }
     config.runtime.apiKeyRequestResults = results;
 
-    const failureCount = results.reduce((count, sample) => sample.ok ? count : count + 1, 0);
-    const summary = {
-      failureCount,
-      sampleSize: results.length,
-      failureThreshold: APIKEY_REQUEST_FAILURE_THRESHOLD,
-      windowSize: APIKEY_REQUEST_WINDOW_SIZE,
-      sampleTtlMs: APIKEY_REQUEST_SAMPLE_TTL_MS,
-    };
-    const failureThresholdReached = summary.failureCount >= APIKEY_REQUEST_FAILURE_THRESHOLD;
-    const switchRecommended = !Boolean(result.ok) && failureThresholdReached;
+    const summary = buildApiKeyRequestSummary(results);
 
     return {
       ...summary,
-      failureThresholdReached,
-      switchRecommended,
       unavailable: false,
       selectedConfig: config,
     };
@@ -607,6 +596,26 @@ function createAccountManager(options) {
     }
 
     return -1;
+  }
+
+  function findLowestErrorRateAvailableApiKeyIndex(predicate = () => true) {
+    let selectedIndex = -1;
+    let selectedErrorRate = Number.POSITIVE_INFINITY;
+
+    for (let index = 0; index < configs.length; index += 1) {
+      const config = configs[index];
+      if (config.type !== 'apikey' || !predicate(config) || !isConfigAvailable(config)) {
+        continue;
+      }
+
+      const errorRate = summarizeApiKeyRequestResults(config).errorRate;
+      if (errorRate < selectedErrorRate) {
+        selectedIndex = index;
+        selectedErrorRate = errorRate;
+      }
+    }
+
+    return selectedIndex;
   }
 
   /**
@@ -633,17 +642,17 @@ function createAccountManager(options) {
     return Number.isInteger(staticIndex) ? staticIndex : null;
   }
 
-  function ensureActiveStaticConfig(poolKey, reason = 'select', predicate = () => true) {
+  function ensureActiveStaticConfig(poolKey, reason = 'select', predicate = () => true, options = {}) {
     const normalizedPoolKey = normalizeStaticPoolKey(poolKey);
     const currentConfig = getActiveStaticConfig(normalizedPoolKey, predicate);
-    if (currentConfig && isConfigAvailable(currentConfig)) {
+    if (!options.preferLowestErrorRate && currentConfig && isConfigAvailable(currentConfig)) {
       return currentConfig;
     }
 
-    const priorityIndex = findHighestPriorityAvailableConfigIndex(predicate);
-    if (priorityIndex !== -1) {
-      const nextConfig = configs[priorityIndex];
-      staticActiveConfigIndices.set(normalizedPoolKey, priorityIndex);
+    const lowestErrorRateIndex = findLowestErrorRateAvailableApiKeyIndex(predicate);
+    if (lowestErrorRateIndex !== -1) {
+      const nextConfig = configs[lowestErrorRateIndex];
+      staticActiveConfigIndices.set(normalizedPoolKey, lowestErrorRateIndex);
       if (currentConfig && currentConfig !== nextConfig && reason !== 'startup') {
         warn(`账号切换: ${getAccountLabel(currentConfig)} -> ${getAccountLabel(nextConfig)} (${reason})`);
       }
