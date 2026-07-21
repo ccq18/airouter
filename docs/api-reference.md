@@ -46,7 +46,7 @@ Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配�
 
 `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度和模型别名逻辑；仅该前缀会启用 CLIProxyAPI 风格的额外请求体规范化。
 
-业务接口的 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；`/admin/*`、`/health`、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑。上游 `apikey` 在响应提交给客户端前出现非 200 HTTP 状态、请求失败或响应体中断时，Airouter 会先在本次请求内排除当前配置并尝试切到下一个可用配置；如果没有可切换配置，才按当前上游错误返回给客户端。token-backed `/v1/responses` 即使收到 HTTP 200，只要 JSON 错误对象表明账号额度、凭证或模型容量不可用，也会在响应提交前切换账号；例如 `Selected model is at capacity` 会临时摘除当前 token 并重放到下一个可用配置。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。`apikey` 是否被临时标记为不可用仍由统计窗口决定：最近 30 分钟内最多 10 个已完成真实请求中累计 3 次失败后才会标记不可用。
+业务接口的 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；`/admin/*`、`/health`、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑。上游 `apikey` 在响应提交给客户端前出现非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，Airouter 会先在本次请求内排除当前配置并尝试切到下一个可用配置；如果没有可切换配置，才按当前上游错误返回给客户端。token 或 apikey-backed `/v1/responses` 即使收到 HTTP 200，只要 JSON 错误对象表明账号额度、凭证或模型容量不可用，也会在响应提交前切换账号；例如 `Selected model is at capacity` 会临时摘除当前 token 并重放到下一个可用配置。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。`apikey` 是否被临时标记为不可用仍由统计窗口决定：最近 5 分钟内最多 10 个已完成真实请求中累计 3 次失败后才会标记不可用。
 
 ## GET /health
 

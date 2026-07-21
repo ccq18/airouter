@@ -12,9 +12,11 @@ const {
   createResponseModelObserver,
   defaultContentTypeForProxyResponse,
   extractResponseModelFromPayload,
+  getResponsesRetryForwardStatusCode,
   hasRequestFailoverRetriesRemaining,
   isStreamingResponsesRequest,
   isResponsesFailoverInspectionCandidate,
+  isResponsesFailoverConfig,
   MAX_REQUEST_FAILOVER_RETRIES,
   normalizeProxyJsonBody,
   shouldForceResponsesStoreFalse,
@@ -187,6 +189,40 @@ test('server classifies retryable errors in successful Responses JSON before for
 
   assert.match(inspectionSource, /const payloadClassification = classifyRetryableResponsesPayloadError\(\{\s*bodyText,/);
   assert.match(inspectionSource, /action: 'retry',\s*classification: payloadClassification/);
+});
+
+test('server inspects apikey Responses payload errors and records them in the failure window', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const retryStart = source.indexOf("if (inspection.action === 'retry')");
+  const retryEnd = source.indexOf("if (inspection.action === 'forward-buffered')", retryStart);
+  const retrySource = source.slice(retryStart, retryEnd);
+
+  assert.equal(isResponsesFailoverConfig({ type: 'apikey' }, '/v1/responses'), true);
+  assert.equal(isResponsesFailoverConfig({ type: 'token' }, '/backend-api/codex/responses'), true);
+  assert.equal(isResponsesFailoverConfig({ type: 'claude_token' }, '/v1/responses'), false);
+  assert.equal(isResponsesFailoverConfig({ type: 'apikey' }, '/v1/chat/completions'), false);
+  assert.equal(getResponsesRetryForwardStatusCode(200, {
+    reason: 'responses_usage_limit_reached',
+  }), 429);
+  assert.equal(getResponsesRetryForwardStatusCode(429, {
+    reason: 'responses_usage_limit_reached',
+  }), 429);
+  assert.equal(getResponsesRetryForwardStatusCode(200, {
+    reason: 'responses_model_downgraded',
+  }), 200);
+  assert.match(retrySource, /config\.type === 'apikey'/);
+  assert.match(retrySource, /recordCurrentApiKeyRequestResult\(\{\s*ok: false,/);
+});
+
+test('server records buffered apikey success only after committing the response', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
+  const bufferedStart = source.indexOf("if (inspection.action === 'forward-buffered')");
+  const bufferedEnd = source.indexOf("if (inspection.action === 'forward-stream')", bufferedStart);
+  const bufferedSource = source.slice(bufferedStart, bufferedEnd);
+
+  assert.ok(bufferedSource.indexOf('writeBufferedUpstreamResponse(') >= 0);
+  assert.ok(bufferedSource.indexOf('recordCurrentApiKeyRequestResult({ ok: true })') >
+    bufferedSource.indexOf('writeBufferedUpstreamResponse('));
 });
 
 test('shouldForceResponsesStoreFalse only adapts token-backed Codex responses requests', () => {

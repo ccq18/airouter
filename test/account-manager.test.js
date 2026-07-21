@@ -826,7 +826,7 @@ test('getAccountStatus exposes token quota failure and apikey request window sum
     sampleSize: 2,
     failureThreshold: 3,
     windowSize: 10,
-    sampleTtlMs: 30 * 60 * 1000,
+    sampleTtlMs: 5 * 60 * 1000,
   });
   assert.deepEqual(manager.getAccountStatus(apiKeyConfig).apiKeyRecovery, {
     enabled: true,
@@ -1263,7 +1263,7 @@ test('recordApiKeyRequestResult expires old apikey failures outside the TTL wind
     });
   }
 
-  currentTime += 31 * 60 * 1000;
+  currentTime += 5 * 60 * 1000 + 1;
   const result = manager.recordApiKeyRequestResult(configs[0], {
     ok: false,
     reason: 'apikey_rate_limited',
@@ -1275,6 +1275,45 @@ test('recordApiKeyRequestResult expires old apikey failures outside the TTL wind
   assert.equal(result.failureCount, 1);
   assert.equal(result.sampleSize, 1);
   assert.equal(configs[0].runtime.available, true);
+});
+
+test('recordApiKeyRequestResult retains apikey failures at the five-minute TTL boundary', () => {
+  const configs = [
+    createConfig(0, { reason: 'apikey' }, {
+      type: 'apikey',
+      baseUrl: 'https://api.example.com/v1',
+      apiBasePath: '',
+      apiKey: 'sk-1',
+      support: ['gpt'],
+    }),
+    createConfig(1, { available: true, reason: 'ok' }),
+  ];
+  let currentTime = 1713337200000;
+  const { manager } = createManager(configs, {
+    now: () => currentTime,
+  });
+
+  for (let index = 0; index < 2; index += 1) {
+    manager.recordApiKeyRequestResult(configs[0], {
+      ok: false,
+      reason: 'apikey_rate_limited',
+      lastError: 'http:429',
+      switchReason: 'apikey_upstream_failover',
+    });
+  }
+
+  currentTime += 5 * 60 * 1000;
+  const result = manager.recordApiKeyRequestResult(configs[0], {
+    ok: false,
+    reason: 'apikey_rate_limited',
+    lastError: 'http:429',
+    switchReason: 'apikey_upstream_failover',
+  });
+
+  assert.equal(result.unavailable, true);
+  assert.equal(result.failureCount, 3);
+  assert.equal(result.sampleSize, 3);
+  assert.equal(configs[0].runtime.available, false);
 });
 
 test('activateConfig restores an unavailable apikey config before switching to it', () => {

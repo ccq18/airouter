@@ -61,8 +61,7 @@ test('refreshConfigAdminResponse skips quota refresh when no token configs exist
 });
 
 test('serializeAccountStatus includes apikey recovery probe observability', () => {
-  assert.deepEqual(
-    serializeAccountStatus({
+  const serialized = serializeAccountStatus({
       index: 1,
       description: 'gpt key',
       label: '#2 gpt key',
@@ -82,7 +81,7 @@ test('serializeAccountStatus includes apikey recovery probe observability', () =
         sampleSize: 5,
         failureThreshold: 3,
         windowSize: 10,
-        sampleTtlMs: 1800000,
+        sampleTtlMs: 300000,
       },
       apiKeyRecovery: {
         enabled: true,
@@ -100,7 +99,11 @@ test('serializeAccountStatus includes apikey recovery probe observability', () =
       responseModel: null,
       runtimeSummary: '可用=否 | 状态=API Key 被限流',
       summaryLine: '#2 gpt key | 可用=否 | 状态=API Key 被限流',
-    }).api_key_recovery,
+    });
+
+  assert.equal(serialized.api_key_request_window.sample_ttl_ms, 300000);
+  assert.deepEqual(
+    serialized.api_key_recovery,
     {
       enabled: true,
       pending: true,

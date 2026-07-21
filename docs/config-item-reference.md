@@ -89,7 +89,7 @@
 - `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
 - 每分钟额度轮询只检查当前活动配置（当前活动配置为 `token` 时）；每 3 分钟全量校正会检查所有 `token` 配置项
 - 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
-- `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换；最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用
+- `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换；最近 5 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用
 - 每 3 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.4-mini`，可通过该配置项的 `health.model` 覆盖
 - token 请求调度：OpenAI token 和 Claude token 不再依赖手动“切换”焦点，只按运行态可用/不可用参与对应链路选择。OpenAI token 有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择。Claude token 按配置顺序选择当前可用账号，绑定本地 fake token 的请求只会使用绑定且可用的 Claude token
 - 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
@@ -166,7 +166,7 @@
 - `description`
   - 本地展示用的描述文本
 - `apikey` 配置项不参与 Codex quota 轮询
-- `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；如果没有可切换配置，才透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。是否临时标记为不可用仍按最近 30 分钟内最多 10 个已完成真实请求累计 3 次失败判断
+- `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，会在本次请求内先尝试切到下一个可用配置；如果没有可切换配置，才透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。是否临时标记为不可用仍按最近 5 分钟内最多 10 个已完成真实请求累计 3 次失败判断
 - 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `30000ms`（30 秒），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
 - 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
 - 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`

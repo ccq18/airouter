@@ -709,13 +709,27 @@ function acquireTokenThenGptApiKeyLease(manager, reason, sessionKey, excludedCon
     });
 }
 
+function isResponsesFailoverConfig(config, requestUrl) {
+    return Boolean(
+        config &&
+        (config.type === 'token' || config.type === 'apikey') &&
+        isResponsesPath(requestUrl)
+    );
+}
+
 function canAttemptResponsesFailover(config, requestUrl) {
     return Boolean(
         accountManager &&
-        config &&
-        config.type === 'token' &&
-        isResponsesPath(requestUrl)
+        isResponsesFailoverConfig(config, requestUrl)
     );
+}
+
+function getResponsesRetryForwardStatusCode(statusCode, classification) {
+    return isSuccessfulResponsesStatus(statusCode) &&
+        classification &&
+        classification.reason === 'responses_usage_limit_reached'
+        ? 429
+        : statusCode;
 }
 
 function canAttemptTokenFailover(config) {
@@ -2694,14 +2708,15 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
         }
 
         const tokenFailure = classifyTokenUpstreamFailure(config, statusCode);
-        const shouldInspectResponses = canAttemptResponsesFailover(config, req.url)
+        const shouldInspectResponses = !apiKeyFailure
+            && canAttemptResponsesFailover(config, req.url)
             && isResponsesFailoverInspectionCandidate(statusCode, response.headers, {
                 requestedModel: requestedResponseModel,
             });
 
         if (shouldInspectResponses) {
             const inspection = await inspectResponsesUpstreamForFailover(response, statusCode, response.headers, {
-                requestedModel: requestedResponseModel,
+                requestedModel: config.type === 'token' ? requestedResponseModel : '',
             });
 
             if (inspection.action === 'retry') {
@@ -2715,10 +2730,22 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                         downgraded: true,
                     });
                 } else if (shouldMarkResponsesFailoverUnavailable(inspection.classification)) {
-                    accountManager.markConfigUnavailable(config, inspection.classification.reason, {
-                        lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
-                        switchReason: 'responses_failover',
-                    });
+                    if (config.type === 'apikey') {
+                        const apiKeyResult = recordCurrentApiKeyRequestResult({
+                            ok: false,
+                            reason: inspection.classification.reason,
+                            lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                            switchReason: 'apikey_upstream_failover',
+                        });
+                        if (apiKeyResult && apiKeyResult.unavailable) {
+                            warn(`apikey responses 上游不可用: #${config.index + 1} ${config.description} (${inspection.classification.retrySource}:${inspection.classification.retryKey}, 最近 ${apiKeyResult.sampleSize} 次失败 ${apiKeyResult.failureCount} 次)`);
+                        }
+                    } else {
+                        accountManager.markConfigUnavailable(config, inspection.classification.reason, {
+                            lastError: `${inspection.classification.retrySource}:${inspection.classification.retryKey}`,
+                            switchReason: 'responses_failover',
+                        });
+                    }
                 }
 
                 const nextLease = acquireFailoverLease(modelDowngraded ? 'responses_model_downgrade' : 'responses_failover');
@@ -2748,11 +2775,12 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     nextLease.release();
                 }
 
+                const forwardStatusCode = getResponsesRetryForwardStatusCode(statusCode, inspection.classification);
                 if (inspection.forwardMode === 'buffered') {
-                    observeBufferedResponseModel(statusCode, response.headers, inspection.bodyBuffer || Buffer.alloc(0));
+                    observeBufferedResponseModel(forwardStatusCode, response.headers, inspection.bodyBuffer || Buffer.alloc(0));
                     upstreamResponseHeaders = writeBufferedUpstreamResponse(
                         res,
-                        statusCode,
+                        forwardStatusCode,
                         response.headers,
                         inspection.bodyBuffer || Buffer.alloc(0)
                     ).headers;
@@ -2762,7 +2790,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     return;
                 }
 
-                await startForwardingResponse(response, statusCode, response.headers, inspection.initialChunks || []);
+                await startForwardingResponse(response, forwardStatusCode, response.headers, inspection.initialChunks || []);
                 return;
             }
 
@@ -2774,6 +2802,7 @@ function proxyRequest(req, res, config, body, originalUrl, options = {}) {
                     response.headers,
                     inspection.bodyBuffer || Buffer.alloc(0)
                 ).headers;
+                recordCurrentApiKeyRequestResult({ ok: true });
                 headersApplied = true;
                 responseFinished = true;
                 releaseCurrentLease();
@@ -4170,6 +4199,7 @@ module.exports = {
     LOCAL_ONLY_AUTH_HEADERS,
     LOCAL_ONLY_HEADER_PREFIXES,
     getGatewayStatusCode,
+    getResponsesRetryForwardStatusCode,
     MAX_REQUEST_FAILOVER_RETRIES,
     hasRequestFailoverRetriesRemaining,
     createResponseModelObserver,
@@ -4177,6 +4207,7 @@ module.exports = {
     extractResponseModelFromPayload,
     isStreamingResponsesRequest,
     isResponsesFailoverInspectionCandidate,
+    isResponsesFailoverConfig,
     normalizeProxyJsonBody,
     shouldForceResponsesStoreFalse,
     createImageGenerationsHandler,
