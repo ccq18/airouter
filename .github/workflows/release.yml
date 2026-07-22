@@ -49,9 +49,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install service dependencies
-        run: npm ci
-
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm install --ignore-scripts

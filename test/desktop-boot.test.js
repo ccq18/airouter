@@ -14,7 +14,6 @@ test('desktop boot page exposes a first-run config wizard', () => {
   assert.match(html, /id="proxyEnabledInput"/);
   assert.match(html, /id="proxyPortInput"/);
   assert.match(html, /id="apikeyEnabledInput"/);
-  assert.match(script, /airouter-config-missing/);
   assert.match(script, /initialize_config/);
   assert.match(script, /show_config_page/);
 });
@@ -35,6 +34,11 @@ test('desktop boot page exposes the Rust updater command flow', () => {
   assert.match(script, /install_update/);
   assert.match(script, /airouter-update-progress/);
   assert.match(script, /checkForUpdates\(\{ notifyNoUpdate: false, notifyError: false \}\)/);
+  assert.match(script, /STARTUP_UPDATE_CHECK_TIMEOUT_MS = 5000/);
+  assert.match(script, /Promise\.race\(\[checkPromise, timeoutPromise\]\)/);
+  assert.match(script, /acceptResult: \(\) => !didTimeout/);
+  assert.match(script, /startupServicePromise = invoke\('start_service'\)/);
+  assert.match(script, /await invoke\('open_admin_window'\)/);
   assert.match(styles, /\.update-dialog/);
   assert.match(tauriConfig, /"createUpdaterArtifacts":\s*true/);
   assert.match(tauriConfig, /"https:\/\/github\.com\/ccq18\/airouter\/releases\/latest\/download\/latest\.json"/);
@@ -44,4 +48,21 @@ test('desktop boot page exposes the Rust updater command flow', () => {
   assert.match(capability, /"process:default"/);
   assert.match(rustMain, /check_for_updates/);
   assert.match(rustMain, /install_update/);
+  assert.doesNotMatch(rustMain, /maybe_start_or_prompt_for_config/);
+});
+
+test('desktop build installs locked production dependencies and migrates them on upgrade', () => {
+  const prepareResources = fs.readFileSync(
+    path.join(desktopDir, 'scripts', 'prepare-resources.mjs'),
+    'utf8',
+  );
+  const rustMain = fs.readFileSync(path.join(desktopDir, 'src-tauri', 'src', 'main.rs'), 'utf8');
+
+  assert.match(prepareResources, /\['ci', '--omit=dev', '--ignore-scripts'\]/);
+  assert.doesNotMatch(prepareResources, /^\s*'node_modules'\s*,?$/m);
+  assert.match(prepareResources, /createHash\('sha256'\)/);
+  assert.match(prepareResources, /\.airouter-dependencies\.sha256/);
+  assert.match(rustMain, /should_sync_dependencies/);
+  assert.match(rustMain, /files_have_same_contents\(&source_dependency_marker, &destination_dependency_marker\)/);
+  assert.match(rustMain, /replace_dir_atomically\(&source_modules, &destination_modules\)/);
 });

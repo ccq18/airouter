@@ -22,6 +22,7 @@ const APP_DIR_NAME: &str = "Airouter";
 const RUNTIME_DIR_NAME: &str = "airouter";
 const CONFIG_FILE: &str = "openai.json";
 const CONFIG_TEMPLATE_FILE: &str = "openai.json.example";
+const DEPENDENCY_MARKER_FILE: &str = ".airouter-dependencies.sha256";
 const PID_FILE: &str = "openai.pid";
 const LOG_FILE: &str = "openai.log";
 const DEFAULT_PORT: u16 = 3009;
@@ -247,7 +248,100 @@ fn copy_entry_replace(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn files_have_same_contents(left: &Path, right: &Path) -> bool {
+    match (fs::read(left), fs::read(right)) {
+        (Ok(left_contents), Ok(right_contents)) => left_contents == right_contents,
+        _ => false,
+    }
+}
+
+fn replace_dir_atomically(source: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("无法定位目标父目录: {}", destination.display()))?;
+    let directory_name = destination
+        .file_name()
+        .ok_or_else(|| format!("无法定位目标目录名: {}", destination.display()))?
+        .to_string_lossy();
+    let staging = parent.join(format!(".{directory_name}.airouter-new"));
+    let backup = parent.join(format!(".{directory_name}.airouter-old"));
+
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| format!("无法清理依赖临时目录 {}: {error}", staging.display()))?;
+    }
+    if backup.exists() {
+        if destination.exists() {
+            fs::remove_dir_all(&backup)
+                .map_err(|error| format!("无法清理依赖备份目录 {}: {error}", backup.display()))?;
+        } else {
+            fs::rename(&backup, destination).map_err(|error| {
+                format!(
+                    "无法恢复依赖备份目录 {} -> {}: {error}",
+                    backup.display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+
+    copy_dir_recursive(source, &staging).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging);
+        format!(
+            "无法准备依赖目录 {} -> {}: {error}",
+            source.display(),
+            staging.display()
+        )
+    })?;
+
+    if destination.exists() {
+        fs::rename(destination, &backup).map_err(|error| {
+            let _ = fs::remove_dir_all(&staging);
+            format!(
+                "无法备份依赖目录 {} -> {}: {error}",
+                destination.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    if let Err(error) = fs::rename(&staging, destination) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!(
+            "无法启用新依赖目录 {} -> {}: {error}",
+            staging.display(),
+            destination.display()
+        ));
+    }
+
+    if backup.exists() {
+        if let Err(error) = fs::remove_dir_all(&backup) {
+            eprintln!("Airouter Desktop dependency backup cleanup failed: {error}");
+        }
+    }
+
+    Ok(())
+}
+
 fn sync_runtime_resources(source: &Path, destination: &Path) -> Result<(), String> {
+    let source_lock = source.join("package-lock.json");
+    let destination_lock = destination.join("package-lock.json");
+    let source_modules = source.join("node_modules");
+    let destination_modules = destination.join("node_modules");
+    let source_dependency_marker = source_modules.join(DEPENDENCY_MARKER_FILE);
+    let destination_dependency_marker = destination_modules.join(DEPENDENCY_MARKER_FILE);
+    if !source_dependency_marker.is_file() {
+        return Err(format!(
+            "bundled node_modules 缺少依赖完整性标记 {}",
+            source_dependency_marker.display()
+        ));
+    }
+    let should_sync_dependencies = !destination_modules.exists()
+        || !files_have_same_contents(&source_dependency_marker, &destination_dependency_marker);
+
     for entry in fs::read_dir(source)
         .map_err(|error| format!("无法读取资源目录 {}: {error}", source.display()))?
     {
@@ -256,21 +350,17 @@ fn sync_runtime_resources(source: &Path, destination: &Path) -> Result<(), Strin
         let file_name_text = file_name.to_string_lossy();
         let target = destination.join(&file_name);
 
-        if file_name_text == "node_modules" {
-            if !target.exists() {
-                copy_dir_recursive(&entry.path(), &target).map_err(|error| {
-                    format!(
-                        "同步 node_modules 失败 {} -> {}: {error}",
-                        entry.path().display(),
-                        target.display()
-                    )
-                })?;
-            }
+        if file_name_text == "node_modules" || file_name_text == "package-lock.json" {
             continue;
         }
 
         copy_entry_replace(&entry.path(), &target)?;
     }
+
+    if should_sync_dependencies {
+        replace_dir_atomically(&source_modules, &destination_modules)?;
+    }
+    copy_entry_replace(&source_lock, &destination_lock)?;
 
     Ok(())
 }
@@ -1265,17 +1355,6 @@ fn start_and_show_config_page(app: &AppHandle) -> Result<ServiceStatus, String> 
     Ok(status_for_runtime(runtime_dir))
 }
 
-fn maybe_start_or_prompt_for_config(app: &AppHandle) -> Result<(), String> {
-    let runtime_dir = ensure_runtime(app)?;
-    if !runtime_dir.join(CONFIG_FILE).exists() {
-        app.emit("airouter-config-missing", status_for_runtime(runtime_dir))
-            .map_err(|error| format!("无法显示配置引导: {error}"))?;
-        return Ok(());
-    }
-
-    start_and_show_config_page(app).map(|_| ())
-}
-
 fn stop_service_quietly(app: &AppHandle) {
     if let Err(error) = run_service_command(app, "stop") {
         eprintln!("Airouter Desktop stop failed: {error}");
@@ -1519,14 +1598,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let app_handle = app.handle().clone();
-            start_auth_session_request_watcher(app_handle.clone());
-            thread::spawn(move || {
-                if let Err(error) = maybe_start_or_prompt_for_config(&app_handle) {
-                    eprintln!("Airouter Desktop startup failed: {error}");
-                    let _ = app_handle.emit("airouter-startup-error", error);
-                }
-            });
+            start_auth_session_request_watcher(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1729,6 +1801,119 @@ mod tests {
         assert!(tauri_config.contains(r#""entitlements": "entitlements.plist""#));
         assert!(entitlements.contains("<key>com.apple.security.cs.allow-jit</key>"));
         assert!(entitlements.contains("<true/>"));
+    }
+
+    #[test]
+    fn syncs_runtime_dependencies_when_integrity_marker_is_missing() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::write(source.path().join("package-lock.json"), "same-lock").expect("source lock");
+        fs::write(destination.path().join("package-lock.json"), "same-lock")
+            .expect("destination lock");
+        fs::create_dir_all(source.path().join("node_modules").join("new-dependency"))
+            .expect("source dependency");
+        fs::write(
+            source
+                .path()
+                .join("node_modules")
+                .join(DEPENDENCY_MARKER_FILE),
+            "new-marker",
+        )
+        .expect("source dependency marker");
+        fs::write(
+            source
+                .path()
+                .join("node_modules")
+                .join("new-dependency")
+                .join("index.js"),
+            "module.exports = true;",
+        )
+        .expect("source dependency file");
+        fs::create_dir_all(
+            destination
+                .path()
+                .join("node_modules")
+                .join("old-dependency"),
+        )
+        .expect("destination dependency");
+
+        sync_runtime_resources(source.path(), destination.path()).expect("sync resources");
+
+        assert!(
+            destination
+                .path()
+                .join("node_modules")
+                .join("new-dependency")
+                .join("index.js")
+                .exists()
+        );
+        assert!(
+            !destination
+                .path()
+                .join("node_modules")
+                .join("old-dependency")
+                .exists()
+        );
+        assert_eq!(
+            fs::read_to_string(destination.path().join("package-lock.json")).expect("synced lock"),
+            "same-lock"
+        );
+    }
+
+    #[test]
+    fn keeps_runtime_dependencies_when_integrity_marker_is_unchanged() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        fs::write(source.path().join("package-lock.json"), "same-lock").expect("source lock");
+        fs::write(destination.path().join("package-lock.json"), "same-lock")
+            .expect("destination lock");
+        fs::create_dir_all(
+            source
+                .path()
+                .join("node_modules")
+                .join("bundled-dependency"),
+        )
+        .expect("source dependency");
+        fs::write(
+            source
+                .path()
+                .join("node_modules")
+                .join(DEPENDENCY_MARKER_FILE),
+            "same-marker",
+        )
+        .expect("source dependency marker");
+        fs::create_dir_all(
+            destination
+                .path()
+                .join("node_modules")
+                .join("runtime-marker"),
+        )
+        .expect("runtime marker");
+        fs::write(
+            destination
+                .path()
+                .join("node_modules")
+                .join(DEPENDENCY_MARKER_FILE),
+            "same-marker",
+        )
+        .expect("destination dependency marker");
+
+        sync_runtime_resources(source.path(), destination.path()).expect("sync resources");
+
+        assert!(
+            destination
+                .path()
+                .join("node_modules")
+                .join("runtime-marker")
+                .exists()
+        );
+        assert!(
+            !destination
+                .path()
+                .join("node_modules")
+                .join("bundled-dependency")
+                .exists()
+        );
     }
 
     #[test]

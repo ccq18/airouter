@@ -11,6 +11,8 @@ Windows: %APPDATA%\Airouter\airouter\
 
 It does not modify the root service files. Build preparation copies the service into `desktop/src-tauri/resources/airouter/` and places the platform Node.js sidecar in `desktop/src-tauri/binaries/`.
 
+Resource preparation runs `npm ci --omit=dev --ignore-scripts` inside the staged service directory before Tauri packages the app. This makes the bundled `node_modules` match the root `package-lock.json` even when the developer's root install is missing or stale. A SHA-256 dependency marker is written only after installation succeeds; on app upgrade, Airouter atomically replaces the writable runtime `node_modules` when that marker is missing or changed.
+
 The bundled management page can use the desktop shell to fetch ChatGPT AuthSession JSON. Click `App 自动获取`, log in in the ChatGPT window opened by the app, and the session JSON is filled back into the Token config form after login succeeds.
 
 ## Development
@@ -18,7 +20,6 @@ The bundled management page can use the desktop shell to fetch ChatGPT AuthSessi
 ```bash
 cd desktop
 npm install
-npm run prepare
 npm run dev
 ```
 
@@ -68,14 +69,14 @@ cd desktop
 npx tauri signer generate --ci -w ~/.tauri/airouter-updater.key
 ```
 
-For CI, provide one of these secret forms:
+For GitHub Actions, configure these repository secrets:
 
 ```text
 TAURI_SIGNING_PRIVATE_KEY
 TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 ```
 
-or point at a key file with:
+Local builds can instead point at a key file with:
 
 ```text
 TAURI_SIGNING_PRIVATE_KEY_PATH

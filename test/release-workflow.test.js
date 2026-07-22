@@ -21,6 +21,12 @@ test('macOS release build includes both the installer and updater app bundle tar
   assert.match(desktopPackage.scripts['build:macos'], /--bundles\s+app,dmg/);
 });
 
+test('desktop release installs service dependencies once in the staged app resources', () => {
+  assert.equal(desktopPackage.scripts.dev, 'tauri dev');
+  assert.equal(desktopPackage.scripts.build, 'node scripts/run-tauri-build.mjs');
+  assert.doesNotMatch(workflow, /Install service dependencies/);
+});
+
 test('release workflow derives desktop package version from the Git tag', () => {
   assert.match(workflow, /Sync desktop version from Git tag/);
   assert.match(workflow, /GITHUB_REF_NAME/);

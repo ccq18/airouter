@@ -1,4 +1,5 @@
 (function () {
+  const STARTUP_UPDATE_CHECK_TIMEOUT_MS = 5000;
   const panel = document.querySelector('#bootPanel');
   const eyebrow = document.querySelector('.eyebrow');
   const headline = document.querySelector('#headline');
@@ -31,6 +32,8 @@
   const apikeyEnabledInput = document.querySelector('#apikeyEnabledInput');
   const progress = document.querySelector('#progress');
   let updateBusy = false;
+  let startupServicePromise = null;
+  let shouldNavigateAfterUpdate = false;
 
   function invoke(command, args) {
     const api = window.__TAURI__?.core;
@@ -91,6 +94,10 @@
     }
     updateDialog.hidden = true;
     resetUpdateProgress();
+    if (shouldNavigateAfterUpdate) {
+      shouldNavigateAfterUpdate = false;
+      finishConfiguredStartup().catch(showError);
+    }
   }
 
   function renderUpdateProgress(payload = {}) {
@@ -110,17 +117,25 @@
     }
   }
 
-  async function checkForUpdates({ notifyNoUpdate = true, notifyError = true } = {}) {
+  async function checkForUpdates({
+    notifyNoUpdate = true,
+    notifyError = true,
+    acceptResult = () => true,
+  } = {}) {
     if (updateBusy) {
-      return;
+      return false;
     }
 
     try {
       setUpdateBusy(true);
       updateCheckBtn.textContent = '检查中';
       const update = await invoke('check_for_updates');
+      if (!acceptResult()) {
+        return false;
+      }
       if (update && update.available) {
         showUpdateDialog(update);
+        return true;
       } else if (notifyNoUpdate) {
         showUpdateToast('当前已是最新版本');
       }
@@ -133,6 +148,31 @@
     } finally {
       updateCheckBtn.textContent = '检查更新';
       setUpdateBusy(false);
+    }
+
+    return false;
+  }
+
+  async function checkForUpdatesAtStartup() {
+    let didTimeout = false;
+    let timeoutId;
+    const checkPromise = checkForUpdates({
+      notifyNoUpdate: false,
+      notifyError: false,
+      acceptResult: () => !didTimeout,
+    });
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = window.setTimeout(() => {
+        didTimeout = true;
+        console.warn('启动时检查更新超时，继续进入管理页面');
+        resolve(false);
+      }, STARTUP_UPDATE_CHECK_TIMEOUT_MS);
+    });
+
+    try {
+      return await Promise.race([checkPromise, timeoutPromise]);
+    } finally {
+      window.clearTimeout(timeoutId);
     }
   }
 
@@ -267,20 +307,44 @@
   updateSetupControls();
 
   async function initializeBootState() {
-    const status = await invoke('get_status');
+    let status;
+    try {
+      status = await invoke('get_status');
+    } catch (error) {
+      showError(error);
+      await checkForUpdates({ notifyNoUpdate: false, notifyError: false });
+      return;
+    }
+
     if (!status.hasConfig) {
       showSetup(status);
+      await checkForUpdates({ notifyNoUpdate: false, notifyError: false });
+      return;
+    }
+
+    startupServicePromise = invoke('start_service');
+    startupServicePromise.catch(() => {});
+    shouldNavigateAfterUpdate = await checkForUpdatesAtStartup();
+    if (!shouldNavigateAfterUpdate) {
+      await finishConfiguredStartup();
     }
   }
 
+  async function finishConfiguredStartup() {
+    const servicePromise = startupServicePromise;
+    startupServicePromise = null;
+    if (servicePromise) {
+      await servicePromise;
+    } else {
+      await invoke('start_service');
+    }
+    await invoke('open_admin_window');
+  }
+
   Promise.all([
-    window.__TAURI__?.event?.listen('airouter-startup-error', (event) => showError(event.payload)),
-    window.__TAURI__?.event?.listen('airouter-config-missing', (event) => showSetup(event.payload)),
     window.__TAURI__?.event?.listen('airouter-update-progress', (event) => renderUpdateProgress(event.payload)),
     initializeBootState(),
-  ].filter(Boolean))
-    .then(() => checkForUpdates({ notifyNoUpdate: false, notifyError: false }))
-    .catch(showError);
+  ].filter(Boolean)).catch(showError);
 
   window.setTimeout(() => {
     if (panel.dataset.state === 'loading') {
