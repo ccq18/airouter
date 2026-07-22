@@ -39,7 +39,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxNEVDNzk2MjVGODkyRTIKUldUaWt2Z2xsc2RPMGRiaFhLcXpHUGIwaG1ZRlc4NjZBeGJNTFQyN1Q1RlgvMmNFcE00cUhsUWoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMwRTM1NzIwQzUwRjc2MDIKUldRQ2RnL0ZJRmZqd0Zrc0lTMTBEckNXNGg5VDdsMWs2Rys4VlZ5Sm1vZDR3UnRGRTN2Y2c1ckwK",
       "endpoints": [
         "https://github.com/ccq18/airouter/releases/latest/download/latest.json"
       ],
