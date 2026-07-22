@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.10
+
+- 发布在线升级验证版本，用于确认已安装的 Airouter Desktop 可发现、下载、验证签名并重启至新版本。
+
 ## 0.5.9
 
 - 修复 Windows Tauri updater 发布资产收集，使用实际生成的签名 `.exe` 安装包与 `.exe.sig`，不再要求不存在的 `.zip` 包。
