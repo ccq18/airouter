@@ -1,5 +1,5 @@
 (function () {
-  const STARTUP_UPDATE_CHECK_TIMEOUT_MS = 5000;
+  const STARTUP_UPDATE_CHECK_NOTICE_DELAY_MS = 5000;
   const panel = document.querySelector('#bootPanel');
   const eyebrow = document.querySelector('.eyebrow');
   const headline = document.querySelector('#headline');
@@ -33,7 +33,10 @@
   const progress = document.querySelector('#progress');
   let updateBusy = false;
   let startupServicePromise = null;
+  let configuredStartupPromise = null;
   let shouldNavigateAfterUpdate = false;
+  let startupUpdateCheckPending = false;
+  let startupUpdateCheckSkipped = false;
 
   function invoke(command, args) {
     const api = window.__TAURI__?.core;
@@ -45,7 +48,7 @@
 
   function setUpdateBusy(nextBusy) {
     updateBusy = nextBusy;
-    updateCheckBtn.disabled = nextBusy;
+    updateCheckBtn.disabled = nextBusy && !startupUpdateCheckPending;
     updateCloseBtn.disabled = nextBusy;
     updateLaterBtn.disabled = nextBusy;
     updateInstallBtn.disabled = nextBusy;
@@ -154,26 +157,45 @@
   }
 
   async function checkForUpdatesAtStartup() {
-    let didTimeout = false;
-    let timeoutId;
-    const checkPromise = checkForUpdates({
-      notifyNoUpdate: false,
-      notifyError: false,
-      acceptResult: () => !didTimeout,
-    });
-    const timeoutPromise = new Promise((resolve) => {
-      timeoutId = window.setTimeout(() => {
-        didTimeout = true;
-        console.warn('启动时检查更新超时，继续进入管理页面');
-        resolve(false);
-      }, STARTUP_UPDATE_CHECK_TIMEOUT_MS);
-    });
+    startupUpdateCheckSkipped = false;
+    startupUpdateCheckPending = false;
+    const noticeTimerId = window.setTimeout(() => {
+      if (!updateBusy || startupUpdateCheckSkipped) {
+        return;
+      }
+
+      startupUpdateCheckPending = true;
+      panel.dataset.state = 'checking-update';
+      eyebrow.textContent = '正在检查应用更新';
+      headline.textContent = '更新检查耗时较长';
+      message.textContent = '本地服务已在后台启动。需要立即进入管理页时，可点击右上角“暂不检查”。';
+      updateCheckBtn.disabled = false;
+      updateCheckBtn.textContent = '暂不检查';
+    }, STARTUP_UPDATE_CHECK_NOTICE_DELAY_MS);
 
     try {
-      return await Promise.race([checkPromise, timeoutPromise]);
+      return await checkForUpdates({
+        notifyNoUpdate: false,
+        notifyError: false,
+        acceptResult: () => !startupUpdateCheckSkipped,
+      });
     } finally {
-      window.clearTimeout(timeoutId);
+      window.clearTimeout(noticeTimerId);
+      startupUpdateCheckPending = false;
     }
+  }
+
+  function skipStartupUpdateCheck() {
+    if (!startupUpdateCheckPending || configuredStartupPromise) {
+      return;
+    }
+
+    startupUpdateCheckPending = false;
+    startupUpdateCheckSkipped = true;
+    setUpdateBusy(true);
+    updateCheckBtn.textContent = '正在打开';
+    showLoading('正在打开配置页');
+    finishConfiguredStartup().catch(showError);
   }
 
   async function installUpdate() {
@@ -297,7 +319,14 @@
   retryBtn.addEventListener('click', retry);
   logBtn.addEventListener('click', showLogs);
   revealBtn.addEventListener('click', () => invoke('reveal_runtime_dir').catch(showError));
-  updateCheckBtn.addEventListener('click', () => checkForUpdates());
+  updateCheckBtn.addEventListener('click', () => {
+    if (startupUpdateCheckPending) {
+      skipStartupUpdateCheck();
+      return;
+    }
+
+    checkForUpdates();
+  });
   updateCloseBtn.addEventListener('click', closeUpdateDialog);
   updateLaterBtn.addEventListener('click', closeUpdateDialog);
   updateInstallBtn.addEventListener('click', installUpdate);
@@ -330,15 +359,28 @@
     }
   }
 
-  async function finishConfiguredStartup() {
-    const servicePromise = startupServicePromise;
-    startupServicePromise = null;
-    if (servicePromise) {
-      await servicePromise;
-    } else {
-      await invoke('start_service');
+  function finishConfiguredStartup() {
+    if (configuredStartupPromise) {
+      return configuredStartupPromise;
     }
-    await invoke('open_admin_window');
+
+    const startupPromise = (async () => {
+      const servicePromise = startupServicePromise;
+      startupServicePromise = null;
+      if (servicePromise) {
+        await servicePromise;
+      } else {
+        await invoke('start_service');
+      }
+      await invoke('open_admin_window');
+    })();
+    configuredStartupPromise = startupPromise;
+    startupPromise.catch(() => {
+      if (configuredStartupPromise === startupPromise) {
+        configuredStartupPromise = null;
+      }
+    });
+    return startupPromise;
   }
 
   Promise.all([

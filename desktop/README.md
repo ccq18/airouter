@@ -83,7 +83,11 @@ Local builds can instead point at a key file with:
 TAURI_SIGNING_PRIVATE_KEY_PATH
 ```
 
-The app checks this endpoint quietly on startup and opens the update dialog only when a newer version is available. The **Check for updates** button remains available for an explicit check. Downloads are installed only after user confirmation, then the app restarts.
+The app checks this endpoint on startup and opens the update dialog only when a newer version is available.
+If the check has not completed after five seconds, the startup page explains that the local service is
+already starting and changes **Check for updates** to **Skip for now**. Choosing it immediately opens the
+management page and intentionally discards only that startup check; otherwise the app keeps waiting for
+the signed update result. Downloads are installed only after user confirmation, then the app restarts.
 
 The tag workflow requires `TAURI_SIGNING_PRIVATE_KEY`, builds macOS arm64, macOS x64, and Windows x64 artifacts, and publishes both user-facing installers and signed updater packages. It then generates `latest.json` in the same GitHub Release. The expected release assets are:
 

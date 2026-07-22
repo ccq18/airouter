@@ -34,9 +34,13 @@ test('desktop boot page exposes the Rust updater command flow', () => {
   assert.match(script, /install_update/);
   assert.match(script, /airouter-update-progress/);
   assert.match(script, /checkForUpdates\(\{ notifyNoUpdate: false, notifyError: false \}\)/);
-  assert.match(script, /STARTUP_UPDATE_CHECK_TIMEOUT_MS = 5000/);
-  assert.match(script, /Promise\.race\(\[checkPromise, timeoutPromise\]\)/);
-  assert.match(script, /acceptResult: \(\) => !didTimeout/);
+  assert.match(script, /STARTUP_UPDATE_CHECK_NOTICE_DELAY_MS = 5000/);
+  assert.match(script, /headline\.textContent = '更新检查耗时较长'/);
+  assert.match(script, /updateCheckBtn\.textContent = '暂不检查'/);
+  assert.match(script, /function skipStartupUpdateCheck\(\)/);
+  assert.match(script, /acceptResult: \(\) => !startupUpdateCheckSkipped/);
+  assert.doesNotMatch(script, /Promise\.race\(\[checkPromise, timeoutPromise\]\)/);
+  assert.match(script, /let configuredStartupPromise = null/);
   assert.match(script, /startupServicePromise = invoke\('start_service'\)/);
   assert.match(script, /await invoke\('open_admin_window'\)/);
   assert.match(styles, /\.update-dialog/);
