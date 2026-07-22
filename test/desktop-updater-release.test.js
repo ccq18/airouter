@@ -1,8 +1,13 @@
 const assert = require('node:assert/strict');
+const { execFile } = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { promisify } = require('node:util');
+
+const execFileAsync = promisify(execFile);
+const releaseGeneratorPath = path.resolve(__dirname, '../desktop/scripts/generate-latest-json.mjs');
 
 test('desktop updater release helper builds macOS and Windows latest.json entries', async () => {
   const helper = await import(`../desktop/scripts/generate-latest-json.mjs?test=${Date.now()}`);
@@ -23,7 +28,7 @@ test('desktop updater release helper builds macOS and Windows latest.json entrie
       },
       {
         platform: 'windows-x86_64',
-        assetName: 'Airouter_1.2.3_x64-setup.exe.zip',
+        assetName: 'Airouter_1.2.3_x64-setup.exe',
         signature: 'sig-windows-x64',
       },
     ],
@@ -46,7 +51,7 @@ test('desktop updater release helper builds macOS and Windows latest.json entrie
       'windows-x86_64': {
         installMode: 'passive',
         signature: 'sig-windows-x64',
-        url: 'https://github.com/ccq18/airouter/releases/download/v1.2.3/Airouter_1.2.3_x64-setup.exe.zip',
+        url: 'https://github.com/ccq18/airouter/releases/download/v1.2.3/Airouter_1.2.3_x64-setup.exe',
       },
     },
   });
@@ -62,6 +67,10 @@ test('desktop updater release helper infers platform keys from generated artifac
   assert.equal(
     helper.inferUpdaterPlatform('Airouter_1.2.3_x64.app.tar.gz'),
     'darwin-x86_64',
+  );
+  assert.equal(
+    helper.inferUpdaterPlatform('Airouter_1.2.3_x64-setup.exe'),
+    'windows-x86_64',
   );
   assert.equal(
     helper.inferUpdaterPlatform('Airouter_1.2.3_x64-setup.exe.zip'),
@@ -100,4 +109,33 @@ test('desktop updater release helper skips copying an artifact onto itself', asy
   await helper.copyFileUnlessSamePath(artifactPath, artifactPath);
 
   assert.equal(await fs.readFile(artifactPath, 'utf8'), 'signed-updater');
+});
+
+test('desktop updater release helper collects signed Windows exe updater artifacts', async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'airouter-updater-windows-'));
+  const inputDir = path.join(tempDir, 'input');
+  const outputDir = path.join(tempDir, 'output');
+  const assetName = 'Airouter_1.2.3_x64-setup.exe';
+  const signature = 'windows-updater-signature';
+  await fs.mkdir(inputDir);
+  t.after(() => fs.rm(tempDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(inputDir, assetName), 'windows-updater');
+  await fs.writeFile(path.join(inputDir, `${assetName}.sig`), signature);
+
+  await execFileAsync(process.execPath, [
+    releaseGeneratorPath,
+    '--input', inputDir,
+    '--output', outputDir,
+    '--version', '1.2.3',
+    '--repo', 'ccq18/airouter',
+  ]);
+
+  assert.equal(await fs.readFile(path.join(outputDir, assetName), 'utf8'), 'windows-updater');
+  assert.equal(await fs.readFile(path.join(outputDir, `${assetName}.sig`), 'utf8'), signature);
+  const latest = JSON.parse(await fs.readFile(path.join(outputDir, 'latest.json'), 'utf8'));
+  assert.deepEqual(latest.platforms['windows-x86_64'], {
+    installMode: 'passive',
+    signature,
+    url: 'https://github.com/ccq18/airouter/releases/download/v1.2.3/Airouter_1.2.3_x64-setup.exe',
+  });
 });

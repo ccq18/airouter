@@ -155,7 +155,14 @@ jobs:
             printf '%s\n' "${installers[@]}" >&2
             exit 1
           fi
-          mv "${installers[0]}" "$installer_dir/Airouter_${version}_x64-setup.exe"
+          installer="${installers[0]}"
+          normalized_installer="$installer_dir/Airouter_${version}_x64-setup.exe"
+          if [ "$installer" != "$normalized_installer" ]; then
+            mv "$installer" "$normalized_installer"
+            if [ -f "${installer}.sig" ]; then
+              mv "${installer}.sig" "${normalized_installer}.sig"
+            fi
+          fi
 
       - name: Collect updater release files
         shell: bash
@@ -175,15 +182,13 @@ jobs:
             cp "$macos_dir/Airouter.app.tar.gz.sig" "$release_dir/Airouter_${version}_${asset_arch}.app.tar.gz.sig"
           elif [[ "${{ matrix.platform }}" == "windows" ]]; then
             nsis_dir="desktop/src-tauri/target/release/bundle/nsis"
-            cp "$nsis_dir/Airouter_${version}_x64-setup.exe" "$release_dir/"
-            updater_zips=("$nsis_dir"/*.zip)
-            if [ "${#updater_zips[@]}" -ne 1 ]; then
-              printf 'Expected exactly one Windows updater zip, found %s\n' "${#updater_zips[@]}" >&2
-              printf '%s\n' "${updater_zips[@]}" >&2
+            installer="$nsis_dir/Airouter_${version}_x64-setup.exe"
+            if [ ! -f "${installer}.sig" ]; then
+              printf 'Expected a signed Windows updater installer at %s\n' "${installer}.sig" >&2
               exit 1
             fi
-            cp "${updater_zips[0]}" "$release_dir/Airouter_${version}_x64-setup.exe.zip"
-            cp "${updater_zips[0]}.sig" "$release_dir/Airouter_${version}_x64-setup.exe.zip.sig"
+            cp "$installer" "$release_dir/"
+            cp "${installer}.sig" "$release_dir/"
           fi
 
       - name: Upload packaged artifact

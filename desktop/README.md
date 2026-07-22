@@ -73,8 +73,9 @@ For GitHub Actions, configure these repository secrets:
 
 ```text
 TAURI_SIGNING_PRIVATE_KEY
-TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 ```
+
+Only configure `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` when the signing key was generated with a password.
 
 Local builds can instead point at a key file with:
 
@@ -94,8 +95,7 @@ Airouter_<version>_x64.dmg
 Airouter_<version>_x64.app.tar.gz
 Airouter_<version>_x64.app.tar.gz.sig
 Airouter_<version>_x64-setup.exe
-Airouter_<version>_x64-setup.exe.zip
-Airouter_<version>_x64-setup.exe.zip.sig
+Airouter_<version>_x64-setup.exe.sig
 latest.json
 ```
 

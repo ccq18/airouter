@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.9
+
+- 修复 Windows Tauri updater 发布资产收集，使用实际生成的签名 `.exe` 安装包与 `.exe.sig`，不再要求不存在的 `.zip` 包。
+
 ## 0.5.8
 
 - 轮换 Desktop 自动更新签名密钥，并通过 GitHub Actions 发布首个可验证的签名更新版本。

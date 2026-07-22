@@ -18,11 +18,11 @@ export function inferUpdaterPlatform(assetName) {
     return 'darwin-x86_64';
   }
 
-  if (/_(?:x64|x86_64)(?:-setup)?\.exe\.zip$/.test(assetName) || /_(?:x64|x86_64).*\.nsis\.zip$/.test(assetName)) {
+  if (/_(?:x64|x86_64)(?:-setup)?\.exe(?:\.zip)?$/.test(assetName) || /_(?:x64|x86_64).*\.nsis\.zip$/.test(assetName)) {
     return 'windows-x86_64';
   }
 
-  if (/_(?:arm64|aarch64)(?:-setup)?\.exe\.zip$/.test(assetName) || /_(?:arm64|aarch64).*\.nsis\.zip$/.test(assetName)) {
+  if (/_(?:arm64|aarch64)(?:-setup)?\.exe(?:\.zip)?$/.test(assetName) || /_(?:arm64|aarch64).*\.nsis\.zip$/.test(assetName)) {
     return 'windows-aarch64';
   }
 
@@ -76,7 +76,7 @@ async function collectUpdaterArtifacts(inputDir, version) {
   const files = await listFiles(inputDir);
   const updaterAssets = files.filter(file => {
     const name = path.basename(file);
-    return (name.endsWith('.app.tar.gz') || name.endsWith('.exe.zip') || name.endsWith('.nsis.zip') || name.endsWith('.msi.zip'))
+    return (name.endsWith('.app.tar.gz') || name.endsWith('.exe') || name.endsWith('.exe.zip') || name.endsWith('.nsis.zip') || name.endsWith('.msi.zip'))
       && files.includes(`${file}.sig`);
   });
 

@@ -55,5 +55,8 @@ test('release workflow requires signing and publishes updater artifacts with lat
   assert.match(workflow, /Generate updater latest\.json/);
   assert.match(workflow, /desktop\/dist-release\/\*/);
   assert.match(workflow, /Airouter_\$\{version\}_\$\{asset_arch\}\.app\.tar\.gz/);
-  assert.match(workflow, /Airouter_\$\{version\}_x64-setup\.exe\.zip/);
+  assert.match(workflow, /Airouter_\$\{version\}_x64-setup\.exe/);
+  assert.match(workflow, /Expected a signed Windows updater installer/);
+  assert.doesNotMatch(workflow, /updater_zips/);
+  assert.equal(workflow.includes('cp "${installer}.sig" "$release_dir/"'), true);
 });
