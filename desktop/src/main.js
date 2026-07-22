@@ -110,7 +110,7 @@
     }
   }
 
-  async function checkForUpdates({ notifyNoUpdate = true } = {}) {
+  async function checkForUpdates({ notifyNoUpdate = true, notifyError = true } = {}) {
     if (updateBusy) {
       return;
     }
@@ -125,7 +125,11 @@
         showUpdateToast('当前已是最新版本');
       }
     } catch (error) {
-      showUpdateToast(String(error), true);
+      if (notifyError) {
+        showUpdateToast(String(error), true);
+      } else {
+        console.warn('启动时检查更新失败', error);
+      }
     } finally {
       updateCheckBtn.textContent = '检查更新';
       setUpdateBusy(false);
@@ -274,7 +278,9 @@
     window.__TAURI__?.event?.listen('airouter-config-missing', (event) => showSetup(event.payload)),
     window.__TAURI__?.event?.listen('airouter-update-progress', (event) => renderUpdateProgress(event.payload)),
     initializeBootState(),
-  ].filter(Boolean)).catch(showError);
+  ].filter(Boolean))
+    .then(() => checkForUpdates({ notifyNoUpdate: false, notifyError: false }))
+    .catch(showError);
 
   window.setTimeout(() => {
     if (panel.dataset.state === 'loading') {

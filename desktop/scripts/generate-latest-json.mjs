@@ -64,6 +64,14 @@ export function buildLatestJson({ version, notes = '', pubDate = new Date().toIS
   };
 }
 
+export async function copyFileUnlessSamePath(sourcePath, destinationPath) {
+  if (path.resolve(sourcePath) === path.resolve(destinationPath)) {
+    return;
+  }
+
+  await fs.copyFile(sourcePath, destinationPath);
+}
+
 async function collectUpdaterArtifacts(inputDir, version) {
   const files = await listFiles(inputDir);
   const updaterAssets = files.filter(file => {
@@ -190,8 +198,8 @@ async function main() {
 
   await fs.mkdir(options.outputDir, { recursive: true });
   for (const artifact of artifacts) {
-    await fs.copyFile(artifact.sourcePath, path.join(options.outputDir, artifact.assetName));
-    await fs.copyFile(artifact.signaturePath, path.join(options.outputDir, `${artifact.assetName}.sig`));
+    await copyFileUnlessSamePath(artifact.sourcePath, path.join(options.outputDir, artifact.assetName));
+    await copyFileUnlessSamePath(artifact.signaturePath, path.join(options.outputDir, `${artifact.assetName}.sig`));
   }
 
   const latest = buildLatestJson({

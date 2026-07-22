@@ -50,6 +50,17 @@ npm run build:windows
 - 涉及管理台 HTML/JS 时，重点跑 `test/config-admin.test.js` 和相关 API 测试。
 - 涉及桌面壳或资源准备时，至少跑 `test/desktop-boot.test.js`；能本地构建时再跑对应 `desktop` 构建命令。
 
+## 版本与发布
+
+- 本仓库的默认发布分支是 `main`。口头所说的 `master` 在本仓库按 `main` 理解；推送 `main` 本身不会自动打包。
+- `.github/workflows/release.yml` 由 `v*` Git Tag 触发，负责从 Tag 同步桌面版本、构建 macOS arm64、macOS x64 和 Windows x64 安装包，并发布 GitHub Release。
+- 准备新版本前先拉取 `origin/main` 和远端 Tags，确认工作区干净、待发布提交已推送、`main` 与 `origin/main` 一致，并按变更范围完成本文件要求的测试。
+- 将 `origin/main` 与最新版本 Tag 比较：只有 Tag 之后存在新提交时才创建新版本；若最新 Tag 已指向 `origin/main`，不要为同一提交重复打 Tag。
+- Tag 使用语义化版本 `vMAJOR.MINOR.PATCH`。没有明确的大版本或兼容功能版本要求时，默认递增补丁版本，例如 `v0.5.6` 后发布 `v0.5.7`。
+- Tag 必须指向待发布的 `origin/main` 精确提交。优先创建带发布说明的 annotated Tag，推送前再次核对提交和版本；禁止移动、覆盖或复用已经推送的版本 Tag。
+- 发布签名更新包时，GitHub 仓库必须已配置 `TAURI_SIGNING_PRIVATE_KEY`；如私钥有密码，同时配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。不要在代码、日志或文档中写入密钥内容。
+- 推送 Tag 后必须检查 GitHub Actions 和对应 GitHub Release；确认三个平台构建成功，且 Release 资产与 `desktop/README.md` 的清单一致后，才能声称发布完成。失败时保留失败证据，修复并验证后使用新的版本 Tag，不能改写已经发布的 Tag。
+
 ## 代码风格
 
 - 根项目使用 CommonJS：`require(...)` 和 `module.exports`。

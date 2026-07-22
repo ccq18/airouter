@@ -1,4 +1,7 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 test('desktop updater release helper builds macOS and Windows latest.json entries', async () => {
@@ -85,4 +88,16 @@ test('desktop updater release helper normalizes local macOS updater artifact nam
     helper.inferUpdaterPlatform('Airouter_1.2.3_arm64.app.tar.gz'),
     'darwin-aarch64',
   );
+});
+
+test('desktop updater release helper skips copying an artifact onto itself', async (t) => {
+  const helper = await import(`../desktop/scripts/generate-latest-json.mjs?test=${Date.now()}`);
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'airouter-updater-'));
+  t.after(() => fs.rm(tempDir, { recursive: true, force: true }));
+  const artifactPath = path.join(tempDir, 'Airouter_1.2.3_arm64.app.tar.gz');
+  await fs.writeFile(artifactPath, 'signed-updater');
+
+  await helper.copyFileUnlessSamePath(artifactPath, artifactPath);
+
+  assert.equal(await fs.readFile(artifactPath, 'utf8'), 'signed-updater');
 });
