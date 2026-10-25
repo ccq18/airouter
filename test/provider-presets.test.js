@@ -29,6 +29,7 @@ test('provider presets expose the approved built-in providers and custom', () =>
     'custom',
     'opencode-free',
     'openrouter-free',
+    'sub2api',
   ]);
   assert.equal(getProviderPreset('glm-cn').label, 'GLM Coding Plan 中国');
   assert.equal(getProviderPreset('glm-global').label, 'GLM Coding Plan 国际');
@@ -579,4 +580,21 @@ test('upstream auth headers never reuse quota-only raw key formatting for infere
   assert.equal(headers.accept, 'text/event-stream');
   assert.equal(headers['content-type'], 'application/json');
   assert.equal(buildUpstreamAuthHeaders(glm, {}).accept, 'application/json');
+});
+
+
+test('Sub2API root and v1 addresses reuse forwarding key for models and usage without duplicate v1', () => {
+  const { normalizeSub2ApiBaseUrl, parseModelCatalog } = require('../app/provider-presets');
+  for (const base_url of ['https://relay.invalid', 'https://relay.invalid/v1/', 'https://relay.invalid/v1']) {
+    const config = { type: 'apikey', preset: 'sub2api', base_url, apikey: 'relay-key-fixture' };
+    assert.equal(buildUpstreamUrl(config, 'responses'), 'https://relay.invalid/v1/responses');
+    assert.equal(buildDiscoveryRequest(config).url, 'https://relay.invalid/v1/models');
+    assert.deepEqual(buildQuotaRequest(config), { url: 'https://relay.invalid/v1/usage', headers: { authorization: 'Bearer relay-key-fixture' } });
+    const parsed = parseQuotaBody(config, { mode: 'unrestricted', isValid: true, unit: 'USD', balance: 8.75 });
+    assert.equal(parsed.state, 'available'); assert.equal(parsed.metrics[0].remaining, 8.75); assert.equal(parsed.metrics[0].remainingPercent, null);
+  }
+  assert.equal(normalizeSub2ApiBaseUrl('https://relay.invalid/prefix'), 'https://relay.invalid/prefix/v1');
+  assert.throws(() => normalizeSub2ApiBaseUrl('https://relay.invalid?token=secret'));
+  const models = parseModelCatalog({ data: [{ id: 'gpt-native', owned_by: 'openai' }, { id: 'claude-native', owned_by: 'anthropic' }, { id: 'other' }, { id: 'explicit', supported_endpoints: ['/chat/completions'] }] }, { preset: 'sub2api' });
+  assert.deepEqual(models.map(item => item.protocols), [['responses'], ['messages'], ['chat_completions'], ['chat_completions']]);
 });

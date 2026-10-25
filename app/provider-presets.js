@@ -1,3 +1,4 @@
+const { parseSub2ApiUsage } = require('./sub2api-quota');
 /**
  * Built-in upstream provider presets.
  *
@@ -229,6 +230,23 @@ for (const [id, parent, label] of [
   };
 }
 
+PROVIDER_PRESETS.sub2api = {
+  id: 'sub2api', label: 'Sub2API 中转站', credential: 'apikey', default_type: 'apikey',
+  default_base_url: '', protocols: [...PROTOCOL_NAMES],
+  protocolPaths: { chat_completions: '/chat/completions', responses: '/responses', messages: '/messages' },
+  discovery: { supported: true, path: '/models', auth: 'bearer', parser: 'openai-models' },
+  quota: { path: '/usage', auth: 'bearer', parser: 'sub2api' },
+  notes: '填站点根网址或 /v1；同一 Key 同步模型和读取钱包/订阅/Key 金额。协议取决于站点分组。',
+};
+
+function normalizeSub2ApiBaseUrl(value) {
+  const url = new URL(String(value || '').trim());
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Sub2API 地址须为不含凭证、查询参数的 HTTP(S) 站点或 /v1 地址');
+  const root = url.pathname.replace(/\/+$/, '');
+  url.pathname = root.endsWith('/v1') ? root : `${root}/v1`;
+  return url.toString().replace(/\/+$/, '');
+}
+
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -309,7 +327,8 @@ function getProtocolPath(config, protocol) {
 }
 
 function buildUpstreamUrl(config, protocol, options = {}) {
-  const baseUrl = normalizeString(options.baseUrl || (config && config.base_url));
+  const rawBase = options.baseUrl || (config && config.base_url);
+  const baseUrl = config?.preset === 'sub2api' ? normalizeSub2ApiBaseUrl(rawBase) : normalizeString(rawBase);
   const path = getProtocolPath(config, protocol);
   if (!baseUrl || !path) {
     return null;
@@ -369,7 +388,7 @@ function buildDiscoveryRequest(config) {
     url = joinUrl(preset.default_base_url || config.base_url, preset.discovery.path);
     // Preserve a user-provided regional/custom base URL for the same preset.
     if (normalizeString(config.base_url)) {
-      url = joinUrl(config.base_url, preset.discovery.path);
+      url = joinUrl(preset.id === 'sub2api' ? normalizeSub2ApiBaseUrl(config.base_url) : config.base_url, preset.discovery.path);
     }
   } else {
     throw new Error(preset.discovery && preset.discovery.reason
@@ -493,6 +512,14 @@ function deriveProtocols(item, preset) {
     return filtered;
   }
 
+  if (preset?.id === 'sub2api') {
+    // A key's group controls supported protocols. These are conservative native
+    // suggestions when the station catalog has no explicit endpoint metadata.
+    const owner = normalizeString(item.owned_by).toLowerCase();
+    if (owner === 'anthropic' || /^claude/i.test(item.id || '')) return ['messages'];
+    if (owner === 'openai' || /^(gpt|codex)/i.test(item.id || '')) return ['responses'];
+    return ['chat_completions'];
+  }
   if (preset && (preset.id === 'opencode-go' || preset.id === 'opencode-zen')) {
     // The live Go catalog currently only returns id/object/created/owned_by.
     // Derive a safe default from well-known model families instead of
@@ -644,11 +671,11 @@ function buildQuotaRequest(config) {
   const preset = resolvePresetForConfig(config);
   const quota = preset.quota || {};
 
-  if (quota.supported === false || !quota.url) {
+  if (quota.supported === false || (!quota.url && !quota.path)) {
     throw new Error(quota.reason || '当前上游未配置额度查询能力');
   }
 
-  const url = normalizeString(config && config.quota_url) || quota.url;
+  const url = normalizeString(config && config.quota_url) || (quota.path ? joinUrl(normalizeSub2ApiBaseUrl(config.base_url), quota.path) : quota.url);
   if (!/^https?:\/\//i.test(url)) {
     throw new Error('额度查询地址无效');
   }
@@ -1111,6 +1138,8 @@ function parseQuotaBody(config, body) {
     return parseOpenRouterKeyQuota(body);
   }
 
+  if (parser === 'sub2api') return parseSub2ApiUsage(body);
+
   if (parser === 'chatgpt') {
     return parseChatGptQuota(body);
   }
@@ -1177,6 +1206,7 @@ module.exports = {
   PROTOCOL_NAMES,
   PROVIDER_PRESETS,
   getProviderPreset,
+  normalizeSub2ApiBaseUrl,
   listProviderPresets,
   resolvePresetForConfig,
   getProtocolPath,

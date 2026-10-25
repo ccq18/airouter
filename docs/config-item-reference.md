@@ -73,7 +73,7 @@
 | --- | --- |
 | `id` | 稳定且唯一的账号 ID；缺少时服务生成并持久化 |
 | `type` | 必须为 `apikey`、`token` 或 `claude_token`，不再默认当作 Token |
-| `preset` | 平台：`chatgpt`、`claude`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`custom`、`opencode-free`、`openrouter-free` |
+| `preset` | 平台：`chatgpt`、`claude`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`custom`、`opencode-free`、`openrouter-free`、`sub2api` |
 | `description` | 管理页名称 |
 | `enabled` | 布尔值，缺省为 true；停用使用此字段，不另设停用账号数组 |
 | `base_url` | 上游地址；管理台新增时按平台填入默认值 |
@@ -82,7 +82,7 @@
 | `protocol_paths` | 可选协议路径覆盖，键为协议名，值为路径或 null |
 | `quota_url` | 可选额度地址覆盖，仍使用该平台的额度解析器；日常表单不显示 |
 
-API Key 账号使用 `apikey`。ChatGPT 登录态使用 `access_token`、`account_id` 和可选 `refresh_token`；Sub2API 使用 `type: "token"`、`subtype: "sub2api"` 与其导出的 `credentials`，推荐通过导入入口生成。Claude OAuth 使用 `access_token`、可选 `refresh_token`、到期时间及账号信息，由登录脚本写入。
+API Key 账号使用 `apikey`。ChatGPT 登录态使用 `access_token`、`account_id` 和可选 `refresh_token`；Sub2API Agent Identity 导出使用 `type: "token"`、`subtype: "sub2api"` 与其导出的 `credentials`，通过导入入口生成；中转站 API Key 接入则使用 `type: "apikey"`、`preset: "sub2api"`。Claude OAuth 使用 `access_token`、可选 `refresh_token`、到期时间及账号信息，由登录脚本写入。
 
 每个模型需要非空 `id`，并可配置 `protocols`。协议仅支持 `chat_completions`、`responses`、`messages`；缺少时按平台默认值规范化。可选 `capabilities` 为布尔值映射，`context_window`、`max_output_tokens` 为正整数。模型清单只约束候选，不自动对客户端公开。
 
@@ -151,3 +151,25 @@ API Key 账号使用 `apikey`。ChatGPT 登录态使用 `access_token`、`accoun
 池不接受 `models_endpoint`、`protocol_paths`、`quota_url` 覆盖，模型列表固定且不可编辑。内部目录是运行缓存，原子保存在配置旁的 `config.json.pools-cache.json`，不含密钥、提示词或返回内容；不进入 Git。重启恢复仅接受身份匹配且价格资格尚未过期的缓存。近期统计在内存保留近 24 小时最多 32 次记录，重启后重新积累。
 
 路由 `max_attempts` 仍限制外层候选次数；池占其中一个名额，内部受 `pool.max_attempts` 独立限制。`auto` 可配置 DeepSeek → GLM → Go 免费池/free → OpenRouter 免费池/free，并设外层尝试上限至少 4；同样规则适用于其他客户端 ID。
+
+
+## 7. Sub2API 中转站 API Key
+
+```json
+{
+  "id": "sub2api-relay",
+  "type": "apikey",
+  "preset": "sub2api",
+  "base_url": "https://relay.example.invalid/v1",
+  "apikey": "sk-example-relay-replace-me",
+  "models": [{ "id": "gpt-example", "protocols": ["responses"] }]
+}
+```
+
+管理页可填站点根网址或 `/v1`；程序统一为一个 `/v1`，前缀部署也保留。内置同 Key Bearer 鉴权：`GET /v1/models` 同步模型、`GET /v1/usage` 读取 Key/钱包/订阅的金额限制，三个转发路径分别为 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`，实际权限取决于 Key 分组。目录缺协议元数据时，OpenAI/Codex 模型建议 Responses，Claude 建议 Messages，其余建议 Chat；用户可手工修订。同步依然先预览，保存后应用。
+
+额度依据[官方 Sub2API Usage 实现](https://github.com/Wei-Shaw/sub2api/blob/3f1c8f36ce8c2cd378015830a90e89970b9a9ea7/backend/internal/handler/gateway_handler.go#L1584)：`quota_limited` 显示 Key 总金额及 5h/1d/7d 金额窗口；`unrestricted` 显示钱包 USD 余额或订阅日/周/月限制。零限额表示不限额，缺失字段保持未知，不以历史消费虚构总额度或百分比。Key 限额响应不保证能读到底层钱包余额；未暴露的窗口重置时间保持 null。
+
+上游没有在 Usage 暴露 Simple 运行模式，因此仅有零/负钱包余额时不能证明推理被阻断，状态保持未知并由真实调用验证；明确 Key 停用、过期或限制耗尽仍阻断。没有站点管理权限要求，不使用登录密码或管理 Key。
+
+所有 USD 额度在界面以金额展示：账号余额优先，Key 和订阅/窗口限制分别列出，不相加。OpenRouter 的 `total_credits` 是累计充值，不把余额占累计充值比例当作剩余套餐比例。

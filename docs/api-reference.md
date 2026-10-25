@@ -37,7 +37,7 @@
 | `POST /admin/api/upstreams/:id/models/discover` | 空对象 | 使用已保存账号查询目录并返回差异 |
 | `POST /admin/api/upstreams/:id/quota-refresh` | 空对象 | `config_id`、归一化 `quota`、当前 `upstream` |
 
-目录差异包含 `discovered`、`added`、`removed`、`kept`、`protocol_changes` 和 `suggested_models`；界面合并后仍需保存账号才会持久化。内置平台使用内置目录规则，自定义平台支持 `models_endpoint`。
+目录差异包含 `discovered`、`added`、`removed`、`kept`、`protocol_changes` 和 `suggested_models`；界面合并后仍需保存账号才会持久化。内置平台使用内置目录规则，自定义平台支持 `models_endpoint`。Sub2API 中转站使用同一转发 Key 查询站点 `/v1/models` 与 `/v1/usage`，钱包/Key/订阅额度按 USD 金额归一化；配置及上游信息缺失边界见[Sub2API 配置](config-item-reference.md#7-sub2api-中转站-api-key)。
 
 账号对象和模型字段详见[配置契约](config-item-reference.md#4-上游账号)。被路由引用的模型或协议不可直接移除；仍被引用的账号不可删除。
 

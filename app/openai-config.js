@@ -1,5 +1,5 @@
 const { isFreePool, FREE_MODEL, credentialSource, validateFreePools } = require('./free-pool-config');
-const { getProviderPreset } = require('./provider-presets');
+const { getProviderPreset, normalizeSub2ApiBaseUrl } = require('./provider-presets');
 const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
 const CLAUDE_API_BASE_URL = 'https://api.anthropic.com';
@@ -306,7 +306,7 @@ function createTokenRuntimeConfig(config, index) {
 
 function createApiKeyRuntimeConfig(config, index) {
     const apikey = normalizeString(config.apikey);
-    const baseUrl = normalizeString(config.base_url).replace(/\/+$/, '');
+    const baseUrl = config.preset === 'sub2api' ? normalizeSub2ApiBaseUrl(config.base_url) : normalizeString(config.base_url).replace(/\/+$/, '');
 
     if (!apikey || !baseUrl) {
         throw new Error('apikey 配置至少需要 apikey 和 base_url');

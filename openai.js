@@ -11,7 +11,7 @@ const {
   updateConfigSettings, updateRoutingModels, writeParsedConfigFile,
 } = require('./app/config-editor');
 const { ensureConfigIds, parseRoutingConfig, getPublicModelIds, getRoutingRevision, validateConfigModels } = require('./app/routing-config');
-const { listProviderPresets, getProviderPreset, buildDiscoveryRequest, parseModelCatalog, diffModelCatalog } = require('./app/provider-presets');
+const { listProviderPresets, getProviderPreset, normalizeSub2ApiBaseUrl, buildDiscoveryRequest, parseModelCatalog, diffModelCatalog } = require('./app/provider-presets');
 const { createQuotaEngine } = require('./app/quota-engine');
 const { createModelRouter, createRoutingHealthStore, createRoutingContextStore } = require('./app/model-router');
 const { createExplicitRoutingHandler } = require('./app/explicit-routing-handler');
@@ -243,6 +243,9 @@ function withPreset(item) {
   if (!preset) throw new ConfigEditorError('请选择有效的平台');
   const result = { ...item, type: preset.default_type, base_url: item.base_url || preset.default_base_url,
     models: validateConfigModels(item.models === undefined ? undefined : item.models, { preset: preset.id }) };
+  if (preset.id === 'sub2api') {
+    try { result.base_url = normalizeSub2ApiBaseUrl(result.base_url); } catch (error) { throw new ConfigEditorError(error.message); }
+  }
   if (isFreePool(result)) {
     result.pool = normalizePoolOptions(item.pool);
     if (result.credential_ref) delete result.apikey;

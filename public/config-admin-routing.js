@@ -19,6 +19,7 @@
     { id: 'glm-cn', label: 'GLM Coding Plan 中国', credential: 'apikey', default_base_url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocols: ['chat_completions'] },
     { id: 'glm-global', label: 'GLM Coding Plan 国际', credential: 'apikey', default_base_url: 'https://api.z.ai/api/coding/paas/v4', protocols: ['chat_completions'] },
     { id: 'claude', label: 'Claude OAuth', credential: 'token', default_base_url: 'https://api.anthropic.com', protocols: ['messages'] },
+    { id: 'sub2api', label: 'Sub2API API Key', credential: 'apikey', default_base_url: '', protocols: [...PROTOCOLS] },
     { id: 'custom', label: '自定义接口', credential: 'apikey', default_base_url: '', protocols: [...PROTOCOLS] },
   ];
 
@@ -80,7 +81,60 @@
     return labels[reason] || (/^[a-z_]+$/.test(reason || '') ? '暂时不可用' : reason || '');
   }
 
+  function formatUsd(value) {
+    const amount = Math.abs(value);
+    if (amount > 0 && amount < 1e-8) return `${value < 0 ? '-' : ''}<$0.00000001`;
+    const digits = amount > 0 && amount < 0.01 ? Math.min(8, Math.ceil(-Math.log10(amount)) + 1) : 2;
+    return `${value < 0 ? '-' : ''}$${amount.toFixed(digits)}`;
+  }
+
+  function isKeyBudget(metric) {
+    return /^key:/.test(metric.id || '') || /^(key_limit|key_quota|key_window_.+)$/.test(metric.id || '');
+  }
+
+  function budgetTitle(metric) {
+    const id = (metric.id || '').replace(/^(key|credits):/, '');
+    return ({ account_balance: '账户余额', wallet_balance: '钱包余额',
+      key_window_5h: 'Key 5小时', key_window_1d: 'Key 每日', key_window_7d: 'Key 7天',
+      subscription_daily: '订阅每日', subscription_weekly: '订阅每周', subscription_monthly: '订阅每月',
+      subscription_expiry: '订阅有效期', key_status: 'Key 状态', key_expiry: 'Key 有效期',
+    })[id] || (isKeyBudget(metric) ? 'Key' : '额度');
+  }
+
+  function isBudgetExhausted(metric) {
+    if (metric.blocking === false) return false;
+    return metric.state === 'exhausted' || (metric.state === undefined && Number.isFinite(metric.remaining) && metric.remaining <= 0);
+  }
+
   function formatQuotaSummary(quota) {
+    const metrics = Array.isArray(quota?.metrics) ? quota.metrics : [];
+    const budgets = metrics.filter(metric => metric?.kind === 'budget' && metric.unit === 'USD');
+    if (budgets.length) {
+      const known = budgets.filter(metric => Number.isFinite(metric.remaining));
+      const account = known.find(metric => /(^|:)(account_balance|wallet_balance)$/.test(metric.id || ''));
+      const keys = known.filter(isKeyBudget);
+      const primary = account || keys.reduce((lowest, metric) => !lowest || metric.remaining < lowest.remaining ? metric : lowest, null) || known[0];
+      const title = primary ? budgetTitle(primary) : '';
+      const label = primary ? `${account ? '余额' : title === '额度' ? '剩余额度' : `${title} 剩余`} ${formatUsd(primary.remaining)}`
+        : quota.state === 'exhausted' ? '额度已耗尽' : quota.state === 'unknown' ? '额度未读取' : '额度可用';
+      const details = [];
+      for (const budget of budgets) {
+        const name = budgetTitle(budget);
+        if (budget !== primary) {
+          if (Number.isFinite(budget.remaining)) details.push(`${name} 剩余 ${formatUsd(budget.remaining)}${Number.isFinite(budget.limit) ? ` / ${formatUsd(budget.limit)}` : ''}`);
+          else if (budget.blocking === false && budget.state === 'available') details.push(`${name} 不限额`);
+          else if (Number.isFinite(budget.limit) || /^(subscription_|key_window_)/.test(budget.id || '')) details.push(`${name} 剩余额度未读取${Number.isFinite(budget.limit) ? ` / ${formatUsd(budget.limit)}` : ''}`);
+        } else if (!account && Number.isFinite(budget.limit)) details.push(`${name} 限额 ${formatUsd(budget.limit)}`);
+        if (isBudgetExhausted(budget)) details.push(name === '账户余额' ? '账户余额已耗尽' : name === 'Key' ? 'Key 限额已耗尽' : `${name} 已耗尽`);
+        else if (budget.state === 'unknown' && Number.isFinite(budget.remaining)) details.push(`${name} 是否限制调用尚未确认`);
+      }
+      if (quota.error) details.push(String(quota.error));
+      if (quota.reason && !['quota_available', 'probe_success'].includes(quota.reason)) details.push(statusLabel(quota.reason));
+      const exhausted = quota.state === 'exhausted' || budgets.some(isBudgetExhausted);
+      if (exhausted && !budgets.some(isBudgetExhausted)) details.push('额度已耗尽');
+      if (quota.state === 'unknown' && !details.length) details.push('额度状态未确认');
+      return { label, tone: exhausted ? 'danger' : quota.state === 'unknown' ? 'warn' : 'ok', detail: [...new Set(details)].join('；') };
+    }
     if (!quota || !quota.state || quota.state === 'unknown') {
       const detail = quota && quota.error
         ? String(quota.error).slice(0, 120)
@@ -578,7 +632,11 @@
       if (!state.editingUpstreamId && preset.default_base_url) {
         dom.baseUrl.value = preset.default_base_url;
       }
-      dom.baseUrl.placeholder = preset.default_base_url || 'https://...';
+      dom.baseUrl.placeholder = preset.id === 'sub2api' ? 'https://your-sub2api.example/v1' : preset.default_base_url || 'https://...';
+      const baseHint = el('upstreamBaseUrlHint');
+      if (baseHint) baseHint.textContent = preset.id === 'sub2api' ? '填写你的 Sub2API 网关根网址或 /v1 地址；模型与用量接口使用同一转发凭证。' : '内置平台会填入官方地址，通常无需修改。';
+      const connectionSettings = dom.baseUrl.closest?.('details');
+      if (connectionSettings && preset.id === 'sub2api') connectionSettings.open = true;
       if (dom.customEndpointField) {
         dom.customEndpointField.hidden = preset.id !== 'custom';
       }
@@ -611,7 +669,7 @@
       }
       const presetHint = el('upstreamPresetHint');
       if (presetHint) {
-        presetHint.textContent = isPoolPreset(preset) ? '对路由固定提供 free；内部模型按价格与能力自动同步，免费资格不明确的模型不会调用。' : ({'glm-cn':'自动读取推理额度窗口，工具额度不影响模型转发。','glm-global':'自动读取推理额度窗口，工具额度不影响模型转发。','opencode-go':'自动读取套餐额度；每个会话保持稳定的上游连接标识。','openrouter':'使用同一转发凭证读取账户余额和 Key 限额。','opencode-zen':'支持模型转发和同步；平台尚未提供已验证的普通 Key 余额接口。'}[preset.id]) || (preset.id === 'custom'
+        presetHint.textContent = isPoolPreset(preset) ? '对路由固定提供 free；内部模型按价格与能力自动同步，免费资格不明确的模型不会调用。' : ({'sub2api':'使用 Sub2API 网关 API Key，自动读取其 Key、钱包或订阅金额；模型目录无需单独填写接口。','glm-cn':'自动读取推理额度窗口，工具额度不影响模型转发。','glm-global':'自动读取推理额度窗口，工具额度不影响模型转发。','opencode-go':'自动读取套餐额度；每个会话保持稳定的上游连接标识。','openrouter':'使用同一转发凭证读取账户余额和 Key 限额。','opencode-zen':'支持模型转发和同步；平台尚未提供已验证的普通 Key 余额接口。'}[preset.id]) || (preset.id === 'custom'
           ? '自定义接口需要维护 Base URL 和模型列表接口。'
           : '内置平台的接口地址与模型发现规则由系统维护。');
       }
@@ -1060,6 +1118,7 @@
       if (!state.editingUpstreamId && !isTokenPreset(preset) && !apiKey && !item.credential_ref) {
         throw new Error('新增账号需要填写 API Key');
       }
+      if (!item.base_url && preset.id === 'sub2api') throw new Error('Sub2API 需要填写网关 Base URL');
       if (!item.base_url && preset.id === 'custom') {
         throw new Error('自定义接口需要填写 Base URL');
       }

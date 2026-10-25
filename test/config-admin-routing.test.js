@@ -427,3 +427,131 @@ test('pool controls stay in independent dialogs and advanced settings, with fixe
   assert.match(routingJs, /data-target-editor-field="model" \$\{account\.pool \? 'disabled'/);
   assert.match(routingJs, /免费池固定使用 free/);
 });
+
+test('USD quotas show remaining account balance rather than a percentage of cumulative credits', () => {
+  const result = routingAdmin.formatQuotaSummary({ state: 'available', metrics: [{ id: 'credits:account_balance', kind: 'budget', unit: 'USD', remaining: 148.94495293, used: 3264.91496757, limit: 3413.8599205, remaining_percent: 4.3629485801568935 }] });
+  assert.equal(result.label, '余额 $148.94');
+  assert.equal(result.tone, 'ok');
+  assert.doesNotMatch(result.label + result.detail, /3413|4\.362|%/);
+});
+
+test('account balance and Key allowance stay separate and never sum or replace each other', () => {
+  const metrics = [
+    { id: 'credits:account_balance', kind: 'budget', unit: 'USD', remaining: 148.94, limit: 3413.86 },
+    { id: 'key:key_limit', kind: 'budget', unit: 'USD', remaining: 7.5, limit: 20 },
+  ];
+  const result = routingAdmin.formatQuotaSummary({ state: 'available', metrics });
+  assert.equal(result.label, '余额 $148.94');
+  assert.match(result.detail, /Key 剩余 \$7\.50 \/ \$20\.00/);
+  assert.doesNotMatch(result.detail, /156\.44|3413/);
+});
+
+test('Key-only USD budgets show money without requiring remaining_percent', () => {
+  const key = routingAdmin.formatQuotaSummary({ state: 'available', metrics: [{ id: 'key:key_limit', kind: 'budget', unit: 'USD', remaining: 12.34, limit: 50 }] });
+  assert.equal(key.label, 'Key 剩余 $12.34');
+  assert.match(key.detail, /Key 限额 \$50\.00/);
+  const generic = routingAdmin.formatQuotaSummary({ state: 'available', metrics: [{ id: 'budget:other', kind: 'budget', unit: 'USD', remaining: 2.75 }] });
+  assert.equal(generic.label, '剩余额度 $2.75');
+});
+
+test('unlimited or unknown Key limits never become zero money or unlimited account balance', () => {
+  const account = { id: 'credits:account_balance', kind: 'budget', unit: 'USD', remaining: 148.94 };
+  const unlimited = { id: 'key:key_limit', kind: 'budget', unit: 'USD', remaining: null, limit: null };
+  const result = routingAdmin.formatQuotaSummary({ state: 'available', metrics: [account, unlimited] });
+  assert.equal(result.label, '余额 $148.94');
+  assert.doesNotMatch(result.detail, /Key 剩余|\$0\.00|无限/);
+  assert.equal(routingAdmin.formatQuotaSummary({ state: 'unknown', error: 'Key endpoint failed', metrics: [unlimited] }).label, '额度未读取');
+});
+
+test('USD exhaustion keeps the real balance and identifies the exhausted constraint', () => {
+  const account = { id: 'credits:account_balance', kind: 'budget', unit: 'USD', remaining: 148.94, state: 'available' };
+  const key = { id: 'key:key_limit', kind: 'budget', unit: 'USD', remaining: 0, limit: 10, state: 'exhausted' };
+  const keyBlocked = routingAdmin.formatQuotaSummary({ state: 'exhausted', metrics: [account, key] });
+  assert.equal(keyBlocked.label, '余额 $148.94');
+  assert.equal(keyBlocked.tone, 'danger');
+  assert.match(keyBlocked.detail, /Key 限额已耗尽/);
+  assert.match(keyBlocked.detail, /Key 剩余 \$0\.00 \/ \$10\.00/);
+  const empty = routingAdmin.formatQuotaSummary({ state: 'exhausted', metrics: [{ ...account, remaining: 0, state: 'exhausted' }] });
+  assert.equal(empty.label, '余额 $0.00');
+  assert.equal(empty.tone, 'danger');
+  assert.match(empty.detail, /账户余额已耗尽/);
+});
+
+test('small nonzero balances preserve precision and partial read failures remain visible', () => {
+  for (const amount of [0.009, 0.0001, 0.00000000001]) {
+    const result = routingAdmin.formatQuotaSummary({ state: 'available', error: 'Key quota request failed', metrics: [{ id: 'credits:account_balance', kind: 'budget', unit: 'USD', remaining: amount }] });
+    assert.doesNotMatch(result.label, /^余额 \$0\.00$/);
+    assert.match(result.label, /0\./);
+    assert.match(result.detail, /Key quota request failed/);
+    assert.equal(result.tone, 'ok');
+  }
+});
+
+test('Sub2API zero wallets stay unknown and preserve the displayed amount', () => {
+  const result = routingAdmin.formatQuotaSummary({ state: 'unknown', reason: '运行模式未暴露，需真实请求验证', metrics: [{ id: 'wallet_balance', kind: 'budget', unit: 'USD', remaining: 0, state: 'unknown', blocking: true }] });
+  assert.equal(result.label, '余额 $0.00');
+  assert.equal(result.tone, 'warn');
+  assert.doesNotMatch(result.detail, /已耗尽/);
+  assert.match(result.detail, /真实请求验证/);
+  const nonblocking = routingAdmin.formatQuotaSummary({ state: 'available', metrics: [{ id: 'wallet_balance', kind: 'budget', unit: 'USD', remaining: 0, state: 'available', blocking: false }] });
+  assert.equal(nonblocking.tone, 'ok');
+  assert.doesNotMatch(nonblocking.detail, /已耗尽/);
+});
+
+test('Sub2API Key total quota and all monetary rate windows are shown independently', () => {
+  const metrics = [
+    { id: 'key_quota', remaining: 50, limit: 100, state: 'available' },
+    { id: 'key_window_5h', remaining: 2, limit: 10, state: 'available' },
+    { id: 'key_window_1d', remaining: 8, limit: 20, state: 'available' },
+    { id: 'key_window_7d', remaining: 25, limit: 50, state: 'available' },
+  ].map(metric => ({ kind: 'budget', unit: 'USD', blocking: true, ...metric }));
+  const result = routingAdmin.formatQuotaSummary({ state: 'available', metrics });
+  const text = result.label + '；' + result.detail;
+  assert.match(text, /Key 剩余 \$50\.00 \/ \$100\.00/);
+  assert.match(text, /Key 5小时 剩余 \$2\.00/);
+  assert.match(text, /Key 5小时 限额 \$10\.00/);
+  assert.match(text, /Key 每日 剩余 \$8\.00 \/ \$20\.00/);
+  assert.match(text, /Key 7天 剩余 \$25\.00 \/ \$50\.00/);
+  assert.doesNotMatch(text, /\$85\.00/);
+});
+
+test('Sub2API subscription daily weekly monthly budgets retain each remaining value and limit', () => {
+  const metrics = [
+    { id: 'subscription_daily', remaining: 1.5, limit: 5 },
+    { id: 'subscription_weekly', remaining: 10, limit: 30 },
+    { id: 'subscription_monthly', remaining: 50, limit: 100 },
+  ].map(metric => ({ kind: 'budget', unit: 'USD', state: 'available', blocking: true, ...metric }));
+  const result = routingAdmin.formatQuotaSummary({ state: 'available', metrics });
+  assert.equal(result.label, '订阅每日 剩余 $1.50');
+  assert.match(result.detail, /订阅每日 限额 \$5\.00/);
+  assert.match(result.detail, /订阅每周 剩余 \$10\.00 \/ \$30\.00/);
+  assert.match(result.detail, /订阅每月 剩余 \$50\.00 \/ \$100\.00/);
+});
+
+test('unlimited and missing subscription windows never look like exhausted zero allowances', () => {
+  const metrics = [
+    { id: 'subscription_daily', remaining: null, limit: null, state: 'available', blocking: false },
+    { id: 'subscription_weekly', remaining: 0, limit: 20, state: 'unknown', blocking: true },
+    { id: 'subscription_monthly', remaining: null, limit: 100, state: 'unknown', blocking: true },
+  ].map(metric => ({ kind: 'budget', unit: 'USD', ...metric }));
+  const result = routingAdmin.formatQuotaSummary({ state: 'unknown', metrics });
+  assert.equal(result.tone, 'warn');
+  assert.match(result.detail, /订阅每日 不限额/);
+  assert.match(result.detail, /订阅每月 剩余额度未读取 \/ \$100\.00/);
+  assert.doesNotMatch(result.detail, /已耗尽/);
+  const exhausted = routingAdmin.formatQuotaSummary({ state: 'exhausted', metrics: [{ ...metrics[1], state: 'exhausted' }] });
+  assert.equal(exhausted.tone, 'danger');
+  assert.match(exhausted.detail, /订阅每周 已耗尽/);
+});
+
+test('Sub2API API Key preset requires its gateway URL and retains existing model discovery', async () => {
+  assert.equal(routingAdmin.getPresetLabel([], 'sub2api'), 'Sub2API API Key');
+  const { admin, nodes } = poolHarness();
+  admin.state.editingUpstreamId = '';
+  nodes.get('upstreamPresetSelect').value = 'sub2api';
+  nodes.get('upstreamDescriptionInput').value = 'Self hosted gateway';
+  nodes.get('upstreamApiKeyInput').value = 'fake-api-key';
+  nodes.get('upstreamBaseUrlInput').value = '';
+  nodes.get('upstreamModelsEditor').querySelectorAll = () => [];
+  await assert.rejects(admin.saveUpstream(), /Sub2API.*Base URL/);
+});
