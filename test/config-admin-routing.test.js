@@ -176,3 +176,166 @@ test('shared admin helpers build authenticated URLs and parse errors', () => {
   );
   assert.equal(typeof routingAdmin.createRoutingAdmin, 'function');
 });
+
+
+test('model test responses extract text for all three entry protocols and keep error envelopes', () => {
+  const { extractTestResponseText, normalizeTestResult } = routingAdmin;
+  assert.equal(extractTestResponseText({ choices: [{ message: { content: 'chat reply' } }] }), 'chat reply');
+  assert.equal(extractTestResponseText({ choices: [{ message: { content: [{ type: 'text', text: 'one' }, { type: 'text', text: 'two' }] } }] }), 'one\ntwo');
+  assert.equal(extractTestResponseText({ output: [{ type: 'reasoning', summary: [] }, { type: 'message', content: [{ type: 'output_text', text: 'responses reply' }] }] }), 'responses reply');
+  assert.equal(extractTestResponseText({ output_text: 'simple response' }), 'simple response');
+  assert.equal(extractTestResponseText({ content: [{ type: 'thinking', thinking: 'private reasoning' }, { type: 'text', text: 'messages reply' }] }), 'messages reply');
+  const payload = { status_code: 429, elapsed_ms: 37, attempts: [{ config_id: 'limited' }], response: { error: { message: 'quota exhausted' } } };
+  const result = normalizeTestResult(payload, 429, 42);
+  assert.equal(result.statusCode, 429);
+  assert.equal(result.elapsedMs, 37);
+  assert.equal(result.outcome, 'failed');
+  assert.equal(result.error, 'quota exhausted');
+  assert.deepEqual(result.attempts, payload.attempts);
+  assert.equal(result.raw, payload);
+  assert.equal(normalizeTestResult({ error: { message: 'invalid input' } }, 400, 2).error, 'invalid input');
+  assert.equal(normalizeTestResult({ outcome: 'skipped', response: { error: 'disabled' } }, 200, 2).outcome, 'skipped');
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+test('candidate tests run sequentially, publish each result, and continue after request failure', async () => {
+  const first = deferred();
+  const calls = [];
+  const snapshots = [];
+  const runner = routingAdmin.createRouteTestRunner({
+    execute: async job => {
+      calls.push(job);
+      if (job === 'one') return first.promise;
+      if (job === 'two') throw new Error('connection failed');
+      return { outcome: 'success', text: 'last reply' };
+    },
+    onChange: snapshot => snapshots.push(snapshot),
+  });
+  const running = runner.start(['one', 'two', 'three']);
+  assert.deepEqual(calls, ['one']);
+  assert.equal(await runner.start(['duplicate']), false);
+  first.resolve({ outcome: 'failed', statusCode: 429 });
+  assert.equal(await running, true);
+  assert.deepEqual(calls, ['one', 'two', 'three']);
+  assert.ok(snapshots.some(snapshot => snapshot.items[0].state === 'done' && snapshot.items[1].state === 'waiting'));
+  const final = snapshots.at(-1);
+  assert.equal(final.running, false);
+  assert.deepEqual(final.items.map(item => item.state), ['done', 'done', 'done']);
+  assert.equal(final.items[0].result.statusCode, 429);
+  assert.equal(final.items[1].error, 'connection failed');
+  assert.equal(final.items[2].result.text, 'last reply');
+});
+
+test('stop aborts active request, prevents later candidates, and rejects stale results after reopening', async () => {
+  const old = deferred();
+  const calls = [];
+  const snapshots = [];
+  let signal;
+  const runner = routingAdmin.createRouteTestRunner({
+    execute: (job, currentSignal) => {
+      calls.push(job);
+      if (job === 'old') { signal = currentSignal; return old.promise; }
+      return Promise.resolve({ text: 'new result' });
+    },
+    onChange: snapshot => snapshots.push(snapshot),
+  });
+  const previous = runner.start(['old', 'never-start']);
+  runner.stop();
+  assert.equal(signal.aborted, true);
+  assert.equal(snapshots.at(-1).stopped, true);
+  assert.deepEqual(snapshots.at(-1).items.map(item => item.state), ['cancelled', 'cancelled']);
+  await runner.start(['new']);
+  const count = snapshots.length;
+  old.resolve({ text: 'stale result' });
+  assert.equal(await previous, false);
+  assert.equal(snapshots.length, count);
+  assert.deepEqual(calls, ['old', 'new']);
+  assert.equal(snapshots.at(-1).items[0].result.text, 'new result');
+});
+
+function testAdminHarness(fetch) {
+  const nodes = new Map();
+  const document = {
+    getElementById(id) {
+      if (!nodes.has(id)) nodes.set(id, {
+        id, value: '', hidden: true, disabled: false, textContent: '', innerHTML: '',
+        focus() {}, classList: { toggle() {}, add() {}, remove() {} },
+      });
+      return nodes.get(id);
+    },
+    querySelectorAll() { return [this.getElementById('routeTestDialog')]; },
+    body: { classList: { toggle() {} } },
+  };
+  const admin = routingAdmin.createRoutingAdmin({ document, window: {
+    location: { search: '?auth_token=test-admin', origin: 'http://localhost:3009' }, fetch,
+  } });
+  admin.state.upstreams = { configs: [{ id: 'account-a', description: 'Account A' }] };
+  admin.state.routes = { models: [{ id: 'public-id', entry_protocols: ['responses', 'chat_completions'], targets: [
+    { id: 'target-1', config_id: 'account-a', model: 'backend-1' },
+    { id: 'target-2', config_id: 'account-a', model: 'backend-2' },
+  ] }] };
+  admin.openRouteTest('public-id');
+  // The lightweight DOM stub does not implement native select option selection.
+  document.getElementById('routeTestProtocol').value = 'responses';
+  document.getElementById('routeTestInput').value = 'custom\ninput';
+  return { admin, nodes, document };
+}
+
+test('test dialog sends saved route and target IDs, preserves non-200 details, and escapes model output', async () => {
+  const calls = [];
+  const { admin, nodes } = testAdminHarness(async (url, options) => {
+    const request = JSON.parse(options.body);
+    calls.push({ url, request });
+    const failed = request.target_id === 'target-1';
+    const response = failed ? { error: { message: '<script>bad()</script>' } }
+      : { output: [{ content: [{ type: 'output_text', text: '<img src=x onerror=alert(1)>' }] }] };
+    return { status: failed ? 429 : 200, text: async () => JSON.stringify({
+      status_code: failed ? 429 : 200, elapsed_ms: 5,
+      attempts: [{ config_id: 'account-a', account_label: 'Account A', model: 'backend-model' }], response,
+    }) };
+  });
+  assert.match(nodes.get('routeTestProtocol').innerHTML, /^<option value="responses">/);
+  await admin.runRouteTest('candidate');
+  assert.deepEqual(calls.map(call => call.request), [
+    { model: 'public-id', input: 'custom\ninput', mode: 'candidate', protocol: 'responses', target_id: 'target-1' },
+    { model: 'public-id', input: 'custom\ninput', mode: 'candidate', protocol: 'responses', target_id: 'target-2' },
+  ]);
+  assert.match(calls[0].url, /\/admin\/api\/model-routes\/test/);
+  const rendered = nodes.get('routeTestResults').innerHTML;
+  assert.match(rendered, /HTTP 429/);
+  assert.match(rendered, /backend-model/);
+  assert.match(rendered, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+  assert.match(rendered, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(rendered, /<script>|<img /);
+  assert.equal(nodes.get('routeTestRunButton').disabled, false);
+  await admin.runRouteTest('route');
+  assert.deepEqual(calls.at(-1).request, { model: 'public-id', input: 'custom\ninput', mode: 'route', protocol: 'responses' });
+});
+
+test('closing the dialog aborts its request and stops remaining candidates', async () => {
+  const waiting = deferred();
+  let activeSignal;
+  let calls = 0;
+  const { admin, nodes } = testAdminHarness(async (url, options) => {
+    calls += 1;
+    activeSignal = options.signal;
+    return waiting.promise;
+  });
+  const running = admin.runRouteTest('candidate');
+  assert.equal(nodes.get('routeTestRunButton').disabled, true);
+  admin.closeLayer('routeTestDialog');
+  assert.equal(activeSignal.aborted, true);
+  assert.equal(nodes.get('routeTestDialog').hidden, true);
+  admin.openRouteTest('public-id');
+  const freshHtml = nodes.get('routeTestResults').innerHTML;
+  waiting.resolve({ status: 200, text: async () => JSON.stringify({ response: { output_text: 'old response' } }) });
+  await running;
+  assert.equal(calls, 1);
+  assert.equal(nodes.get('routeTestResults').innerHTML, freshHtml);
+});

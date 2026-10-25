@@ -103,6 +103,90 @@
     };
   }
 
+  function extractTestResponseText(response) {
+    if (!response || typeof response !== 'object') return typeof response === 'string' ? response : '';
+    const contentText = content => {
+      if (typeof content === 'string') return content;
+      if (!Array.isArray(content)) return '';
+      return content.map(part => typeof part === 'string' ? part : (part?.text || part?.refusal || '')).filter(Boolean).join('\n');
+    };
+    if (Array.isArray(response.choices)) {
+      return response.choices.map(choice => contentText(choice.message?.content) || choice.message?.refusal || choice.text || '').filter(Boolean).join('\n');
+    }
+    if (typeof response.output_text === 'string') return response.output_text;
+    if (Array.isArray(response.output)) {
+      return response.output.map(item => contentText(item.content)).filter(Boolean).join('\n');
+    }
+    return contentText(response.content);
+  }
+
+  function normalizeTestResult(payload, httpStatus, elapsedMs) {
+    const envelope = payload && typeof payload === 'object' ? payload : {};
+    const response = Object.prototype.hasOwnProperty.call(envelope, 'response') ? envelope.response : envelope;
+    const error = response?.error || envelope.error;
+    const statusCode = Number.isFinite(envelope.status_code) ? envelope.status_code : httpStatus;
+    const errorText = typeof error === 'string' ? error : error?.message || (error ? JSON.stringify(error) : '');
+    return {
+      statusCode,
+      elapsedMs: Number.isFinite(envelope.elapsed_ms) ? envelope.elapsed_ms : elapsedMs,
+      attempts: Array.isArray(envelope.attempts) ? envelope.attempts : [],
+      outcome: envelope.outcome || (statusCode >= 200 && statusCode < 300 && !error ? 'success' : 'failed'),
+      text: extractTestResponseText(response),
+      error: errorText || (statusCode >= 400 ? `HTTP ${statusCode}` : ''),
+      raw: payload,
+    };
+  }
+
+  // A stopped run may settle after another starts. Only the active run can publish results.
+  function createRouteTestRunner({ execute, onChange = () => {} }) {
+    let active = null;
+    function publish(run) {
+      onChange({ running: run.running, stopped: run.stopped, items: run.items.map(item => ({ ...item })) });
+    }
+    return {
+      stop() {
+        if (!active?.running) return;
+        const run = active;
+        run.running = false;
+        run.stopped = true;
+        run.controller.abort();
+        run.items.forEach(item => {
+          if (item.state === 'waiting' || item.state === 'running') item.state = 'cancelled';
+        });
+        publish(run);
+      },
+      async start(jobs) {
+        if (active?.running) return false;
+        const run = {
+          controller: new AbortController(), running: true, stopped: false,
+          items: jobs.map(job => ({ job, state: 'waiting', result: null, error: '' })),
+        };
+        active = run;
+        publish(run);
+        for (const item of run.items) {
+          if (active !== run || run.controller.signal.aborted) return false;
+          item.state = 'running';
+          publish(run);
+          try {
+            const result = await execute(item.job, run.controller.signal);
+            if (active !== run || run.controller.signal.aborted) return false;
+            item.result = result;
+            item.state = 'done';
+          } catch (error) {
+            if (active !== run || run.controller.signal.aborted) return false;
+            item.error = error?.message || String(error);
+            item.state = 'done';
+          }
+          publish(run);
+        }
+        if (active !== run || run.controller.signal.aborted) return false;
+        run.running = false;
+        publish(run);
+        return true;
+      },
+    };
+  }
+
   function createRoutingAdmin(options = {}) {
     const doc = options.document || globalScope.document;
     const windowScope = options.window || globalScope;
@@ -122,6 +206,8 @@
       editingTargetIndex: null,
       discovery: null,
       pendingTokenImportFromAccount: false,
+      testRoute: null,
+      testRun: { running: false, stopped: false, items: [] },
     };
 
     const dom = {
@@ -163,6 +249,15 @@
       settingsDrawer: el('settingsDrawer'),
       tokenImportDialog: el('tokenImportDialog'),
       claudeDialog: el('claudeDialog'),
+      testDialog: el('routeTestDialog'),
+      testRouteId: el('routeTestModelId'),
+      testInput: el('routeTestInput'),
+      testProtocol: el('routeTestProtocol'),
+      testRouteButton: el('routeTestRunButton'),
+      testCandidatesButton: el('routeTestAllButton'),
+      testStopButton: el('routeTestStopButton'),
+      testResults: el('routeTestResults'),
+      testStatus: el('routeTestStatus'),
     };
 
     if (!dom.preset || !dom.upstreamTable || !dom.targetsEditor) {
@@ -308,6 +403,7 @@
       if (!layer) {
         return;
       }
+      if (id === 'routeTestDialog') testRunner.stop();
       layer.hidden = true;
       if (id === 'tokenImportDialog') {
         state.pendingTokenImportFromAccount = false;
@@ -1068,6 +1164,7 @@
               </div>
             </div>
             <div class="route-actions">
+              <button class="secondary" type="button" data-test-route="${escapeHtml(route.id)}">测试</button>
               <button class="secondary" type="button" data-edit-route="${escapeHtml(route.id)}">编辑</button>
               <button class="danger" type="button" data-delete-route="${escapeHtml(route.id)}">删除</button>
             </div>
@@ -1096,6 +1193,92 @@
           </ol>
         </article>
       `;
+    }
+
+    const testRunner = createRouteTestRunner({
+      async execute(job, signal) {
+        const started = Date.now();
+        const response = await windowScope.fetch(requestUrl('/admin/api/model-routes/test'), {
+          method: 'POST', signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(job.request),
+        });
+        const text = await response.text();
+        let payload;
+        try {
+          payload = JSON.parse(text);
+        } catch (error) {
+          payload = { error: { message: text || '服务返回了空响应' } };
+        }
+        return normalizeTestResult(payload, response.status, Date.now() - started);
+      },
+      onChange(snapshot) {
+        state.testRun = snapshot;
+        renderTestResults();
+      },
+    });
+
+    function renderTestResults() {
+      if (!dom.testResults) return;
+      const { running, stopped, items } = state.testRun;
+      dom.testRouteButton.disabled = running;
+      dom.testCandidatesButton.disabled = running || !state.testRoute?.targets?.length;
+      dom.testInput.disabled = running;
+      dom.testProtocol.disabled = running;
+      dom.testStopButton.hidden = !running;
+      const completed = items.filter(item => item.state === 'done').length;
+      dom.testStatus.textContent = stopped ? `已停止，完成 ${completed} / ${items.length} 项。` : running
+        ? `正在测试 ${Math.min(completed + 1, items.length)} / ${items.length} 项…`
+        : items.length ? `测试完成，共 ${completed} 项。` : '输入内容后选择测试方式。';
+      dom.testResults.innerHTML = items.map((item, index) => {
+        const result = item.result;
+        const label = item.state === 'waiting' ? '等待中' : item.state === 'running' ? '请求中' : item.state === 'cancelled' ? '已取消'
+          : item.error ? '请求失败' : result?.outcome === 'skipped' ? '已跳过' : result?.outcome === 'success' ? '可用' : '不可用';
+        const tone = item.state !== 'done' || result?.outcome === 'skipped' ? 'warn' : result?.outcome === 'success' ? 'ok' : 'danger';
+        const attempts = result?.attempts || [];
+        const last = attempts[attempts.length - 1];
+        const selection = last ? `${last.account_label || accountLabel(last.config_id)} / ${last.model}` : '';
+        const output = item.error || result?.error || result?.text || (result ? '没有文本内容，请展开完整响应查看详情。' : '');
+        return `<article class="route-test-result">
+          <div class="route-test-result-head"><strong>${index + 1}. ${escapeHtml(item.job.label)}</strong><span class="route-status-chip ${tone}">${label}</span></div>
+          ${result ? `<p class="route-test-meta">${result.statusCode ? `HTTP ${escapeHtml(result.statusCode)}` : '未发送请求'} · ${escapeHtml(result.elapsedMs)} ms${selection ? ` · ${result.outcome === 'success' ? '命中' : '最后尝试'}：${escapeHtml(selection)}` : ''}</p>` : ''}
+          ${attempts.length > 1 ? `<p class="field-hint">尝试顺序：${attempts.map(attempt => escapeHtml(`${attempt.account_label || accountLabel(attempt.config_id)} / ${attempt.model}`)).join(' → ')}</p>` : ''}
+          ${output ? `<pre class="route-test-output">${escapeHtml(output)}</pre>` : ''}
+          ${result ? `<details class="route-test-json"><summary>完整响应 JSON</summary><pre>${escapeHtml(JSON.stringify(result.raw, null, 2))}</pre></details>` : ''}
+        </article>`;
+      }).join('');
+    }
+
+    function openRouteTest(routeId) {
+      const route = getRoutes().find(item => item.id === routeId);
+      if (!route || !dom.testDialog) return;
+      testRunner.stop();
+      state.testRoute = cloneJson(route);
+      state.testRun = { running: false, stopped: false, items: [] };
+      dom.testRouteId.textContent = route.id;
+      dom.testInput.value = '';
+      const protocols = route.entry_protocols?.length ? route.entry_protocols : ['chat_completions'];
+      dom.testProtocol.innerHTML = protocols.map(protocol => `<option value="${escapeHtml(protocol)}">${escapeHtml(protocolLabel(protocol))}</option>`).join('');
+      renderTestResults();
+      openLayer('routeTestDialog');
+      dom.testInput.focus();
+    }
+
+    function runRouteTest(mode) {
+      if (state.testRun.running || !state.testRoute) return;
+      const input = dom.testInput.value;
+      if (!input.trim()) {
+        dom.testStatus.textContent = '请先输入要发送给模型的内容。';
+        dom.testInput.focus();
+        return;
+      }
+      const route = state.testRoute;
+      const request = { model: route.id, input, mode, protocol: dom.testProtocol.value };
+      const jobs = mode === 'route' ? [{ label: `路由入口 / ${route.id}`, request }] : (route.targets || []).map(target => ({
+        label: `${accountLabel(target.config_id)} / ${target.model}`,
+        request: { ...request, target_id: target.id },
+      }));
+      return testRunner.start(jobs);
     }
 
     function renderRoutes() {
@@ -1465,6 +1648,12 @@
           return;
         }
 
+        const testRouteButton = event.target.closest('[data-test-route]');
+        if (testRouteButton) {
+          openRouteTest(testRouteButton.dataset.testRoute);
+          return;
+        }
+
         const editRouteButton = event.target.closest('[data-edit-route]');
         if (editRouteButton) {
           openRoute(editRouteButton.dataset.editRoute);
@@ -1484,6 +1673,10 @@
           return;
         }
       });
+
+      dom.testRouteButton?.addEventListener('click', () => runRouteTest('route'));
+      dom.testCandidatesButton?.addEventListener('click', () => runRouteTest('candidate'));
+      dom.testStopButton?.addEventListener('click', () => testRunner.stop());
 
       dom.preset.addEventListener('change', () => {
         if (!state.editingUpstreamId) {
@@ -1640,6 +1833,8 @@
       openSettings,
       openAccount,
       openRoute,
+      openRouteTest,
+      runRouteTest,
       openTokenImportFromAccount,
       closeLayer,
       saveUpstream,
@@ -1658,6 +1853,9 @@
 
   const exported = {
     createRoutingAdmin,
+    extractTestResponseText,
+    normalizeTestResult,
+    createRouteTestRunner,
     providerIdForConfig,
     getPresetLabel,
     formatQuotaSummary,

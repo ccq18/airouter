@@ -1818,6 +1818,20 @@
       padding: 20px 22px 24px;
     }
 
+    .route-test-dialog { width: min(860px, 100%); }
+    .route-test-dialog .dialog-body { min-width: 0; }
+    .route-test-input { min-height: 108px; max-height: 260px; resize: vertical; }
+    .route-test-toolbar { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+    .route-test-results { display: grid; gap: 12px; }
+    .route-test-result { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); }
+    .route-test-result-head { display: flex; gap: 12px; justify-content: space-between; align-items: flex-start; }
+    .route-test-result-head strong { overflow-wrap: anywhere; font-size: 13px; }
+    .route-test-result-head .route-status-chip { flex-shrink: 0; }
+    .route-test-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .route-test-output, .route-test-json pre { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font: 12px/1.65 var(--mono); }
+    .route-test-json { margin-top: 12px; font-size: 12px; color: var(--muted); }
+    .route-test-json summary { cursor: pointer; }
+
     .dialog-actions {
       display: flex;
       align-items: center;
@@ -2646,6 +2660,40 @@
           <button class="primary" type="button" id="routeSaveButton">保存模型路由</button>
           <button class="secondary" type="button" id="routeResetButton">取消</button>
         </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="dialog-layer" id="routeTestDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="routeTestDialog" aria-label="关闭模型测试"></button>
+    <section class="dialog route-test-dialog" role="dialog" aria-modal="true" aria-labelledby="routeTestTitle">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">Route / Test</p>
+          <h2 id="routeTestTitle">测试模型路由</h2>
+          <p>客户端模型 ID：<strong class="mono" id="routeTestModelId"></strong></p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="routeTestDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="field">
+          <label class="field-label" for="routeTestProtocol">入口协议</label>
+          <select id="routeTestProtocol"></select>
+        </div>
+        <div class="field" style="margin-top:14px">
+          <label class="field-label" for="routeTestInput">测试输入</label>
+          <textarea id="routeTestInput" class="route-test-input" rows="4" maxlength="16000" placeholder="输入一段真实请求，例如：请用一句话介绍你自己。"></textarea>
+          <p class="field-hint">内容会实际发送给上游模型。测试全部候选时，每个候选单独调用一次，按顺序显示结果。</p>
+        </div>
+        <div class="route-test-toolbar">
+          <button class="primary" type="button" id="routeTestRunButton">测试路由</button>
+          <button class="secondary" type="button" id="routeTestAllButton">测试全部候选</button>
+          <button class="danger" type="button" id="routeTestStopButton" hidden>停止测试</button>
+          <button class="secondary" type="button" data-close-dialog="routeTestDialog">关闭</button>
+        </div>
+        <p class="field-hint">测试路由：走正常路由入口，遵循优先级与额度状态。测试全部候选：逐个直接探测后端模型，不修改配置，也不会开启已停用的账号。</p>
+        <p class="form-status" id="routeTestStatus" role="status" aria-live="polite"></p>
+        <div id="routeTestResults" class="route-test-results"></div>
       </div>
     </section>
   </div>

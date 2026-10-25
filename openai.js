@@ -15,6 +15,7 @@ const { listProviderPresets, getProviderPreset, buildDiscoveryRequest, parseMode
 const { createQuotaEngine } = require('./app/quota-engine');
 const { createModelRouter, createRoutingHealthStore, createRoutingContextStore } = require('./app/model-router');
 const { createExplicitRoutingHandler } = require('./app/explicit-routing-handler');
+const { createRouteTestHandler } = require('./app/route-testing');
 const { refreshOpenAIToken } = require('./app/openai-token-refresh');
 const { createSub2ApiAgentIdentityManager, isSub2ApiConfig } = require('./app/sub2api-agent-identity');
 const { generateRandomSecret, getConfiguredApiKeys, extractRequestApiKey, isAuthorizedRequest, isAuthorizedAdminRequest, sha256Hex } = require('./app/request-auth');
@@ -345,9 +346,9 @@ app.put('/admin/api/model-routes', api(async (req, res) => {
 
 app.get('/health', requireApiKey, (req, res) => res.json({ status: 'ok', configs: { total: runtimeConfigs.length }, models: getPublicModelIds(parsedConfig) }));
 app.get('/v1/models', requireApiKey, (req, res) => res.json({ object: 'list', data: getPublicModelIds(parsedConfig).map(id => ({ id, object: 'model', created: 0, owned_by: 'airouter' })) }));
-for (const [endpoint, protocol] of [['chat/completions', 'chat_completions'], ['responses', 'responses'], ['messages', 'messages']]) {
-  app.post(`/v1/${endpoint}`, requireApiKey, createExplicitRoutingHandler({
-    entryProtocol: protocol, getRouter: () => modelRouter, getQuotaEngine: () => quotaEngine,
+function forwardingOptions() {
+  return {
+    getRouter: () => modelRouter, getQuotaEngine: () => quotaEngine,
     getContextStore: () => contextStore, readRequestBody, createUpstreamRequest,
     upstreamTimeoutMs: REQUEST_TIMEOUT, bodyLimitBytes: BODY_LIMIT,
     idleTimeoutMs: positiveNumber(process.env.REQUEST_BODY_IDLE_TIMEOUT_MS, 30000),
@@ -356,7 +357,15 @@ for (const [endpoint, protocol] of [['chat/completions', 'chat_completions'], ['
     getAuthIdentityHash: req => sha256Hex(extractRequestApiKey(req.headers) || ''),
     getSessionKey: (req, body) => req.headers['x-opencode-session'] || req.headers['x-airouter-session-id'] || req.headers.session_id || body.session_id || body.prompt_cache_key || '',
     log, error: warn,
-  }));
+  };
+}
+app.post('/admin/api/model-routes/test', api(createRouteTestHandler({
+  getParsedConfig: () => parsedConfig, getRuntimeConfigs: () => runtimeConfigs,
+  getRouter: () => modelRouter, getForwardingOptions: forwardingOptions,
+  timeoutMs: positiveNumber(process.env.ROUTE_TEST_TIMEOUT_MS, 60000),
+})));
+for (const [endpoint, protocol] of [['chat/completions', 'chat_completions'], ['responses', 'responses'], ['messages', 'messages']]) {
+  app.post(`/v1/${endpoint}`, requireApiKey, createExplicitRoutingHandler({ ...forwardingOptions(), entryProtocol: protocol }));
 }
 app.use((req, res) => res.status(404).json({ error: { code: 'not_found', message: '接口不存在' } }));
 app.use((error, req, res, next) => {

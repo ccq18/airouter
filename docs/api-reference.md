@@ -54,6 +54,28 @@
 
 管理页面路径是 `/admin/configs`、`/admin/configs/upstreams`、`/admin/configs/routes`。旧 `/admin/api/configs`、焦点、批量停用数组及全局别名设置接口不再提供。
 
+### 4.1 手动链路测试
+
+`POST /admin/api/model-routes/test` 使用管理鉴权，发送真实模型请求，不保存输入或结果。请求示例：
+
+```json
+{ "model": "auto", "input": "请计算 1+1", "mode": "candidate", "target_id": "auto-glm", "protocol": "chat_completions" }
+```
+
+| 字段 | 约束 |
+| --- | --- |
+| `model` | 已保存的客户端路由 ID，区分大小写 |
+| `input` | 非空文本，最多 16000 字符，保留原始空白和换行 |
+| `mode` | `route` 走正常路由；`candidate` 只测试指定候选 |
+| `target_id` | candidate 模式必填，必须属于该路由 |
+| `protocol` | 可选，须在路由入口协议中；默认第一项 |
+
+route 模式复用业务入口的调度和转发处理，包括优先级、额度、冷却、尝试次数和自动后备；同时正常更新运行状态。candidate 模式使用内存中的单候选快照，绕过缓存额度和冷却以检查实际可用性，不回退、不改写配置或生产额度/冷却；停用账号直接跳过。已有凭证自动刷新机制仍有效。管理页面的“测试全部候选”按路由顺序串行调用 candidate 模式，单项失败后继续下一项。
+
+请求以非流式文本生成执行，输出上限 2048 tokens，单次最长 60 秒（可通过 `ROUTE_TEST_TIMEOUT_MS` 调低）。响应保留实际 HTTP 状态，JSON 包含 `mode`、`model`、`protocol`、`target_id`、`elapsed_ms`、`status_code`、`response`；`response` 是所选入口协议的真实响应或错误。`attempts[]` 按实际尝试顺序包含 `target_id`、`config_id`、`account_label`、后端 `model` 和 `protocol`，不含凭证。
+
+停用账号返回 HTTP 200、`outcome: "skipped"`、`status_code: 0`、空 attempts 和 `account_disabled` 错误，表示未调用。输入或目标不合法返回 400，未知路由返回 404；进入转发前的校验错误使用普通错误格式。超时返回 504 / `test_timeout` 并中止活动上游。关闭弹窗或停止测试会取消当前请求及后续队列，不撤销已经完成的调用及其用量。
+
 ## 5. 主要错误
 
 | 状态 | 错误码或语义 | 处理 |

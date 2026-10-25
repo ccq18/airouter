@@ -128,6 +128,11 @@ function createGlmFake(name) {
       const body = await readJsonBody(req);
       stats.chatRequests.push({ path: url.pathname, body, headers: req.headers });
       const model = body.model;
+      if (name === 'A' && body.messages?.[0]?.content === 'diagnostic-fallback') {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'temporary diagnostic failure' } }));
+        return;
+      }
 
       if (model === 'sse-backend') {
         res.statusCode = 200;
@@ -820,6 +825,7 @@ test.before(async () => {
       ACCESS_LOG: '0',
       UPSTREAM_REQUEST_TIMEOUT_MS: '10000',
       QUOTA_CHECK_TIMEOUT_MS: '3000',
+      ROUTE_TEST_TIMEOUT_MS: '1500',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -1592,4 +1598,111 @@ test('settings and credential import use dedicated APIs without exposing upstrea
   assert.equal(imported.text.includes('import-token-fixture'), false);
   const removed = await adminFetch('/admin/api/upstreams/'+imported.payload.added_ids[0], { method: 'DELETE' });
   assert.equal(removed.status, 200);
+});
+
+
+const diagnostic = request => adminFetch('/admin/api/model-routes/test', {
+  method: 'POST', body: JSON.stringify({ model: 'DeepSeek-Custom', input: '  自定义输入\n保持换行  ', mode: 'route', ...request }),
+});
+
+test('route diagnostic validates authentication and targets before contacting upstreams', async () => {
+  const before = fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length;
+  const unauth = await fetch(`${baseUrl}/admin/api/model-routes/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(unauth.status, 401);
+  for (const patch of [{ input: '  ' }, { input: 'x'.repeat(16001) }, { mode: 'unknown' }, { mode: 'candidate', target_id: 't-e-hang' }, { protocol: 'invalid' }]) {
+    assert.equal((await diagnostic(patch)).status, 400, JSON.stringify(patch).slice(0, 100));
+  }
+  assert.equal((await diagnostic({ model: 'unknown' })).status, 404);
+  assert.equal((await diagnostic({ model: 'retry-model', protocol: 'responses' })).status, 400);
+  assert.equal(fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length, before);
+});
+
+test('normal route diagnostic honors exhaustion while direct diagnostics preserve production state and config', async () => {
+  fakeA.stats.quota = { state: 'ok', percentage: 100, resetOffset: 3600000 };
+  fakeB.stats.quota = { state: 'ok', percentage: 10, resetOffset: 3600000 };
+  for (const id of ['cfg-a', 'cfg-b']) assert.equal((await adminFetch(`/admin/api/upstreams/${id}/quota-refresh`, { method: 'POST', body: '{}' })).status, 200);
+  const beforeConfig = fs.readFileSync(configPath, 'utf8');
+  const routed = await diagnostic({});
+  assert.equal(routed.status, 200, routed.text);
+  assert.equal(routed.payload.response.choices[0].message.content, 'from-B');
+  assert.deepEqual(routed.payload.attempts.map(item => item.target_id), ['t-b']);
+  for (const protocol of ['chat_completions', 'responses', 'messages']) {
+    const direct = await diagnostic({ mode: 'candidate', target_id: 't-a', protocol });
+    assert.equal(direct.status, 200, direct.text);
+    assert.equal(direct.payload.status_code, 200);
+    assert.ok(direct.payload.elapsed_ms >= 0);
+    assert.deepEqual(direct.payload.attempts, [{ target_id: 't-a', config_id: 'cfg-a', account_label: 'A GLM', model: 'glm-5.3', protocol: 'chat_completions' }]);
+    assert.match(JSON.stringify(direct.payload.response), /from-A/);
+    assert.equal(fakeA.stats.chatRequests.at(-1).body.messages[0].content, '  自定义输入\n保持换行  ');
+    assert.equal(fakeA.stats.chatRequests.at(-1).body.model, 'glm-5.3');
+    assert.doesNotMatch(direct.text, /sk-fake-a/);
+  }
+  const stillRouted = await diagnostic({});
+  assert.deepEqual(stillRouted.payload.attempts.map(item => item.target_id), ['t-b']);
+  assert.equal(fs.readFileSync(configPath, 'utf8'), beforeConfig);
+  fakeA.stats.quota.percentage = 10;
+  await adminFetch('/admin/api/upstreams/cfg-a/quota-refresh', { method: 'POST', body: '{}' });
+  assert.deepEqual((await diagnostic({})).payload.attempts.map(item => item.target_id), ['t-a']);
+});
+
+test('single candidate diagnostics report actual failures without falling back or changing shared cooldowns', async () => {
+  const beforeE = fakeE.stats.chatRequests.length;
+  const beforeD = fakeD.stats.chatRequests.length;
+  const failed = await diagnostic({ model: 'retry-model', mode: 'candidate', target_id: 't-d' });
+  assert.equal(failed.status, 500, failed.text);
+  assert.equal(failed.payload.status_code, 500);
+  assert.deepEqual(failed.payload.attempts.map(item => item.target_id), ['t-d']);
+  assert.ok(failed.payload.response.error);
+  assert.equal(fakeD.stats.chatRequests.length, beforeD + 1);
+  assert.equal(fakeE.stats.chatRequests.length, beforeE);
+});
+
+test('diagnostics skip disabled accounts and normal route test obeys disabled routes', async () => {
+  assert.equal((await adminFetch('/admin/api/upstreams/cfg-a', { method: 'PUT', body: JSON.stringify({ enabled: false }) })).status, 200);
+  try {
+    const before = fakeA.stats.chatRequests.length;
+    const result = await diagnostic({ mode: 'candidate', target_id: 't-a' });
+    assert.equal(result.status, 200);
+    assert.equal(result.payload.outcome, 'skipped');
+    assert.equal(result.payload.status_code, 0);
+    assert.equal(fakeA.stats.chatRequests.length, before);
+  } finally { await adminFetch('/admin/api/upstreams/cfg-a', { method: 'PUT', body: JSON.stringify({ enabled: true }) }); }
+  await updateRoute('DeepSeek-Custom', route => { route.enabled = false; });
+  try {
+    const result = await diagnostic({});
+    assert.equal(result.status, 404, result.text);
+    assert.deepEqual(result.payload.attempts, []);
+    assert.equal((await diagnostic({ mode: 'candidate', target_id: 't-a' })).status, 200);
+  } finally { await updateRoute('DeepSeek-Custom', route => { route.enabled = true; }); }
+});
+
+async function waitUntil(check) {
+  const deadline = Date.now() + 2500;
+  while (!check() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(check(), 'expected upstream state within 2500ms');
+}
+
+test('diagnostic deadline and client cancellation abort actual upstream sockets', async () => {
+  let closed = fakeE.stats.hangClosed;
+  const timed = await diagnostic({ model: 'abort-after-fail-model', mode: 'candidate', target_id: 't-e-hang' });
+  assert.equal(timed.status, 504, timed.text);
+  assert.equal(timed.payload.response.error.code, 'test_timeout');
+  await waitUntil(() => fakeE.stats.hangClosed === closed + 1);
+  closed = fakeE.stats.hangClosed;
+  const count = fakeE.stats.hangRequests;
+  const controller = new AbortController();
+  const pending = adminFetch('/admin/api/model-routes/test', { method: 'POST', signal: controller.signal, body: JSON.stringify({ model: 'abort-after-fail-model', mode: 'candidate', target_id: 't-e-hang', input: 'cancel me' }) });
+  const outcome = pending.catch(error => error);
+  await waitUntil(() => fakeE.stats.hangRequests === count + 1);
+  controller.abort();
+  assert.equal((await outcome).name, 'AbortError');
+  await waitUntil(() => fakeE.stats.hangClosed === closed + 1);
+});
+
+
+test('normal route diagnostic records actual ordered fallback attempts', async () => {
+  const result = await diagnostic({ input: 'diagnostic-fallback' });
+  assert.equal(result.status, 200, result.text);
+  assert.deepEqual(result.payload.attempts.map(item => item.target_id), ['t-a', 't-b']);
+  assert.equal(result.payload.response.choices[0].message.content, 'from-B');
 });

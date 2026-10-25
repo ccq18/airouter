@@ -499,6 +499,8 @@ function createExplicitRoutingHandler(options = {}) {
       return;
     }
 
+    if (req.aborted || res.destroyed || res.writableEnded) return;
+
     let body;
     try {
       body = JSON.parse(rawBody.toString('utf8'));
@@ -533,6 +535,7 @@ function createExplicitRoutingHandler(options = {}) {
     }
 
     await refreshExhaustedCandidates(router, route);
+    if (req.aborted || res.destroyed || res.writableEnded) return;
 
     let forcedTargetId = '';
     const previousResponseId = entryProtocol === 'responses' ? normalizeString(body.previous_response_id) : '';
@@ -690,6 +693,7 @@ function createExplicitRoutingHandler(options = {}) {
         try {
           await prepareUpstreamConfig(runtime);
         } catch (err) {
+          if (clientClosed || res.destroyed || res.writableEnded) return;
           markNotCommittedFailure(lease, {
             statusCode: 401,
             reason: 'upstream_auth_prepare_failed',
@@ -701,6 +705,9 @@ function createExplicitRoutingHandler(options = {}) {
           continue;
         }
       }
+
+      // Preparation may settle after the client closes or a diagnostic expires.
+      if (clientClosed || req.aborted || res.destroyed || res.writableEnded) return;
 
       let requestBody;
       try {
@@ -750,6 +757,11 @@ function createExplicitRoutingHandler(options = {}) {
 
       let upstream;
       try {
+        if (typeof options.onAttempt === 'function') options.onAttempt({
+          target_id: target.id, config_id: target.config_id,
+          account_label: lease.config.description || target.config_id,
+          model: target.model, protocol: targetProtocol,
+        });
         upstream = createUpstreamRequest({
           method: 'POST',
           targetUrl,

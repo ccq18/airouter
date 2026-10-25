@@ -69,6 +69,8 @@ OpenCode 请求使用明确的 Airouter User-Agent，保留客户端稳定会话
 
 不提供旧配置管理 API、焦点、全局别名、额度模板页签或额度凭证选择器。供应商差异由内部适配器处理。
 
+路由卡提供独立测试弹窗，可自定义文本和入口协议，选择正常路由测试或全部候选逐项测试。前者检查真实调度，后者独立诊断每个账号和后端模型；结果显示可用性、实际尝试顺序、响应、耗时和错误，可中途停止。候选诊断不会修改生产配置、额度或冷却；具体接口及边界见 [API 参考 4.1](api-reference.md#41-手动链路测试)。
+
 ## 7. 实现与验证
 
 `provider-presets.js` 管地址、目录和额度解析；`routing-config.js` 管契约；`quota-engine.js` 管快照和刷新；`model-router.js` 管选择、健康及上下文归属；`protocol-bridge.js` 管协议转换；`explicit-routing-handler.js` 管一次 HTTP 请求的执行和清理。`openai.js` 连接运行态与管理接口，`config-admin-routing.js` 实现列表和编辑交互。
