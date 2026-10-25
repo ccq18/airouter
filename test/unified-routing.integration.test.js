@@ -60,6 +60,7 @@ function createGlmFake(name) {
   const stats = {
     name,
     chatRequests: [],
+    responseRequests: [],
     quotaRequests: 0,
     modelRequests: 0,
     streamingClosed: false,
@@ -121,6 +122,18 @@ function createGlmFake(name) {
           { id: 'glm-new' },
         ],
       }));
+      return;
+    }
+
+    // API-key candidate exposes a real native Responses HTTP endpoint. This
+    // keeps account priority/failover tests independent of protocol bridging.
+    if (url.pathname.endsWith('/responses')) {
+      const body = await readJsonBody(req);
+      stats.responseRequests.push({ path: url.pathname, body, headers: req.headers });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: `resp_${name}`, object: 'response', model: body.model, status: 'completed',
+        output: [{ id: `msg_${name}`, type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `from-${name}` }] }],
+        usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } }));
       return;
     }
 
@@ -481,6 +494,11 @@ function buildConfig(upstreams, tokenBaseUrl) {
       ],
     },
     {
+      id: 'cfg-api-responses', type: 'apikey', preset: 'custom', description: 'B native Responses',
+      base_url: upstreams.b.baseUrl, apikey: 'sk-fake-native-responses',
+      models: [{ id: 'api-responses', protocols: ['responses'] }],
+    },
+    {
       id: 'cfg-token',
       type: 'token',
       preset: 'chatgpt',
@@ -589,10 +607,10 @@ function buildConfig(upstreams, tokenBaseUrl) {
         },
         {
           id: 'fair-model',
-          entry_protocols: ['chat_completions'],
+          entry_protocols: ['responses'],
           targets: [
             { id: 't-token', config_id: 'cfg-token', model: 'gpt-backend', protocol: 'responses' },
-            { id: 't-b-fair', config_id: 'cfg-b', model: 'glm-5.3', protocol: 'chat_completions' },
+            { id: 't-b-fair', config_id: 'cfg-api-responses', model: 'api-responses', protocol: 'responses' },
           ],
         },
         {
@@ -600,7 +618,7 @@ function buildConfig(upstreams, tokenBaseUrl) {
           entry_protocols: ['chat_completions', 'responses', 'messages'],
           targets: [
             { id: 't-token-responses', config_id: 'cfg-token', model: 'gpt-backend', protocol: 'responses' },
-            { id: 't-b-responses', config_id: 'cfg-b', model: 'glm-5.3', protocol: 'chat_completions' },
+            { id: 't-b-responses', config_id: 'cfg-api-responses', model: 'api-responses', protocol: 'responses' },
           ],
         },
         {
@@ -664,7 +682,7 @@ function buildConfig(upstreams, tokenBaseUrl) {
           entry_protocols: ['responses'],
           targets: [
             { id: 't-token-incomplete', config_id: 'cfg-token', model: 'incomplete-backend', protocol: 'responses' },
-            { id: 't-b-incomplete', config_id: 'cfg-b', model: 'glm-5.3', protocol: 'chat_completions' },
+            { id: 't-b-incomplete', config_id: 'cfg-api-responses', model: 'api-responses', protocol: 'responses' },
           ],
         },
         {
@@ -923,102 +941,42 @@ test('arbitrary case-sensitive public model maps to account+backend model and re
   assert.equal(missingPayload.error.code, 'model_not_found');
 });
 
-test('Messages and Responses entries bridge text, tools and SSE to Chat or Responses targets', async () => {
-  let response = await entryFetch('/v1/messages', {
-    model: 'DeepSeek-Custom',
-    max_tokens: 128,
-    messages: [{ role: 'user', content: 'hello messages' }],
-  });
-  assert.equal(response.status, 200);
-  let payload = await response.json();
-  assert.equal(payload.type, 'message');
-  assert.equal(payload.model, 'DeepSeek-Custom');
-  assert.equal(payload.content[0].text, 'from-A');
-
-  response = await entryFetch('/v1/responses', {
-    model: 'DeepSeek-Custom',
-    input: 'hello responses',
-    stream: false,
-  });
-  assert.equal(response.status, 200);
-  payload = await response.json();
-  assert.equal(payload.object, 'response');
-  assert.equal(payload.model, 'DeepSeek-Custom');
-  assert.equal(payload.output_text, 'from-A');
-
+test('native Chat and Responses retain text, tools and SSE while mismatched entries make zero calls', async () => {
+  for (const [endpoint, input] of [['messages', { max_tokens: 128, messages: [{ role: 'user', content: 'hello messages' }] }], ['responses', { input: 'hello responses', stream: false }]]) {
+    const before = fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length + tokenFake.stats.responseRequests.length;
+    const response = await entryFetch('/v1/' + endpoint, { model: 'DeepSeek-Custom', ...input });
+    assert.equal(response.status, 400);
+    const rejected = await response.json(); assert.equal(rejected.error.code || rejected.error.type, 'native_protocol_unsupported');
+    assert.equal(fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length + tokenFake.stats.responseRequests.length, before);
+  }
   const beforeToken = tokenFake.stats.responseRequests.length;
-  response = await entryFetch('/v1/responses', {
-    model: 'Responses-Public',
-    input: 'hello token responses',
-    stream: false,
-  });
-  assert.equal(response.status, 200);
-  payload = await response.json();
-  assert.equal(payload.model, 'Responses-Public');
-  assert.equal(payload.output[0].content[0].text, 'from-token');
-  assert.equal(payload.status, 'completed');
+  let response = await entryFetch('/v1/responses', { model: 'Responses-Public', input: 'hello token responses', stream: false });
+  assert.equal(response.status, 200); let payload = await response.json();
+  assert.equal(payload.model, 'Responses-Public'); assert.equal(payload.output[0].content[0].text, 'from-token'); assert.equal(payload.status, 'completed');
   assert.equal(tokenFake.stats.responseRequests.length, beforeToken + 1);
   assert.equal(tokenFake.stats.responseRequests[beforeToken].body.model, 'gpt-backend');
 
   const beforeA = fakeA.stats.chatRequests.length;
-  const streamResponse = await fetch(`${baseUrl}/v1/messages`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${ENTRY_KEY}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'DeepSeek-Custom',
-      max_tokens: 128,
-      stream: true,
-      messages: [{ role: 'user', content: 'stream messages' }],
-    }),
-  });
-  assert.equal(streamResponse.status, 200);
-  const streamText = await streamResponse.text();
-  assert.match(streamText, /event: message_start/);
-  assert.match(streamText, /from-A/);
-  assert.match(streamText, /event: message_stop/);
-  assert.equal(fakeA.stats.chatRequests.length, beforeA + 1);
-  assert.equal(fakeA.stats.chatRequests[beforeA].body.model, 'glm-5.3');
+  response = await entryFetch('/v1/chat/completions', { model: 'DeepSeek-Custom', stream: true, messages: [{ role: 'user', content: 'stream Chat' }] });
+  assert.equal(response.status, 200); const wire = await response.text();
+  assert.match(wire, /from-A/); assert.match(wire, /data: \[DONE\]/); assert.doesNotMatch(wire, /message_start/);
+  assert.equal(fakeA.stats.chatRequests.length, beforeA + 1); assert.equal(fakeA.stats.chatRequests[beforeA].body.model, 'glm-5.3');
 
-  response = await entryFetch('/v1/chat/completions', {
-    model: 'tool-model',
-    messages: [{ role: 'user', content: 'call a tool' }],
-    tools: [{
-      type: 'function',
-      function: { name: 'lookup', parameters: { type: 'object', properties: {} } },
-    }],
-  });
-  assert.equal(response.status, 200);
-  payload = await response.json();
-  assert.equal(payload.choices[0].finish_reason, 'tool_calls');
-  assert.equal(payload.choices[0].message.tool_calls[0].id, 'call_tool_1');
-
-  const beforeToolRoundTrip = fakeA.stats.chatRequests.length;
-  response = await entryFetch('/v1/messages', {
-    model: 'DeepSeek-Custom',
-    max_tokens: 128,
-    messages: [
-      { role: 'user', content: 'lookup please' },
-      {
-        role: 'assistant',
-        content: [{ type: 'tool_use', id: 'toolu_1', name: 'lookup', input: { id: 1 } }],
-      },
-      {
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'result text' }],
-      },
-    ],
-    tools: [{ name: 'lookup', input_schema: { type: 'object', properties: {} } }],
-  });
-  assert.equal(response.status, 200);
-  const bridgeRequest = fakeA.stats.chatRequests[beforeToolRoundTrip].body;
-  assert.ok(bridgeRequest.messages.some(message => message.role === 'tool' && message.tool_call_id === 'toolu_1'));
-  assert.ok(Array.isArray(bridgeRequest.tools));
+  response = await entryFetch('/v1/chat/completions', { model: 'tool-model', messages: [{ role: 'user', content: 'call a tool' }], tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object', properties: {} } } }] });
+  assert.equal(response.status, 200); payload = await response.json();
+  assert.equal(payload.choices[0].finish_reason, 'tool_calls'); assert.equal(payload.choices[0].message.tool_calls[0].id, 'call_tool_1');
+  const history = { model: 'DeepSeek-Custom', messages: [
+    { role: 'user', content: 'lookup please' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'toolu_1', type: 'function', function: { name: 'lookup', arguments: '{"id":1}' } }] },
+    { role: 'tool', tool_call_id: 'toolu_1', content: 'result text' },
+  ], tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object', properties: {} } } }] };
+  const beforeHistory = fakeA.stats.chatRequests.length;
+  response = await entryFetch('/v1/chat/completions', history); assert.equal(response.status, 200); await response.json();
+  assert.equal(fakeA.stats.chatRequests.length, beforeHistory + 1);
+  assert.deepEqual(fakeA.stats.chatRequests[beforeHistory].body, { ...history, model: 'glm-5.3' });
 });
 
-test('Token HTTP and Chat bridges reject unsupported continuation and opaque state', async () => {
+test('native Token HTTP and foreign Chat responses cannot grant unsupported continuation or opaque state', async () => {
   let response = await entryFetch('/v1/responses', {
     model: 'Responses-Public',
     input: 'first context request',
@@ -1075,13 +1033,12 @@ test('Token HTTP and Chat bridges reject unsupported continuation and opaque sta
   const changedModel = await response.json();
   assert.equal(changedModel.error.code, 'upstream_context_unavailable');
 
-  response = await entryFetch('/v1/responses', {
-    model: 'DeepSeek-Custom',
-    input: 'chat-bound context',
-    stream: false,
+  response = await entryFetch('/v1/chat/completions', {
+    model: 'DeepSeek-Custom', messages: [{ role: 'user', content: 'chat-bound context' }], stream: false,
   });
   assert.equal(response.status, 200);
   const chatBound = await response.json();
+  const beforeForeign = fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length;
   response = await entryFetch('/v1/responses', {
     model: 'DeepSeek-Custom',
     input: 'cannot migrate',
@@ -1091,6 +1048,7 @@ test('Token HTTP and Chat bridges reject unsupported continuation and opaque sta
   assert.equal(response.status, 409);
   const cannotMigrate = await response.json();
   assert.equal(cannotMigrate.error.code, 'upstream_context_unavailable');
+  assert.equal(fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length, beforeForeign);
 
   response = await entryFetch('/v1/responses', {
     model: 'DeepSeek-Custom',
@@ -1206,7 +1164,7 @@ test('in-flight budget 402 is transient and does not mark account quota exhauste
 
 test('incomplete token SSE cannot serialize as an empty successful Responses result', async () => {
   const beforeToken = tokenFake.stats.responseRequests.length;
-  const beforeB = fakeB.stats.chatRequests.length;
+  const beforeB = fakeB.stats.responseRequests.length;
   const response = await entryFetch('/v1/responses', {
     model: 'incomplete-model',
     input: 'incomplete token stream',
@@ -1215,9 +1173,11 @@ test('incomplete token SSE cannot serialize as an empty successful Responses res
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.model, 'incomplete-model');
-  assert.equal(payload.output_text, 'from-B');
+  assert.equal(payload.output[0].content[0].text, 'from-B');
+  assert.equal(payload.status, 'completed');
+  assert.equal(fakeB.stats.responseRequests.at(-1).body.model, 'api-responses');
   assert.equal(tokenFake.stats.responseRequests.length, beforeToken + 1);
-  assert.equal(fakeB.stats.chatRequests.length, beforeB + 1);
+  assert.equal(fakeB.stats.responseRequests.length, beforeB + 1);
 
   const onlyResponse = await entryFetch('/v1/responses', {
     model: 'incomplete-only-model',
@@ -1439,28 +1399,30 @@ test('model discovery returns a merge diff and referenced model deletion is reje
 
 test('token-backed and apikey targets are chosen by explicit route order', async () => {
   const beforeToken = tokenFake.stats.responseRequests.length;
-  let response = await entryFetch('/v1/chat/completions', {
+  let response = await entryFetch('/v1/responses', {
     model: 'fair-model',
-    messages: [{ role: 'user', content: 'token first' }],
+    input: 'token first', stream: false,
   });
   assert.equal(response.status, 200);
   let payload = await response.json();
   assert.equal(payload.model, 'fair-model');
-  assert.equal(payload.choices[0].message.content, 'from-token');
+  assert.equal(payload.output[0].content[0].text, 'from-token');
   assert.equal(tokenFake.stats.responseRequests.length, beforeToken + 1);
 
   await updateRoute('fair-model', route => {
     route.targets.reverse();
   });
-  const beforeB = fakeB.stats.chatRequests.length;
-  response = await entryFetch('/v1/chat/completions', {
+  const beforeB = fakeB.stats.responseRequests.length;
+  response = await entryFetch('/v1/responses', {
     model: 'fair-model',
-    messages: [{ role: 'user', content: 'apikey first' }],
+    input: 'apikey first', stream: false,
   });
   assert.equal(response.status, 200);
   payload = await response.json();
-  assert.equal(payload.choices[0].message.content, 'from-B');
-  assert.equal(fakeB.stats.chatRequests.length, beforeB + 1);
+  assert.equal(payload.output[0].content[0].text, 'from-B');
+  assert.equal(fakeB.stats.responseRequests.length, beforeB + 1);
+  assert.equal(fakeB.stats.responseRequests.at(-1).body.model, 'api-responses');
+  assert.equal(tokenFake.stats.responseRequests.length, beforeToken + 1, 'route order, not credential type, determines the native candidate');
 });
 
 test('streaming upstream failure after commit never splices a fallback answer', async () => {
@@ -1626,7 +1588,7 @@ test('normal route diagnostic honors exhaustion while direct diagnostics preserv
   assert.equal(routed.status, 200, routed.text);
   assert.equal(routed.payload.response.choices[0].message.content, 'from-B');
   assert.deepEqual(routed.payload.attempts.map(item => item.target_id), ['t-b']);
-  for (const protocol of ['chat_completions', 'responses', 'messages']) {
+  for (const protocol of ['chat_completions']) {
     const direct = await diagnostic({ mode: 'candidate', target_id: 't-a', protocol });
     assert.equal(direct.status, 200, direct.text);
     assert.equal(direct.payload.status_code, 200);
@@ -1636,6 +1598,14 @@ test('normal route diagnostic honors exhaustion while direct diagnostics preserv
     assert.equal(fakeA.stats.chatRequests.at(-1).body.messages[0].content, '  自定义输入\n保持换行  ');
     assert.equal(fakeA.stats.chatRequests.at(-1).body.model, 'glm-5.3');
     assert.doesNotMatch(direct.text, /sk-fake-a/);
+  }
+  for (const protocol of ['responses', 'messages']) {
+    const before = fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length;
+    const direct = await diagnostic({ mode: 'candidate', target_id: 't-a', protocol });
+    assert.equal(direct.status, 400, direct.text); assert.equal(direct.payload.status_code, 400);
+    assert.deepEqual(direct.payload.attempts, []);
+    assert.equal(direct.payload.response.error.code || direct.payload.response.error.type, 'native_protocol_unsupported');
+    assert.equal(fakeA.stats.chatRequests.length + fakeB.stats.chatRequests.length, before);
   }
   const stillRouted = await diagnostic({});
   assert.deepEqual(stillRouted.payload.attempts.map(item => item.target_id), ['t-b']);

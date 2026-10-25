@@ -22,7 +22,7 @@ function buildReport(events, cells = [...requestCells(), ...responseCells()], op
     keys.add(key);
     if (!cell.applicable) {
       if (!cell.reason) throw Error('No-equivalence reason is required: ' + key);
-      return { ...cell, key, status: 'no_equivalent' };
+      return { ...cell, key, status: cell.exclusion === 'native_only' ? 'unsupported' : 'no_equivalent' };
     }
     const id = evidenceKey(cell.file, cell.name), records = evidence.get(id) || [];
     claimed.add(id);
@@ -30,15 +30,15 @@ function buildReport(events, cells = [...requestCells(), ...responseCells()], op
       : records[0].status === 'passed' ? 'compatible' : cell.knownGap ? 'unimplemented' : 'incompatible';
     return { ...cell, key, status, evidence: cell.evidence || (cell.file.includes('.integration.') ? 'http' : 'unit'), ...(records[0]?.error ? { error: records[0].error } : {}), ...(status === 'invalid' ? { error: 'Duplicate test results cannot establish unique evidence' } : {}) };
   });
-  const summary = Object.fromEntries(['compatible', 'incompatible', 'unimplemented', 'uncovered', 'unverified', 'invalid', 'no_equivalent'].map(status => [status, rows.filter(row => row.status === status).length]));
+  const summary = Object.fromEntries(['compatible', 'incompatible', 'unimplemented', 'uncovered', 'unverified', 'invalid', 'no_equivalent', 'unsupported'].map(status => [status, rows.filter(row => row.status === status).length]));
   const regressions = { boundary: { passed: 0, failed: 0, unverified: 0 }, other: { passed: 0, failed: 0, unverified: 0 }, failures: [] };
   for (const [id, records] of evidence) if (!claimed.has(id)) for (const record of records) {
     const kind = /^(REJECTION|FAULT|CANCEL|AUTH)\b|reject|unsupported|unowned|invalid|cannot|native or explicitly rejected|preserved, mapped, or rejected/i.test(record.name) ? 'boundary' : 'other';
     regressions[kind][record.status]++;
     if (record.status !== 'passed') regressions.failures.push(record);
   }
-  const requiredFailures = rows.filter(row => !['compatible', 'no_equivalent'].includes(row.status));
-  return { version: 1, scope: 'Finite declared protocol contracts: controlled HTTP and unit evidence; no real supplier requests',
+  const requiredFailures = rows.filter(row => !['compatible', 'no_equivalent', 'unsupported'].includes(row.status));
+  return { version: 1, scope: 'Native protocol contracts only: controlled HTTP and unit evidence; cross-protocol conversion is unsupported; no real supplier requests',
     coverage: { points: new Set(rows.map(row => row.point)).size, cells: rows.length, uniqueRequiredTests: claimed.size,
       compatibleHttpCells: rows.filter(row => row.status === 'compatible' && row.evidence === 'http').length,
       compatibleUnitCells: rows.filter(row => row.status === 'compatible' && row.evidence === 'unit').length, realSupplierChecks: 0 },
@@ -47,19 +47,19 @@ function buildReport(events, cells = [...requestCells(), ...responseCells()], op
 const escape = value => String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
 function renderMarkdown(report) {
   const lines = ['# Airouter 逐点兼容性验收', '', report.scope, '',
-    `门禁：${report.ok ? '通过' : '失败'}。兼容通过 ${report.summary.compatible}；兼容失败 ${report.summary.incompatible}；未实现 ${report.summary.unimplemented}；未覆盖 ${report.summary.uncovered}；未验证 ${report.summary.unverified}；证据无效 ${report.summary.invalid}；无等价映射 ${report.summary.no_equivalent}。`, '',
-    '边界拒绝、安全及其他回归不计入兼容通过数。单元格是一个兼容点及其协议/格式组合。', '',
+    `门禁：${report.ok ? '通过' : '失败'}。兼容通过 ${report.summary.compatible}；兼容失败 ${report.summary.incompatible}；未实现 ${report.summary.unimplemented}；未覆盖 ${report.summary.uncovered}；未验证 ${report.summary.unverified}；证据无效 ${report.summary.invalid}；无等价映射 ${report.summary.no_equivalent}；产品范围不支持 ${report.summary.unsupported}。`, '',
+    '仅原生协议验收计入兼容通过数。跨协议转换已退出产品范围；边界拒绝、安全及其他回归不计入兼容通过数。单元格是一个兼容点及其协议/格式组合。', '',
     `清单 ${report.coverage.points} 个兼容点、${report.coverage.cells} 个单元格；通过证据中 HTTP ${report.coverage.compatibleHttpCells} 格、单元 ${report.coverage.compatibleUnitCells} 格；真实供应商验证 ${report.coverage.realSupplierChecks} 项。`, '',
-    '| 兼容点 | 通过 | 失败 | 未实现 | 未覆盖/未验证/无效 | 无等价 |', '| --- | ---: | ---: | ---: | ---: | ---: |'];
+    '| 兼容点 | 通过 | 失败 | 未实现 | 未覆盖/未验证/无效 | 无等价/不支持 |', '| --- | ---: | ---: | ---: | ---: | ---: |'];
   for (const point of [...new Set(report.cells.map(cell => cell.point))]) {
     const cells = report.cells.filter(cell => cell.point === point), count = statuses => cells.filter(cell => statuses.includes(cell.status)).length;
-    lines.push(`| ${point} | ${count(['compatible'])} | ${count(['incompatible'])} | ${count(['unimplemented'])} | ${count(['uncovered', 'unverified', 'invalid'])} | ${count(['no_equivalent'])} |`);
+    lines.push(`| ${point} | ${count(['compatible'])} | ${count(['incompatible'])} | ${count(['unimplemented'])} | ${count(['uncovered', 'unverified', 'invalid'])} | ${count(['no_equivalent', 'unsupported'])} |`);
   }
   lines.push('', '## 兼容性缺口', '', '| 兼容点 | 入口 → 后端 | 上游 → 客户端格式 | 状态 | 证据 |', '| --- | --- | --- | --- | --- |');
-  for (const cell of report.cells.filter(cell => !['compatible', 'no_equivalent'].includes(cell.status))) lines.push(`| ${cell.point} | ${cell.source} → ${cell.backend} | ${cell.wire} → ${cell.stream ? 'sse' : 'json'} | ${cell.status} | ${escape(cell.error || 'Required positive test was not executed')} |`);
-  lines.push('', '## 无等价映射的组合', '', '| 兼容点 | 入口 → 后端 | 原因 |', '| --- | --- | --- |');
+  for (const cell of report.cells.filter(cell => !['compatible', 'no_equivalent', 'unsupported'].includes(cell.status))) lines.push(`| ${cell.point} | ${cell.source} → ${cell.backend} | ${cell.wire} → ${cell.stream ? 'sse' : 'json'} | ${cell.status} | ${escape(cell.error || 'Required positive test was not executed')} |`);
+  lines.push('', '## 无等价映射及产品范围不支持的组合', '', '| 兼容点 | 入口 → 后端 | 原因 |', '| --- | --- | --- |');
   const exclusions = new Set();
-  for (const cell of report.cells.filter(cell => cell.status === 'no_equivalent')) {
+  for (const cell of report.cells.filter(cell => ['no_equivalent', 'unsupported'].includes(cell.status))) {
     const key = [cell.point, cell.source, cell.backend].join('|'); if (exclusions.has(key)) continue; exclusions.add(key);
     lines.push(`| ${cell.point} | ${cell.source} → ${cell.backend} | ${escape(cell.reason)} |`);
   }

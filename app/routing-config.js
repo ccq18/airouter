@@ -141,18 +141,15 @@ function normalizeTarget(target, index, routeId) {
   const targetId = normalizeString(target.id) || `target_${index + 1}`;
   const configId = validateIdentifier(target.config_id, `路由 ${routeId} 候选上游账号 ID`);
   const model = validateIdentifier(target.model, `路由 ${routeId} 候选后端模型 ID`);
-  const protocol = normalizeString(target.protocol);
-
-  if (!SUPPORTED_ENTRY_PROTOCOLS.includes(protocol)) {
-    throw new Error(`路由 ${routeId} 候选协议仅支持 chat_completions、responses、messages`);
-  }
+  // Endpoint selection belongs to the model's supported protocols and request
+  // entry. Do not keep an obsolete fixed-protocol preference in runtime routes.
+  const { protocol: _obsoleteProtocol, ...fields } = target;
 
   return {
-    ...target,
+    ...fields,
     id: targetId,
     config_id: configId,
     model,
-    protocol,
   };
 }
 
@@ -227,13 +224,9 @@ function parseRoutingConfig(parsed) {
         throw new Error(`客户端模型 ${id} 引用的后端模型不存在: ${target.model}`);
       }
 
-      if (!configModel.protocols.includes(target.protocol)) {
-        throw new Error(`后端模型 ${target.model} 不支持协议 ${target.protocol}`);
-      }
-
-      const key = `${target.config_id}\u0000${target.model}\u0000${target.protocol}`;
+      const key = `${target.config_id}\u0000${target.model}`;
       if (targetKeys.has(key)) {
-        throw new Error(`客户端模型 ${id} 包含重复候选: ${target.config_id}/${target.model}/${target.protocol}`);
+        throw new Error(`客户端模型 ${id} 包含重复候选: ${target.config_id}/${target.model}`);
       }
       targetKeys.add(key);
 

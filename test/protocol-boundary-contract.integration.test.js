@@ -20,7 +20,6 @@ const supplierShapes = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures
 const protocolPath = p => p === CHAT ? 'chat/completions' : p;
 const backendModel = p => p === CHAT ? 'backend-chat' : p === RESPONSES ? 'backend-responses' : 'backend-messages';
 const nativeRoute = p => p === CHAT ? 'native-chat' : 'native-responses';
-const crossRoute = p => p === CHAT ? 'chat-to-responses' : 'responses-to-chat';
 const clone = value => JSON.parse(JSON.stringify(value));
 const metadata = { tenant: 'fixture', background: 'user data', nested: '{"future_control":true}' };
 const schema = {
@@ -223,8 +222,6 @@ test.before(async () => {
   const models = [
     { id: 'native-chat', entry_protocols: [CHAT], targets: [target(CHAT)] },
     { id: 'native-responses', entry_protocols: [RESPONSES], targets: [target(RESPONSES)] },
-    { id: 'chat-to-responses', entry_protocols: [CHAT], targets: [target(RESPONSES)] },
-    { id: 'responses-to-chat', entry_protocols: [RESPONSES], targets: [target(CHAT)] },
     { id: 'fallback-chat', entry_protocols: [CHAT], targets: [target(RESPONSES), target(CHAT)] },
     { id: 'fallback-responses', entry_protocols: [RESPONSES], targets: [target(CHAT), target(RESPONSES)] },
     { id: 'daily-go', entry_protocols: [CHAT, RESPONSES, MESSAGES], targets: [target(CHAT)] },
@@ -305,68 +302,6 @@ for (const protocol of [CHAT, RESPONSES]) for (const providerWire of ['json', 's
         }
       }
     }
-  });
-}
-
-for (const format of ['json_object', 'json_schema']) for (const source of [CHAT, RESPONSES]) {
-  test(`HTTP boundary ${source} maps complete ${format} controls and application data`, async () => {
-    const target = source === CHAT ? RESPONSES : CHAT;
-    plan = { wire: 'json', payload: basicPayload(target) };
-    const body = { ...request(source, crossRoute(source)), service_tier: 'default', safety_identifier: 'user-fixture', user: 'legacy-fixture', metadata,
-      temperature: 0.25, top_p: 0.9, prompt_cache_key: 'prefix-fixture', prompt_cache_retention: '24h', store: false };
-    const chatFormat = format === 'json_object' ? { type: 'json_object' } : { type: 'json_schema', json_schema: { name: 'fixture', description: 'fixture contract', strict: true, schema } };
-    const responsesFormat = format === 'json_object' ? { type: 'json_object' } : { type: 'json_schema', name: 'fixture', description: 'fixture contract', strict: true, schema };
-    if (source === CHAT) Object.assign(body, { max_completion_tokens: 91, verbosity: 'low', response_format: chatFormat });
-    else Object.assign(body, { max_output_tokens: 91, text: { verbosity: 'low', format: responsesFormat } });
-    const expected = target === RESPONSES ? {
-      model: 'backend-responses', stream: false, instructions: '', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: '边界🙂' }] }],
-      service_tier: 'default', safety_identifier: 'user-fixture', user: 'legacy-fixture', metadata,
-      temperature: 0.25, top_p: 0.9, prompt_cache_key: 'prefix-fixture', prompt_cache_retention: '24h', store: false,
-      max_output_tokens: 91, text: { verbosity: 'low', format: responsesFormat },
-    } : {
-      model: 'backend-chat', stream: false, messages: [{ role: 'user', content: '边界🙂' }],
-      service_tier: 'default', safety_identifier: 'user-fixture', user: 'legacy-fixture', metadata,
-      temperature: 0.25, top_p: 0.9, prompt_cache_key: 'prefix-fixture', prompt_cache_retention: '24h', store: false,
-      max_completion_tokens: 91, verbosity: 'low', response_format: chatFormat,
-    };
-    const before = calls.length, result = await call(source, body);
-    assert.equal(result.status, 200, result.text);
-    assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, target);
-    assert.deepEqual(calls.at(-1).body, expected, 'complete provider body must equal the independent contract');
-  });
-}
-
-const unsupportedControls = [
-  [CHAT, { n: 2 }, 'n'],
-  [CHAT, { seed: 19 }, 'seed'],
-  [CHAT, { presence_penalty: 0.25 }, 'presence_penalty'],
-  [CHAT, { frequency_penalty: 0.5 }, 'frequency_penalty'],
-  [CHAT, { logit_bias: { 123: -1 } }, 'logit_bias'],
-  [CHAT, { prediction: { type: 'content', content: 'fixture' } }, 'prediction'],
-  [CHAT, { messages: [{ role: 'user', name: 'speaker', content: 'hi' }] }, 'messages[0].name'],
-  [RESPONSES, { background: true }, 'background'],
-  [RESPONSES, { truncation: 'auto' }, 'truncation'],
-  [RESPONSES, { include: ['message.output_text.logprobs', 'fixture.future_output'] }, 'include'],
-  [RESPONSES, { text: { verbosity: 'low', fixture_future_control: true } }, 'text.fixture_future_control'],
-  [CHAT, { stream_options: { fixture_future_control: true } }, 'stream_options.fixture_future_control'],
-  [RESPONSES, { stream_options: { fixture_future_control: true } }, 'stream_options.fixture_future_control'],
-  [CHAT, { fixture_future_control: { mode: 'opaque' } }, 'fixture_future_control'],
-  [RESPONSES, { fixture_future_control: { mode: 'opaque' } }, 'fixture_future_control'],
-];
-for (const [source, fields, fieldPath] of unsupportedControls) {
-  test(`HTTP boundary ${source} rejects ${fieldPath} before any provider call without poisoning later requests`, async () => {
-    const target = source === CHAT ? RESPONSES : CHAT;
-    plan = { wire: 'json', payload: basicPayload(target) };
-    const before = calls.length;
-    const result = await call(source, { ...request(source, crossRoute(source)), ...fields });
-    assert.equal(result.status, 400, `unsupported controls must not be accepted or reported as a transient outage: ${result.text}`);
-    assert.equal(calls.length, before, 'unsupported request must never reach or charge a provider');
-    assert.ok(JSON.parse(result.text).error, 'must return a structured error');
-    const pathTokens = fieldPath.match(/[A-Za-z_]+/g);
-    assert.ok(pathTokens.every(token => result.text.includes(token)), `error must locate ${fieldPath}: ${result.text}`);
-    const plain = await call(source, request(source, crossRoute(source)));
-    assert.equal(plain.status, 200, `incompatibility must not cool the provider: ${plain.text}`);
-    assert.equal(calls.length, before + 1);
   });
 }
 
@@ -544,9 +479,7 @@ function assertNoOptInReasoning(body) {
 }
 
 function assertSeparateDetail(view, key, expected) {
-  // The source-named detail may be native or inside a provenance extension.
-  // Do not bless an invented standard semantic mapping or a silent drop, and
-  // never allow the detail to be prepended to the user's final answer.
+  // Native provider fields remain separate from the user's final answer.
   const data = view.events.length ? view.events.map(entry => entry.data) : view.payload;
   const values = fieldValues(data, key);
   assert.ok(values.includes(expected) || values.filter(value => typeof value === 'string').join('') === expected, `${key} must remain separately available as source data, not be discarded`);
@@ -570,41 +503,7 @@ for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   });
 }
 
-// 2. Crucial product regressions: a common default provider response cannot be
-// considered compatible just because the gateway rejects it cleanly.
-for (const source of [RESPONSES, MESSAGES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
-  test(`PRODUCT acceptance ordinary ${source} via DeepSeek Chat ${wire} -> ${stream ? 'sse' : 'json'} succeeds with default reasoning`, async () => {
-    const sample = clone(supplierShapes.go_deepseek_chat);
-    plan = supplierFixture(CHAT, wire, sample);
-    const body = supplierRequest(source, 'daily-go', stream), before = calls.length;
-    assertNoOptInReasoning(body);
-    const result = await call(source, body);
-    assert.equal(calls.length, before + 1, 'one ordinary request, no concealed retries');
-    assert.equal(calls.at(-1).protocol, CHAT);
-    const view = replyView(source, result, stream);
-    assert.equal(view.text, '中文🙂');
-    assertSeparateDetail(view, 'reasoning_content', sample.choices[0].message.reasoning_content);
-    assert.ok(view.usage, 'the successful answer must retain real usage');
-  });
-}
-
-for (const source of [CHAT, MESSAGES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
-  test(`PRODUCT acceptance ordinary ${source} via default Responses reasoning ${wire} -> ${stream ? 'sse' : 'json'} remains usable without dropping opaque output`, async () => {
-    const sample = clone(supplierShapes.go_native_responses);
-    plan = supplierFixture(RESPONSES, wire, sample);
-    const body = supplierRequest(source, 'daily-responses', stream), before = calls.length;
-    assertNoOptInReasoning(body);
-    const result = await call(source, body);
-    assert.equal(calls.length, before + 1);
-    const view = replyView(source, result, stream);
-    assert.equal(view.text, '中文🙂');
-    assertSeparateDetail(view, 'encrypted_content', 'FIXTURE_CIPHERTEXT_NOT_REAL_STATE');
-    // Keeping opaque source data is not granting Chat server-side continuation.
-    assert.ok(!Object.hasOwn(view.payload, 'previous_response_id'));
-  });
-}
-
-for (const source of [CHAT, RESPONSES, MESSAGES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const source of [MESSAGES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   test(`PRODUCT acceptance ${source} via ordinary Claude Messages ${wire} -> ${stream ? 'sse' : 'json'} preserves answer and cache arithmetic`, async () => {
     const sample = clone(supplierShapes.claude_messages);
     plan = supplierFixture(MESSAGES, wire, sample);
@@ -653,16 +552,6 @@ for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   });
 }
 
-// Empty optional extensions are a separate control: no content exists to lose.
-for (const value of ['', null]) for (const wire of ['json', 'sse']) {
-  test(`PRODUCT acceptance Responses via Chat tolerates ${value === null ? 'null' : 'empty'} default reasoning_content (${wire})`, async () => {
-    const sample = clone(supplierShapes.go_deepseek_chat);
-    sample.choices[0].message.reasoning_content = value;
-    plan = supplierFixture(CHAT, wire, sample);
-    const view = replyView(RESPONSES, await call(RESPONSES, supplierRequest(RESPONSES, 'daily-go', false)), false);
-    assert.equal(view.text, '中文🙂');
-  });
-}
 
 const supplierTools = [
   { id: 'call_one', type: 'function', function: { name: 'alpha', arguments: '{"n":1}' } },
@@ -688,7 +577,7 @@ function withToolResults(source, body) {
   return next;
 }
 
-for (const source of [CHAT, RESPONSES, MESSAGES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const source of [CHAT]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   test(`PRODUCT acceptance ${source} two-round parallel tools with default supplier reasoning (${wire} -> ${stream ? 'sse' : 'json'})`, async () => {
     const first = clone(supplierShapes.go_deepseek_chat), second = clone(supplierShapes.go_deepseek_chat);
     first.choices[0].message.content = null; first.choices[0].message.tool_calls = clone(supplierTools); first.choices[0].finish_reason = 'tool_calls';
@@ -709,7 +598,7 @@ for (const source of [CHAT, RESPONSES, MESSAGES]) for (const wire of ['json', 's
   });
 }
 
-for (const source of [CHAT, RESPONSES, MESSAGES]) for (const wire of ['json', 'sse']) {
+for (const source of [CHAT]) for (const wire of ['json', 'sse']) {
   test(`PRODUCT acceptance ${source} reports repeated-cache usage with supplier default reasoning (${wire}) without double counting`, async () => {
     const sample = clone(supplierShapes.go_deepseek_chat);
     sample.usage = clone(supplierShapes.repeated_cache_usage);
@@ -790,7 +679,7 @@ test('REJECTION contract unknown native Responses JSON -> SSE item cannot invent
 
 // Complete finite matrix for the three conversation interfaces implemented by
 // this project. Unsupported features get rejection tests, not missing cells.
-// The audit at the bottom catches accidentally omitted direction/wire cases.
+// The audit checks every supported native protocol and wire path. Cross-protocol conversion is outside the public contract.
 const INTERFACES = [CHAT, RESPONSES, MESSAGES];
 const matrixCoverage = new Set();
 const routeFor = backend => backend === CHAT ? 'daily-go' : backend === RESPONSES ? 'daily-responses' : 'daily-messages';
@@ -932,7 +821,7 @@ function assertMappedUsage(source, usage, variant) {
 }
 
 const MATRIX_FEATURES = ['text-cache', 'refusal', 'truncation', 'usage-absent', 'usage-partial', 'parallel-tools-two-rounds'];
-for (const source of INTERFACES) for (const backend of INTERFACES) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const source of INTERFACES) for (const backend of [source]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   for (const feature of MATRIX_FEATURES.filter(value => value !== 'parallel-tools-two-rounds')) {
     matrixCase(feature, source, backend, wire, stream, async t => {
       const variant = feature === 'text-cache' ? 'text' : feature;
@@ -1000,12 +889,12 @@ for (const source of INTERFACES) for (const backend of INTERFACES) for (const wi
   });
 }
 
-test('MATRIX coverage audit includes nine protocol pairs, four wire paths and six semantic contracts with no blank cells', () => {
-  for (const feature of MATRIX_FEATURES) for (const source of INTERFACES) for (const backend of INTERFACES) for (const wire of ['json', 'sse']) for (const stream of [false, true]) assert.ok(matrixCoverage.has([feature, source, backend, wire, stream].join('|')));
-  assert.equal(matrixCoverage.size, 216);
+test('MATRIX coverage audit includes three native protocol pairs, four wire paths and six semantic contracts with no blank cells', () => {
+  for (const feature of MATRIX_FEATURES) for (const source of INTERFACES) for (const backend of [source]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) assert.ok(matrixCoverage.has([feature, source, backend, wire, stream].join('|')));
+  assert.equal(matrixCoverage.size, 72);
 });
 
-for (const source of INTERFACES) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const source of [MESSAGES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   test(`PRODUCT acceptance signed Claude output ${source} -> messages; ${wire} -> ${stream ? 'sse' : 'json'} retains answer and separate source details`, async () => {
     const sample = clone(supplierShapes.claude_signed_messages);
     plan = supplierFixture(MESSAGES, wire, sample);
@@ -1019,48 +908,33 @@ for (const source of INTERFACES) for (const wire of ['json', 'sse']) for (const 
   });
 }
 
-for (const backend of INTERFACES) {
-  test(`STATE history Chat reasoning_content -> ${backend} is native or explicitly rejected, never silently removed`, async () => {
-    const body = { model: routeFor(backend), stream: false, messages: [{ role: 'assistant', content: 'prior answer', reasoning_content: 'FIXTURE_PRIOR_REASONING' }, { role: 'user', content: 'next' }] };
-    plan = contractFixture(backend, 'json', contractPayload(backend));
-    const before = calls.length, result = await call(CHAT, body);
-    if (backend === CHAT) { assert.equal(result.status, 200, result.text); assert.deepEqual(calls.at(-1).body, { ...body, model: 'backend-chat' }); }
-    else if (result.status === 200) {
-      assert.equal(calls.length, before + 1);
-      const sent = calls.at(-1).body;
-      const sourceDetail = fieldValues(sent, 'reasoning_content').includes('FIXTURE_PRIOR_REASONING');
-      const explicitReasoning = backend === RESPONSES && Array.isArray(sent.input) && sent.input.some(item => item.type === 'reasoning' && [...(item.content || []), ...(item.summary || [])].some(part => part.text === 'FIXTURE_PRIOR_REASONING'));
-      assert.ok(sourceDetail || explicitReasoning, `accepting the request requires retaining reasoning separately: ${JSON.stringify(sent)}`);
-      assert.ok(!(sent.messages || sent.input || []).some(message => message.role === 'user' && JSON.stringify(message.content).includes('FIXTURE_PRIOR_REASONING')), 'reasoning cannot be promoted into a user instruction');
-    } else { assert.ok([400, 409].includes(result.status), result.text); assert.equal(calls.length, before); assert.ok(JSON.parse(result.text).error); }
+// Opaque native history is accepted only after observing its source under this caller.
+test('STATE native Chat reasoning history remains byte-for-byte request data', async () => {
+  const body = { model: routeFor(CHAT), stream: false, messages: [{ role: 'assistant', content: 'prior answer', reasoning_content: 'FIXTURE_PRIOR_REASONING' }, { role: 'user', content: 'next' }] };
+  plan = contractFixture(CHAT, 'json', contractPayload(CHAT));
+  const before = calls.length, result = await call(CHAT, body);
+  assert.equal(result.status, 200, result.text); assert.equal(calls.length, before + 1);
+  assert.deepEqual(calls.at(-1).body, { ...body, model: backendModel(CHAT) });
+});
+test('STATE native signed Messages history retains the exact observed signature and transcript', async () => {
+  const sample = clone(supplierShapes.claude_signed_messages);
+  sample.content[0].signature = 'FIXTURE_SIGNATURE_OWNED_NATIVE_ROUNDTRIP';
+  const initial = supplierRequest(MESSAGES, 'daily-messages', false);
+  plan = supplierFixture(MESSAGES, 'json', sample);
+  const first = await call(MESSAGES, initial); assert.equal(first.status, 200, first.text);
+  const body = { ...initial, messages: [...initial.messages, { role: 'assistant', content: JSON.parse(first.text).content }, { role: 'user', content: 'next' }] };
+  plan = contractFixture(MESSAGES, 'json', contractPayload(MESSAGES));
+  const before = calls.length, result = await call(MESSAGES, body);
+  assert.equal(result.status, 200, result.text); assert.equal(calls.length, before + 1);
+  assert.deepEqual(calls.at(-1).body, { ...body, model: backendModel(MESSAGES) });
+});
+for (const item of [supplierShapes.go_native_responses.output[0], { type: 'item_reference', id: 'item_unowned_fixture' }]) {
+  test(`STATE native Responses unowned ${item.type} is rejected before any call`, async () => {
+    const before = calls.length;
+    const result = await call(RESPONSES, { model: routeFor(RESPONSES), stream: false, input: [clone(item), { role: 'user', content: 'next' }] });
+    assert.equal(result.status, 409, result.text); assert.equal(calls.length, before);
+    assert.equal(JSON.parse(result.text).error.code, 'upstream_context_unavailable');
   });
-  test(`STATE history signed Messages -> ${backend} is native or explicitly rejected, never silently removed`, async () => {
-    let body = { model: routeFor(backend), stream: false, max_tokens: 128, messages: [{ role: 'assistant', content: supplierShapes.claude_signed_messages.content }, { role: 'user', content: 'next' }] };
-    if (backend === MESSAGES) {
-      // Obtain this signature through the same public route and preserve its
-      // exact preceding transcript. A manufactured/unowned signature is not a
-      // valid positive continuation test, even for the native protocol.
-      const sample = clone(supplierShapes.claude_signed_messages);
-      sample.content[0].signature = 'FIXTURE_SIGNATURE_OWNED_NATIVE_ROUNDTRIP';
-      const initial = supplierRequest(MESSAGES, 'daily-messages', false);
-      plan = supplierFixture(MESSAGES, 'json', sample);
-      const first = await call(MESSAGES, initial);
-      assert.equal(first.status, 200, first.text);
-      body = { ...initial, messages: [...initial.messages, { role: 'assistant', content: JSON.parse(first.text).content }, { role: 'user', content: 'next' }] };
-    }
-    plan = contractFixture(backend, 'json', contractPayload(backend));
-    const before = calls.length, result = await call(MESSAGES, body);
-    if (backend === MESSAGES) { assert.equal(result.status, 200, result.text); assert.deepEqual(calls.at(-1).body, { ...body, model: 'backend-messages' }); }
-    else { assert.ok([400, 409].includes(result.status), result.text); assert.equal(calls.length, before); }
-  });
-  for (const item of [supplierShapes.go_native_responses.output[0], { type: 'item_reference', id: 'item_unowned_fixture' }]) {
-    test(`STATE history unowned Responses ${item.type} -> ${backend} is rejected before any call`, async () => {
-      const before = calls.length;
-      const result = await call(RESPONSES, { model: routeFor(backend), stream: false, input: [clone(item), { role: 'user', content: 'next' }] });
-      assert.equal(result.status, 409, result.text); assert.equal(calls.length, before);
-      assert.equal(JSON.parse(result.text).error.code, 'upstream_context_unavailable');
-    });
-  }
 }
 
 function assertPreflightRejection(result, before, field) {
@@ -1072,58 +946,36 @@ function assertPreflightRejection(result, before, field) {
 
 // Request controls are checked at the actual provider boundary, independently
 // of which response wire format happens to be used for this request.
-for (const source of INTERFACES) for (const backend of INTERFACES) {
+for (const source of INTERFACES) for (const backend of [source]) {
   for (const feature of ['sampling', 'budget', 'metadata', 'cache', 'structured-output', 'reasoning-control', 'stop', 'unknown-control', 'defaults']) {
     if (feature === 'stop' && source === RESPONSES) continue; // No such public request field; not a passing placeholder.
     test(`REQUEST contract ${feature}: ${source} -> ${backend}`, async () => {
       let body = supplierRequest(source, routeFor(backend), false);
-      let supported = source === backend, field;
-      if (feature === 'sampling') { Object.assign(body, { temperature: 0.25, top_p: 0.9 }); supported = true; }
-      if (feature === 'budget') { body[source === CHAT ? 'max_completion_tokens' : source === RESPONSES ? 'max_output_tokens' : 'max_tokens'] = 91; supported = true; }
-      if (feature === 'metadata') { body.metadata = source === MESSAGES ? { user_id: 'fixture-user' } : clone(metadata); supported ||= source !== MESSAGES && backend !== MESSAGES; field = 'metadata'; }
+      if (feature === 'sampling') { Object.assign(body, { temperature: 0.25, top_p: 0.9 }); }
+      if (feature === 'budget') { body[source === CHAT ? 'max_completion_tokens' : source === RESPONSES ? 'max_output_tokens' : 'max_tokens'] = 91; }
+      if (feature === 'metadata') { body.metadata = source === MESSAGES ? { user_id: 'fixture-user' } : clone(metadata); }
       if (feature === 'cache') {
         if (source === MESSAGES) body.cache_control = { type: 'ephemeral', ttl: '1h' };
         else Object.assign(body, { prompt_cache_key: 'fixture-prefix', prompt_cache_retention: '24h' });
-        supported ||= source !== MESSAGES && backend !== MESSAGES; field = source === MESSAGES ? 'cache_control' : 'prompt_cache';
       }
       if (feature === 'structured-output') {
         if (source === CHAT) body.response_format = { type: 'json_schema', json_schema: { name: 'fixture', strict: true, schema } };
         else if (source === RESPONSES) body.text = { format: { type: 'json_schema', name: 'fixture', strict: true, schema } };
         else body.output_config = { format: { type: 'json_schema', schema } };
-        supported ||= source !== MESSAGES && backend !== MESSAGES; field = source === CHAT ? 'response_format' : source === RESPONSES ? 'text' : 'output_config';
       }
       if (feature === 'reasoning-control') {
         if (source === CHAT) body.reasoning_effort = 'high';
         else if (source === RESPONSES) body.reasoning = { effort: 'high', summary: 'auto' };
         else { body.thinking = { type: 'enabled', budget_tokens: 1024 }; body.max_tokens = 2048; }
-        field = source === CHAT ? 'reasoning' : source === RESPONSES ? 'reasoning' : 'thinking';
-        // Only the separate effort control has an equivalent mapping; rich
-        // summary/budget requests must still reject without deleting fields.
-        supported ||= source === CHAT && backend === RESPONSES;
       }
       if (feature === 'stop') {
         body[source === CHAT ? 'stop' : 'stop_sequences'] = ['END', 'STOP'];
-        supported = backend !== RESPONSES; field = 'stop';
       }
-      if (feature === 'unknown-control') { body.fixture_future_control = { nested: ['keep', 1] }; field = 'fixture_future_control'; }
-      if (feature === 'defaults') supported = true;
+      if (feature === 'unknown-control') { body.fixture_future_control = { nested: ['keep', 1] }; }
       plan = contractFixture(backend, 'json', contractPayload(backend));
       const before = calls.length, result = await call(source, body);
-      if (!supported) return assertPreflightRejection(result, before, field);
       assert.equal(result.status, 200, result.text); assert.equal(calls.length, before + 1);
-      const sent = calls.at(-1).body;
-      if (source === backend) return assert.deepEqual(sent, { ...body, model: backendModel(backend) }, 'native controls must remain identical');
-      if (feature === 'sampling') { assert.equal(sent.temperature, 0.25); assert.equal(sent.top_p, 0.9); }
-      if (feature === 'budget') {
-        const names = ['max_tokens', 'max_completion_tokens', 'max_output_tokens'].filter(key => Object.hasOwn(sent, key));
-        assert.equal(names.length, 1, 'exactly one output budget, no conflicting defaults'); assert.equal(sent[names[0]], 91);
-      }
-      if (feature === 'metadata') assert.deepEqual(sent.metadata, metadata);
-      if (feature === 'reasoning-control') { assert.deepEqual(sent.reasoning, { effort: 'high' }); assert.ok(!Object.hasOwn(sent, 'reasoning_effort')); }
-      if (feature === 'cache') { assert.equal(sent.prompt_cache_key, 'fixture-prefix'); assert.equal(sent.prompt_cache_retention, '24h'); }
-      if (feature === 'structured-output') assert.deepEqual(backend === CHAT ? sent.response_format : sent.text.format, backend === CHAT ? { type: 'json_schema', json_schema: { name: 'fixture', strict: true, schema } } : { type: 'json_schema', name: 'fixture', strict: true, schema });
-      if (feature === 'stop') assert.deepEqual(sent[backend === CHAT ? 'stop' : 'stop_sequences'], ['END', 'STOP']);
-      if (feature === 'defaults') for (const key of ['store', 'parallel_tool_calls', 'include', 'prompt_cache_key', 'prompt_cache_retention']) assert.ok(!Object.hasOwn(sent, key), `must not inject ${key}`);
+      assert.deepEqual(calls.at(-1).body, { ...body, model: backendModel(backend) }, 'native controls must remain identical');
     });
   }
   for (const mode of ['auto', 'none', 'required-parallel', 'required-serial', 'forced']) {
@@ -1177,7 +1029,7 @@ function imageRequest(source, route) {
   return { model: route, stream: false, max_tokens: 128, system: '系统指令🙂', messages: [{ role: 'user', content: [{ type: 'text', text }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: IMAGE_DATA } }] }] };
 }
 
-for (const source of INTERFACES) for (const backend of INTERFACES) {
+for (const source of INTERFACES) for (const backend of [source]) {
   test(`REQUEST text/image order and system instructions: ${source} -> ${backend}`, async () => {
     const body = imageRequest(source, routeFor(backend));
     plan = contractFixture(backend, 'json', contractPayload(backend));
@@ -1194,7 +1046,7 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
         : [{ type: 'text', text: '看图🙂' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: IMAGE_DATA } }]);
   });
   for (const kind of ['audio', 'file']) {
-    test(`REQUEST ${kind} stays native or is explicitly rejected: ${source} -> ${backend}`, async () => {
+    test(`REQUEST ${kind} stays native without content conversion: ${source} -> ${backend}`, async () => {
       const body = supplierRequest(source, routeFor(backend), false);
       const block = source === CHAT ? kind === 'audio' ? { type: 'input_audio', input_audio: { data: 'AA==', format: 'wav' } } : { type: 'file', file: { filename: 'fixture.pdf', file_data: 'data:application/pdf;base64,AA==' } }
         : source === RESPONSES ? kind === 'audio' ? { type: 'input_audio', input_audio: { data: 'AA==', format: 'wav' } } : { type: 'input_file', filename: 'fixture.pdf', file_data: 'data:application/pdf;base64,AA==' }
@@ -1211,7 +1063,7 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
   }
 }
 
-for (const source of [CHAT, RESPONSES]) for (const backend of INTERFACES) for (const placement of ['developer', 'late-system']) {
+for (const source of [CHAT, RESPONSES]) for (const backend of [source]) for (const placement of ['developer', 'late-system']) {
   test(`REQUEST ${placement} instruction order: ${source} -> ${backend}`, async () => {
     const history = [{ role: 'user', content: 'first' }, { role: placement === 'developer' ? 'developer' : 'system', content: 'priority instruction' }, { role: 'user', content: 'last' }];
     const body = source === CHAT ? { model: routeFor(backend), stream: false, messages: history } : { model: routeFor(backend), stream: false, input: history };
@@ -1233,7 +1085,7 @@ const INPUT_FORMS = [
   [MESSAGES, 'string', { messages: [{ role: 'user', content: 'AB' }] }],
   [MESSAGES, 'text blocks', { messages: [{ role: 'user', content: [{ type: 'text', text: 'A' }, { type: 'text', text: 'B' }] }] }],
 ];
-for (const [source, name, input] of INPUT_FORMS) for (const backend of INTERFACES) {
+for (const [source, name, input] of INPUT_FORMS) for (const backend of [source]) {
   test(`INPUT form ${source} ${name} -> ${backend} retains all text without adding separators`, async () => {
     const body = { ...supplierRequest(source, routeFor(backend), false), ...clone(input) };
     plan = contractFixture(backend, 'json', contractPayload(backend));
@@ -1247,7 +1099,7 @@ for (const [source, name, input] of INPUT_FORMS) for (const backend of INTERFACE
   });
 }
 
-for (const source of [CHAT, RESPONSES]) for (const backend of INTERFACES) for (const store of [false, true]) {
+for (const source of [CHAT, RESPONSES]) for (const backend of [source]) for (const store of [false, true]) {
   test(`STATE control ${source} store=${store} -> ${backend} is never silently changed`, async () => {
     const body = { ...supplierRequest(source, routeFor(backend), false), store };
     plan = contractFixture(backend, 'json', contractPayload(backend));
@@ -1262,7 +1114,7 @@ for (const source of [CHAT, RESPONSES]) for (const backend of INTERFACES) for (c
   });
 }
 
-for (const source of [CHAT, RESPONSES]) for (const backend of [CHAT, RESPONSES]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const source of [CHAT, RESPONSES]) for (const backend of [source]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   test(`PROBABILITY contract ${source} -> ${backend}; ${wire} -> ${stream ? 'sse' : 'json'} preserves complete token probabilities exactly once`, async () => {
     const payload = contractPayload(backend);
     if (backend === CHAT) { payload.choices[0].message.content = '甲'; payload.choices[0].logprobs = { content: [chatLog], refusal: null }; }
@@ -1287,16 +1139,6 @@ for (const source of [CHAT, RESPONSES]) for (const backend of [CHAT, RESPONSES])
   });
 }
 
-for (const source of [CHAT, RESPONSES]) {
-  test(`PROBABILITY contract ${source} -> messages rejects unavailable requested token probabilities before calling`, async () => {
-    const body = supplierRequest(source, 'daily-messages', false);
-    if (source === CHAT) Object.assign(body, { logprobs: true, top_logprobs: 1 });
-    else Object.assign(body, { include: ['message.output_text.logprobs'], top_logprobs: 1 });
-    const before = calls.length, result = await call(source, body);
-    assert.equal(result.status, 400, result.text); assert.equal(calls.length, before);
-    assert.ok(['logprobs', 'include', 'top_logprobs'].some(field => result.text.includes(field)), 'error must identify an offending probability control');
-  });
-}
 
 function hasSuccessTerminal(source, events) {
   return events.some(entry => source === CHAT ? entry.raw === '[DONE]' || entry.data?.choices?.some(choice => choice.finish_reason != null)
@@ -1304,7 +1146,7 @@ function hasSuccessTerminal(source, events) {
       : entry.data?.type === 'message_stop');
 }
 
-for (const source of INTERFACES) for (const backend of INTERFACES) {
+for (const source of INTERFACES) for (const backend of [source]) {
   for (const fault of ['rate', 'policy', 'error-payload']) {
     test(`FAULT contract ${fault}: ${source} -> ${backend} checks status, attempts and actual fallback`, async () => {
       const rate = fault === 'rate', policy = { error: { code: rate ? 'rate_limit_exceeded' : 'content_policy_violation', message: rate ? 'fixture rate limited' : 'fixture refused this content' } };
@@ -1404,8 +1246,8 @@ const EXTRA_CONTROLS = [
     [source, 'prompt_cache_options', { mode: 'explicit', ttl: '30m' }, true],
   ]),
 ];
-for (const [source, field, value, openAiEquivalent] of EXTRA_CONTROLS) for (const backend of INTERFACES) {
-  test(`FIELD contract ${source}.${field} -> ${backend} is preserved, mapped, or rejected before forwarding`, async () => {
+for (const [source, field, value, openAiEquivalent] of EXTRA_CONTROLS) for (const backend of [source]) {
+  test(`FIELD contract ${source}.${field} -> ${backend} is preserved on the native provider request`, async () => {
     const body = { ...supplierRequest(source, routeFor(backend), false), [field]: clone(value) };
     plan = contractFixture(backend, 'json', contractPayload(backend));
     const before = calls.length, result = await call(source, body);
@@ -1417,7 +1259,7 @@ for (const [source, field, value, openAiEquivalent] of EXTRA_CONTROLS) for (cons
   });
 }
 
-for (const source of INTERFACES) for (const backend of INTERFACES) {
+for (const source of INTERFACES) for (const backend of [source]) {
   test(`FIELD contract tool schema application keys are not API controls: ${source} -> ${backend}`, async () => {
     const body = { ...toolRequest(source, false), model: routeFor(backend) };
     const expectedSchema = { type: 'object', properties: { cache_control: { type: 'string' }, reasoning: { type: 'string' }, future_control: { type: 'string' } }, additionalProperties: false };
@@ -1435,7 +1277,7 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
   });
 }
 
-for (const source of INTERFACES) for (const backend of INTERFACES) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const source of INTERFACES) for (const backend of [source]) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   test(`ID contract ${source} -> ${backend}; ${wire} -> ${stream ? 'sse' : 'json'} has no collisions and is stable throughout each stream`, async () => {
     const seen = new Set();
     for (const id of ['chatcmpl-abc', 'chatcmpl-def', 'resp_same-looking', 'msg_same-looking', 'a/b', 'a?b', '中文🙂']) {
@@ -1473,7 +1315,7 @@ for (const source of INTERFACES) {
   });
 }
 
-for (const backend of [CHAT, RESPONSES]) for (const source of INTERFACES) for (const rawArguments of ['{malformed', '{"n":9007199254740993}']) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+for (const backend of [CHAT, RESPONSES]) for (const source of [backend]) for (const rawArguments of ['{malformed', '{"n":9007199254740993}']) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   test(`TOOL arguments ${rawArguments.startsWith('{malformed') ? 'invalid JSON' : 'unsafe integer'}: ${source} -> ${backend}; ${wire} -> ${stream ? 'sse' : 'json'}`, async () => {
     const payload = contractPayload(backend, 'tools');
     if (backend === CHAT) payload.choices[0].message.tool_calls[0].function.arguments = rawArguments;
@@ -1495,8 +1337,8 @@ for (const backend of [CHAT, RESPONSES]) for (const source of INTERFACES) for (c
   });
 }
 
-for (const backend of INTERFACES) {
-  test(`TOOL result error marker is preserved or explicitly rejected: messages -> ${backend}`, async () => {
+for (const backend of [MESSAGES]) {
+  test(`TOOL result error marker is preserved natively: messages -> ${backend}`, async () => {
     const body = withToolResults(MESSAGES, { ...toolRequest(MESSAGES, false), model: routeFor(backend) });
     body.messages.at(-1).content[0].is_error = true;
     plan = contractFixture(backend, 'json', contractPayload(backend));
@@ -1507,7 +1349,7 @@ for (const backend of INTERFACES) {
   });
 }
 
-for (const source of INTERFACES) for (const backend of INTERFACES) {
+for (const source of INTERFACES) for (const backend of [source]) {
   test(`CANCEL contract ${source} -> ${backend} aborts the real provider connection and does not cool the account`, async () => {
     const events = contractEvents(backend, contractPayload(backend));
     const firstText = events.findIndex(entry => entry.data?.choices?.some(choice => choice.delta?.content) || entry.data?.type === 'response.output_text.delta' || entry.data?.delta?.type === 'text_delta');
@@ -1541,8 +1383,6 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
 // Atomic positive contracts: a clean rejection is still a failed compatibility
 // point. Reuse this file's HTTP fixture instead of creating a second framework.
 const controlPoints = new Map(compatibility.points.map(point => [point.id, point]));
-const valueAt = (object, field) => field.split('.').reduce((value, key) => value?.[key], object);
-const plainContent = content => typeof content === 'string' ? content : (content || []).map(part => part.text || '').join('');
 for (const cell of compatibility.requestCells().filter(cell => cell.applicable)) {
   test(cell.name, async () => {
     const point = controlPoints.get(cell.point);
@@ -1572,22 +1412,7 @@ for (const cell of compatibility.requestCells().filter(cell => cell.applicable))
     const sent = calls.at(-1).body;
     assert.equal(sent.model, backendModel(cell.backend));
     assert.equal(sent.stream, cell.stream);
-    if (cell.source === cell.backend) assert.deepEqual(sent, { ...body, model: backendModel(cell.backend) }, 'native request fields must be preserved verbatim');
-    else if (point.semantic === 'history') {
-      assert.deepEqual((cell.backend === RESPONSES ? sent.input : sent.messages).map(message => [message.role, plainContent(message.content)]), [['user', 'hello'], ['assistant', 'prior'], ['user', 'next']]);
-    } else if (point.semantic === 'instructions') {
-      const messages = cell.backend === RESPONSES ? sent.input : sent.messages;
-      const system = sent.system ?? sent.instructions;
-      if (system !== undefined && plainContent(system) !== '') {
-        assert.equal(plainContent(system), 'system-fixture');
-        assert.deepEqual(messages.map(message => [message.role, plainContent(message.content)]), [['user', '边界🙂']]);
-      } else assert.deepEqual(messages.map(message => [message.role, plainContent(message.content)]), [['system', 'system-fixture'], ['user', '边界🙂']]);
-    } else {
-      const expected = cell.point === 'request.output_budget' && cell.source === MESSAGES && cell.backend === CHAT ? { max_tokens: 91 } : point.expected[cell.backend];
-      for (const [field, value] of Object.entries(expected)) assert.deepEqual(valueAt(sent, field), value, 'forwarded field ' + field);
-      const targetRoots = new Set(Object.keys(expected).map(field => field.split('.')[0]));
-      for (const field of Object.keys(point.patches[cell.source])) if (!targetRoots.has(field)) assert.ok(!Object.hasOwn(sent, field), 'source-only control must not leak to target: ' + field);
-    }
+    assert.deepEqual(sent, { ...body, model: backendModel(cell.backend) }, 'native request fields must be preserved verbatim');
     if (cell.point === 'request.n.multiple') {
       if (!cell.stream) assert.deepEqual(JSON.parse(result.text).choices, payload.choices);
       else {
@@ -1628,5 +1453,29 @@ for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
     for (const entry of view.events.filter(entry => entry.data.delta?.type === 'text_delta')) start.content[entry.data.index].text += entry.data.delta.text;
     Object.assign(start, end.delta); start.usage = { ...start.usage, ...end.usage };
     assert.deepEqual(start, expected, 'unknown root/content/usage extensions remain intact throughout native formatting');
+  });
+}
+
+// One HTTP rejection per non-native direction establishes the product boundary;
+// field-by-field conversion refusals are retired with the conversion feature.
+for (const [source, backend] of [[CHAT, RESPONSES], [CHAT, MESSAGES], [RESPONSES, CHAT], [RESPONSES, MESSAGES], [MESSAGES, CHAT], [MESSAGES, RESPONSES]]) {
+  test(`NATIVE ONLY ${source} cannot call an account model supporting only ${backend}`, async () => {
+    plan = contractFixture(backend, 'json', contractPayload(backend));
+    const before = calls.length;
+    const result = await call(source, supplierRequest(source, routeFor(backend), false));
+    assert.equal(result.status, 400, result.text);
+    assert.equal(calls.length, before, 'protocol mismatch is a local candidate skip, never a billable probe');
+    const error = JSON.parse(result.text).error;
+    assert.equal(error.code || error.type, 'native_protocol_unsupported');
+    assert.match(error.message, /protocol|协议/i);
+    const payload = JSON.parse(result.text);
+    const skipped = source === MESSAGES ? payload.details.skipped : payload.error.skipped;
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].reason, 'native_protocol_unsupported');
+    assert.equal(skipped[0].config_id, 'provider-' + backend);
+    plan = contractFixture(backend, 'json', contractPayload(backend));
+    const native = await call(backend, supplierRequest(backend, routeFor(backend), false));
+    assert.equal(native.status, 200, native.text); assert.equal(calls.length, before + 1);
+    assert.equal(calls.at(-1).protocol, backend, 'a skipped provider remains healthy');
   });
 }

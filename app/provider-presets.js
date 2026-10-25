@@ -37,7 +37,7 @@ const PROVIDER_PRESETS = {
       auth: 'token',
       parser: 'chatgpt',
     },
-    notes: 'ChatGPT/Codex 登录态只提供 Responses 链路，其他入口由协议桥接转换。',
+    notes: 'ChatGPT/Codex 登录态只提供原生 Responses 链路，其他入口会跳过此上游。',
   },
   'opencode-go': {
     id: 'opencode-go',
@@ -119,11 +119,13 @@ const PROVIDER_PRESETS = {
     credential: 'apikey',
     default_type: 'apikey',
     default_base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
-    protocols: ['chat_completions'],
+    protocols: ['chat_completions', 'messages'],
+    // https://docs.bigmodel.cn/cn/coding-plan/tool/claude
+    protocolBaseUrls: { messages: 'https://open.bigmodel.cn/api/anthropic' },
     protocolPaths: {
       chat_completions: '/chat/completions',
       responses: null,
-      messages: null,
+      messages: '/v1/messages',
     },
     discovery: {
       supported: true,
@@ -144,11 +146,13 @@ const PROVIDER_PRESETS = {
     credential: 'apikey',
     default_type: 'apikey',
     default_base_url: 'https://api.z.ai/api/coding/paas/v4',
-    protocols: ['chat_completions'],
+    protocols: ['chat_completions', 'messages'],
+    // https://docs.z.ai/devpack/tool/claude
+    protocolBaseUrls: { messages: 'https://api.z.ai/api/anthropic' },
     protocolPaths: {
       chat_completions: '/chat/completions',
       responses: null,
-      messages: null,
+      messages: '/v1/messages',
     },
     discovery: {
       supported: true,
@@ -327,8 +331,13 @@ function getProtocolPath(config, protocol) {
 }
 
 function buildUpstreamUrl(config, protocol, options = {}) {
-  const rawBase = options.baseUrl || (config && config.base_url);
-  const baseUrl = config?.preset === 'sub2api' ? normalizeSub2ApiBaseUrl(rawBase) : normalizeString(rawBase);
+  const preset = resolvePresetForConfig(config);
+  const rawBase = options.baseUrl || (config && config.base_url) || preset.default_base_url;
+  let baseUrl = config?.preset === 'sub2api' ? normalizeSub2ApiBaseUrl(rawBase) : normalizeString(rawBase);
+  const explicitPath = config?.protocol_paths && Object.prototype.hasOwnProperty.call(config.protocol_paths, protocol);
+  // Alternate built-in bases only apply to an unchanged official default.
+  // A relay/custom base or explicit endpoint always stays under user control.
+  if (!explicitPath && trimTrailingSlashes(baseUrl) === trimTrailingSlashes(preset.default_base_url) && preset.protocolBaseUrls?.[protocol]) baseUrl = preset.protocolBaseUrls[protocol];
   const path = getProtocolPath(config, protocol);
   if (!baseUrl || !path) {
     return null;
@@ -508,7 +517,7 @@ function deriveProtocols(item, preset) {
 
   const allowed = (preset && Array.isArray(preset.protocols) ? preset.protocols : PROTOCOL_NAMES);
   const filtered = metadata.filter(protocol => allowed.includes(protocol));
-  if (filtered.length) {
+  if (metadata.length) {
     return filtered;
   }
 
@@ -525,6 +534,14 @@ function deriveProtocols(item, preset) {
     // Derive a safe default from well-known model families instead of
     // pretending every Go model supports every endpoint.
     return defaultProtocolsForModelId(item.id).filter(protocol => allowed.includes(protocol));
+  }
+
+  if (preset && ['glm-cn', 'glm-global'].includes(preset.id)) {
+    // Only the models explicitly documented for both Coding Plan interfaces
+    // get this default. Unknown catalog entries remain conservative.
+    // https://docs.bigmodel.cn/cn/coding-plan/latest-model
+    // https://docs.z.ai/devpack/latest-model
+    return /^glm-5\.3(?:-flash)?(?:\[1m\])?$/i.test(normalizeString(item.id)) ? ['chat_completions', 'messages'] : ['chat_completions'];
   }
 
   return [...allowed];
@@ -584,7 +601,7 @@ function parseModelCatalog(payload, configOrPreset) {
 
     const entry = {
       id,
-      protocols: typeof item === 'string' ? deriveProtocols({}, preset) : deriveProtocols(item, preset),
+      protocols: typeof item === 'string' ? deriveProtocols({ id }, preset) : deriveProtocols(item, preset),
     };
 
     if (item && typeof item === 'object') {

@@ -3,10 +3,7 @@
  * The HTTP handler validates JSON before calling this; this scanner never
  * parses numbers or reserializes application/vendor data.
  */
-function rewriteJsonModels(input, publicModel) {
-  const text = Buffer.isBuffer(input) ? input.toString('utf8') : String(input);
-  const replacement = JSON.stringify(publicModel);
-  const spans = [];
+function scanner(text) {
   const whitespace = offset => { while (offset < text.length && /[\x20\t\r\n]/.test(text[offset])) offset++; return offset; };
   function stringEnd(offset) {
     if (text[offset] !== '"') throw new SyntaxError('JSON string expected');
@@ -33,6 +30,14 @@ function rewriteJsonModels(input, publicModel) {
     if (offset === start) throw new SyntaxError('JSON value expected');
     return offset;
   }
+  return { whitespace, stringEnd, valueEnd };
+}
+
+function rewriteJsonModels(input, publicModel, { nestedModels = ['message', 'response'] } = {}) {
+  const text = Buffer.isBuffer(input) ? input.toString('utf8') : String(input);
+  const replacement = JSON.stringify(publicModel);
+  const spans = [];
+  const { whitespace, stringEnd, valueEnd } = scanner(text);
   function objectEnd(offset, root = false) {
     offset = whitespace(offset + 1);
     if (text[offset] === '}') return offset + 1;
@@ -41,7 +46,7 @@ function rewriteJsonModels(input, publicModel) {
       offset = whitespace(end);
       if (text[offset] !== ':') throw new SyntaxError('JSON property colon expected');
       const start = whitespace(offset + 1);
-      if (root && ['message', 'response'].includes(key) && text[start] === '{') offset = objectEnd(start);
+      if (root && nestedModels.includes(key) && text[start] === '{') offset = objectEnd(start);
       else {
         offset = valueEnd(start);
         if (key === 'model') spans.push({ start, end: offset });
@@ -61,6 +66,35 @@ function rewriteJsonModels(input, publicModel) {
   result += text.slice(cursor);
   return Buffer.isBuffer(input) ? Buffer.from(result, 'utf8') : result;
 }
+// Change selected root fields while retaining all other source tokens. An
+// undefined override removes a gateway-forbidden field (free-pool price guard).
+function rewriteJsonRoot(input, overrides) {
+  const text = Buffer.isBuffer(input) ? input.toString('utf8') : String(input);
+  const { whitespace, stringEnd, valueEnd } = scanner(text);
+  const start = whitespace(0), entries = [], seen = new Set();
+  if (text[start] !== '{') throw new SyntaxError('JSON request object expected');
+  let cursor = start + 1;
+  while (text[whitespace(cursor)] !== '}') {
+    const propertyStart = cursor, keyStart = whitespace(cursor), keyEnd = stringEnd(keyStart);
+    const key = JSON.parse(text.slice(keyStart, keyEnd));
+    cursor = whitespace(keyEnd);
+    if (text[cursor] !== ':') throw new SyntaxError('JSON property colon expected');
+    const valueStart = whitespace(cursor + 1), end = valueEnd(valueStart);
+    cursor = whitespace(end);
+    const hasOverride = Object.prototype.hasOwnProperty.call(overrides, key);
+    if (!hasOverride || overrides[key] !== undefined) entries.push(text.slice(propertyStart, valueStart)
+      + (hasOverride ? JSON.stringify(overrides[key]) : text.slice(valueStart, end)) + text.slice(end, cursor));
+    seen.add(key);
+    if (text[cursor] === '}') break;
+    if (text[cursor] !== ',') throw new SyntaxError('JSON property separator expected');
+    cursor++;
+  }
+  const close = whitespace(cursor);
+  for (const [key, value] of Object.entries(overrides)) if (!seen.has(key) && value !== undefined) entries.push(JSON.stringify(key) + ':' + JSON.stringify(value));
+  const result = text.slice(0, start + 1) + entries.join(',') + text.slice(close);
+  return Buffer.isBuffer(input) ? Buffer.from(result, 'utf8') : result;
+}
+
 function decimalIdentity(token) {
   const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
   if (!match) return null;
@@ -86,4 +120,4 @@ function assertRepresentableJsonNumbers(input) {
     }
   }
 }
-module.exports = { rewriteJsonModels, assertRepresentableJsonNumbers };
+module.exports = { rewriteJsonModels, rewriteJsonRoot, assertRepresentableJsonNumbers };

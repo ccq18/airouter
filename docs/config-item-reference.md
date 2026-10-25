@@ -24,7 +24,7 @@
       "enabled": true,
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
       "apikey": "sk-example-glm-replace-me",
-      "models": [{ "id": "glm-5.3", "protocols": ["chat_completions"] }]
+      "models": [{ "id": "glm-5.3", "protocols": ["chat_completions", "messages"] }]
     },
     {
       "id": "go-backup",
@@ -45,8 +45,8 @@
         "enabled": true,
         "entry_protocols": ["chat_completions", "responses", "messages"],
         "targets": [
-          { "id": "primary", "config_id": "glm-primary", "model": "glm-5.3", "protocol": "chat_completions" },
-          { "id": "backup", "config_id": "go-backup", "model": "deepseek-v4.1-flash", "protocol": "chat_completions" }
+          { "id": "primary", "config_id": "glm-primary", "model": "glm-5.3" },
+          { "id": "backup", "config_id": "go-backup", "model": "deepseek-v4.1-flash" }
         ]
       }
     ]
@@ -97,7 +97,7 @@ API Key 账号使用 `apikey`。ChatGPT 登录态使用 `access_token`、`accoun
 | `targets[].id` | 路由内唯一、稳定；缺省时生成，排序保留原 ID |
 | `targets[].config_id` | 引用已存在账号 ID |
 | `targets[].model` | 必须存在于该账号模型列表 |
-| `targets[].protocol` | 必须在该模型支持协议中 |
+| 原生协议选择 | 候选不再设置 protocol；按入口和账号模型 protocols 自动匹配，不匹配跳过 |
 | `routing.max_attempts` | 正整数，默认 3；实际尝试不超过候选数量 |
 | 路由 `max_attempts` | 可覆盖顶层尝试次数，仍受候选数量限制 |
 

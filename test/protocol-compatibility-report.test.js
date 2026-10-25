@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { buildReport, renderMarkdown } = require('../scripts/protocol-compatibility-report');
 const { validateCatalog, requestCells, responseCells } = require('../scripts/protocol-compatibility-catalog');
-const cell = (point = 'request.temperature', extra = {}) => ({ point, source: 'chat_completions', backend: 'responses', wire: 'json', stream: false, file: 'test/contract.test.js', name: point, applicable: true, kind: 'acceptance', ...extra });
+const cell = (point = 'request.temperature', extra = {}) => ({ point, source: 'chat_completions', backend: 'chat_completions', wire: 'json', stream: false, file: 'test/contract.test.js', name: point, applicable: true, kind: 'acceptance', ...extra });
 const event = (name, status = 'pass', extra = {}) => ({ type: 'test:' + status, data: { name, file: '/repo/test/contract.test.js', ...extra } });
 
 test('report cannot use a passing rejection test as evidence for an absent positive case', () => {
@@ -31,10 +31,16 @@ test('no-equivalence cells remain explicit exclusions while unrelated failures s
   assert.equal(report.cells[0].status, 'no_equivalent'); assert.equal(report.summary.compatible, 0); assert.equal(report.ok, false);
   assert.match(renderMarkdown(report), /Responses has no stop field/);
 });
-test('catalog covers independent request inventory and the entire nine-direction response matrix', () => {
+test('catalog retains nine-direction inventory but requires positive acceptance only for native paths', () => {
   assert.equal(validateCatalog(), true);
   assert.equal(responseCells().filter(c => c.point.startsWith('response.') && ['response.text-cache', 'response.refusal', 'response.truncation', 'response.usage-absent', 'response.usage-partial', 'response.parallel-tools-two-rounds'].includes(c.point)).length, 216);
-  assert.deepEqual(requestCells().filter(c => c.knownGap && c.applicable), [], 'the eight implemented cells no longer remain declared gaps');
+  const cells = [...requestCells(), ...responseCells()];
+  assert.ok(cells.some(c => c.applicable && c.source === 'messages'));
+  for (const item of cells) {
+    assert.equal(item.applicable, item.source === item.backend);
+    if (!item.applicable) { assert.equal(item.exclusion, 'native_only'); assert.match(item.reason, /原生协议/); }
+  }
+  assert.equal(responseCells().filter(c => c.point === 'response.text-cache' && c.applicable).length, 12);
 });
 test('an unexpected regression in a supported contract is incompatible, never relabeled as a planned limitation', () => {
   const report = buildReport([event('request.temperature', 'fail')], [cell()], { root: '/repo' });
@@ -43,4 +49,12 @@ test('an unexpected regression in a supported contract is incompatible, never re
 test('planned duplicate cells and exclusions without reasons are rejected', () => {
   assert.throws(() => buildReport([], [cell(), cell()], { root: '/repo' }), /Duplicate planned/);
   assert.throws(() => buildReport([], [cell('stop', { applicable: false })], { root: '/repo' }), /reason is required/);
+});
+
+test('native-only exclusions cannot become compatible even when legacy conversion evidence passes', () => {
+  const excluded = cell('cross conversion', { source: 'chat_completions', backend: 'responses', applicable: false, exclusion: 'native_only', reason: 'Only native protocols are supported' });
+  const report = buildReport([event('cross conversion')], [excluded], { root: '/repo' });
+  assert.equal(report.cells[0].status, 'unsupported'); assert.equal(report.summary.compatible, 0);
+  assert.equal(report.summary.unsupported, 1); assert.equal(report.ok, true);
+  assert.match(renderMarkdown(report), /产品范围不支持/);
 });

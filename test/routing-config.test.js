@@ -111,7 +111,7 @@ test('duplicate target IDs are rejected and auto IDs stay unique after reorderin
   assert.deepEqual(normalized.models[0].targets.map(target => target.id), ['target_2', 'target_1']);
 });
 
-test('targets must reference an existing account model and protocol', () => {
+test('targets reference existing account/model and ignore obsolete fixed protocol', () => {
   const missingConfig = baseParsed();
   missingConfig.routing.models[0].targets[0].config_id = 'cfg-missing';
   assert.throws(() => parseRoutingConfig(missingConfig), /不存在/);
@@ -122,7 +122,7 @@ test('targets must reference an existing account model and protocol', () => {
 
   const wrongProtocol = baseParsed();
   wrongProtocol.routing.models[0].targets[0].protocol = 'messages';
-  assert.throws(() => parseRoutingConfig(wrongProtocol), /协议/);
+  assert.ok(!Object.hasOwn(parseRoutingConfig(wrongProtocol).models[0].targets[0], 'protocol'));
 
   const duplicateTarget = baseParsed();
   duplicateTarget.routing.models[0].targets.push({

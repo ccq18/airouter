@@ -39,3 +39,11 @@ test('model-like fields inside unknown nested objects and arrays are untouched w
 test('native JSON without identity fields is returned without inventing model properties', () => {
   for (const raw of ['{"extension":9007199254740993}', '[{"model":"keep"}]', 'null']) assert.equal(rewriteJsonModels(raw, 'public'), raw);
 });
+
+test('request root rewriting preserves nested numeric lexemes and only changes named root controls', () => {
+  const { rewriteJsonRoot } = require('../app/json-wire');
+  const raw = ' {"model":"public","metadata":{"serial":9007199254740993,"response":{"model":"data"}},"x":1e999,"provider":{"old":true}}\n';
+  const changed = rewriteJsonRoot(raw, { model: 'native', stream: true, provider: { max_price: { prompt: 0 } } });
+  assert.equal(changed, ' {"model":"native","metadata":{"serial":9007199254740993,"response":{"model":"data"}},"x":1e999,"provider":{"max_price":{"prompt":0}},"stream":true}\n');
+  assert.equal(rewriteJsonRoot('{"model":"public","route":"billable","n":9007199254740993}', { model: 'free-member', route: undefined }), '{"model":"free-member","n":9007199254740993}');
+});

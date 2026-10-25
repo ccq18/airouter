@@ -13,11 +13,11 @@
     { id: 'chatgpt', label: 'ChatGPT / Codex', credential: 'token', default_base_url: 'https://chatgpt.com', protocols: ['responses'] },
     { id: 'opencode-go', label: 'OpenCode Go', credential: 'apikey', default_base_url: 'https://opencode.ai/inference/go', protocols: [...PROTOCOLS] },
     { id: 'opencode-zen', label: 'OpenCode Zen', credential: 'apikey', default_base_url: 'https://opencode.ai/inference', protocols: [...PROTOCOLS] },
-    { id: 'openrouter', label: 'OpenRouter', credential: 'apikey', default_base_url: 'https://openrouter.ai/api/v1', protocols: ['chat_completions', 'responses'] },
+    { id: 'openrouter', label: 'OpenRouter', credential: 'apikey', default_base_url: 'https://openrouter.ai/api/v1', protocols: ['chat_completions'] },
     { id: 'opencode-free', label: 'OpenCode 免费模型池', credential: 'apikey', pool: true, default_base_url: 'https://opencode.ai/inference/go', protocols: ['chat_completions'] },
     { id: 'openrouter-free', label: 'OpenRouter 免费模型池', credential: 'apikey', pool: true, default_base_url: 'https://openrouter.ai/api/v1', protocols: ['chat_completions'] },
-    { id: 'glm-cn', label: 'GLM Coding Plan 中国', credential: 'apikey', default_base_url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocols: ['chat_completions'] },
-    { id: 'glm-global', label: 'GLM Coding Plan 国际', credential: 'apikey', default_base_url: 'https://api.z.ai/api/coding/paas/v4', protocols: ['chat_completions'] },
+    { id: 'glm-cn', label: 'GLM Coding Plan 中国', credential: 'apikey', default_base_url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocols: ['chat_completions', 'messages'] },
+    { id: 'glm-global', label: 'GLM Coding Plan 国际', credential: 'apikey', default_base_url: 'https://api.z.ai/api/coding/paas/v4', protocols: ['chat_completions', 'messages'] },
     { id: 'claude', label: 'Claude OAuth', credential: 'token', default_base_url: 'https://api.anthropic.com', protocols: ['messages'] },
     { id: 'sub2api', label: 'Sub2API API Key', credential: 'apikey', default_base_url: '', protocols: [...PROTOCOLS] },
     { id: 'custom', label: '自定义接口', credential: 'apikey', default_base_url: '', protocols: [...PROTOCOLS] },
@@ -38,6 +38,10 @@
 
   function protocolLabel(protocol) {
     return PROTOCOL_LABELS[protocol] || protocol;
+  }
+
+  function initialModelProtocols(preset) {
+    return ['opencode-go', 'opencode-zen'].includes(preset?.id) ? [] : [...(preset?.protocols || ['chat_completions'])];
   }
 
   function cloneJson(value) {
@@ -75,7 +79,7 @@
       auth_failed: '凭证验证失败', permission_denied: '没有模型访问权限',
       model_unavailable: '模型暂不可用', config_disabled: '账号已停用',
       config_not_found: '账号已删除', model_not_supported: '模型不在支持列表',
-      protocol_not_supported: '协议不兼容', entry_protocol_not_supported: '入口协议未启用',
+      protocol_not_supported: '协议不兼容', native_protocol_unsupported: '不支持当前原生协议', entry_protocol_not_supported: '入口协议未启用',
       quota_unsupported: '此平台暂不支持额度查询', ok: '可用',
     };
     return labels[reason] || (/^[a-z_]+$/.test(reason || '') ? '暂时不可用' : reason || '');
@@ -1030,9 +1034,9 @@
         if (!state.formModels.some(model => normalizeText(model.id) === remote.id)) {
           state.formModels.push({
             id: remote.id,
-            protocols: Array.isArray(remote.protocols) && remote.protocols.length
+            protocols: Array.isArray(remote.protocols)
               ? [...remote.protocols]
-              : [...(getPreset(dom.preset.value)?.protocols || ['chat_completions'])],
+              : initialModelProtocols(getPreset(dom.preset.value)),
           });
         }
       });
@@ -1232,7 +1236,6 @@
       return {
         config_id: account.id,
         model: model.id,
-        protocol: (model.protocols || [])[0] || 'chat_completions',
       };
     }
 
@@ -1253,7 +1256,7 @@
             <span class="route-priority">${index + 1}</span>
             <div class="route-target-copy">
               <strong>${escapeHtml(account ? account.label : '无效上游')}</strong>
-              <span>${escapeHtml(target.model || '未选择模型')} · ${escapeHtml(protocolLabel(model && target.protocol ? target.protocol : target.protocol))}</span>
+              <span>${escapeHtml(target.model || '未选择模型')} · 支持协议：${escapeHtml((model?.protocols || []).map(protocolLabel).join('、') || '未声明')}</span>
             </div>
             <div class="actions">
               <button class="secondary" type="button" data-edit-target="${index}">修改</button>
@@ -1280,9 +1283,6 @@
       const modelId = preferred.modelId || original?.model || account.models[0]?.id || '';
       const model = account.models.find(item => item.id === modelId) || account.models[0];
       const protocols = Array.isArray(model?.protocols) ? model.protocols : [];
-      const protocol = preferred.protocol && protocols.includes(preferred.protocol)
-        ? preferred.protocol
-        : (protocols.includes(original?.protocol) ? original.protocol : (protocols[0] || 'chat_completions'));
       return `
         <h3>${index === null ? '添加后端候选' : '修改后端候选'}</h3>
         <div class="form-grid">
@@ -1300,18 +1300,7 @@
           </div>
         </div>
         ${account.pool ? '<p class="field-hint">免费池固定使用 free，内部真实模型由池自动选择。</p>' : ''}
-        <details class="advanced-settings" style="margin-top:12px">
-          <summary>协议：${escapeHtml(protocolLabel(protocol))}</summary>
-          <div class="advanced-settings-body">
-            <div class="field">
-              <label class="field-label" for="routeTargetProtocolSelect">上游协议</label>
-              <select id="routeTargetProtocolSelect" data-target-editor-field="protocol" ${account.pool ? 'disabled' : ''}>
-                ${protocols.map(item => `<option value="${escapeHtml(item)}" ${item === protocol ? 'selected' : ''}>${escapeHtml(protocolLabel(item))}</option>`).join('')}
-              </select>
-              <p class="field-hint">选项来自这个后端模型声明的协议，不能随意跨协议。</p>
-            </div>
-          </div>
-        </details>
+        <p class="field-hint">支持协议：${escapeHtml(protocols.map(protocolLabel).join('、') || '未声明')}。按请求入口自动匹配原生协议，不匹配时跳过此候选。</p>
         <div class="dialog-sub-actions">
           <button class="primary" type="button" data-action="confirm-target">确认候选</button>
           <button class="secondary" type="button" data-action="cancel-target">取消</button>
@@ -1343,9 +1332,8 @@
     function confirmTarget() {
       const accountId = dom.targetEditorPane.querySelector('[data-target-editor-field="account"]')?.value || '';
       const modelId = dom.targetEditorPane.querySelector('[data-target-editor-field="model"]')?.value || '';
-      const protocol = dom.targetEditorPane.querySelector('[data-target-editor-field="protocol"]')?.value || '';
-      if (!accountId || !modelId || !protocol) {
-        throw new Error('请选择上游账号、后端模型和协议');
+      if (!accountId || !modelId) {
+        throw new Error('请选择上游账号和后端模型');
       }
       const duplicate = state.formTargets.some((target, index) => (
         index !== state.editingTargetIndex
@@ -1355,7 +1343,8 @@
       if (duplicate) {
         throw new Error('这个上游与模型组合已经在候选列表中');
       }
-      const nextTarget = { config_id: accountId, model: modelId, protocol };
+      const nextTarget = { config_id: accountId, model: modelId };
+      if (state.editingTargetIndex !== null && state.formTargets[state.editingTargetIndex]?.id) nextTarget.id = state.formTargets[state.editingTargetIndex].id;
       if (state.editingTargetIndex === null) {
         state.formTargets.push(nextTarget);
       } else {
@@ -1391,6 +1380,7 @@
           </div>
           <ol class="route-chain">
             ${targets.map((target, index) => {
+              const model = getAccountOptions().find(account => account.id === target.config_id)?.models.find(model => model.id === target.model);
               const targetStatus = (status?.targets || []).find(item => item.target_id === target.id);
               const selected = targetStatus?.selected;
               const available = targetStatus?.available;
@@ -1401,7 +1391,7 @@
                   <div class="route-candidate-copy">
                     <strong>${escapeHtml(accountLabel(target.config_id))}</strong>
                     <span class="mono">${escapeHtml(target.model)}</span>
-                    <span class="tag">${escapeHtml(protocolLabel(target.protocol))}</span>
+                    <span class="tag">支持协议：${escapeHtml((model?.protocols || []).map(protocolLabel).join('、') || '未声明')}</span>
                     ${!selected && targetStatus?.reason ? `<span class="quota-detail">${escapeHtml(statusLabel(targetStatus.reason))}</span>` : ''}
                   </div>
                   <div class="route-candidate-flags">
@@ -1589,7 +1579,7 @@
         throw new Error('至少配置一个路由候选');
       }
       for (const [index, target] of state.formTargets.entries()) {
-        if (!target.config_id || !target.model || !target.protocol) {
+        if (!target.config_id || !target.model) {
           throw new Error(`第 ${index + 1} 个候选不完整`);
         }
       }
@@ -1605,7 +1595,7 @@
         id: modelId,
         enabled: true,
         entry_protocols: entryProtocols,
-        targets: cloneJson(state.formTargets),
+        targets: state.formTargets.map(({ id, config_id, model }) => ({ ...(id ? { id } : {}), config_id, model })),
       };
       const existingIndex = models.findIndex(route => route.id === editingId || route.id === modelId);
       if (existingIndex === -1) {
@@ -1757,7 +1747,7 @@
         }
         if (action === 'add-model') {
           syncModelsFromEditor();
-          const protocols = [...(getPreset(dom.preset.value)?.protocols || ['chat_completions'])];
+          const protocols = initialModelProtocols(getPreset(dom.preset.value));
           state.formModels.push({ id: '', protocols });
           renderModelEditor();
           return;
@@ -1916,7 +1906,7 @@
 
       dom.addModel.addEventListener('click', () => {
         syncModelsFromEditor();
-        const protocols = [...(getPreset(dom.preset.value)?.protocols || ['chat_completions'])];
+        const protocols = initialModelProtocols(getPreset(dom.preset.value));
         state.formModels.push({ id: '', protocols });
         renderModelEditor();
       });
@@ -1957,19 +1947,10 @@
           });
         } else if (field === 'model') {
           const accountId = dom.targetEditorPane.querySelector('[data-target-editor-field="account"]')?.value || '';
-          const account = getAccountOptions().find(item => item.id === accountId);
-          const model = account?.models.find(item => item.id === event.target.value);
-          const protocol = (model?.protocols || [])[0] || '';
           renderTargetEditor(state.editingTargetIndex, {
             accountId,
             modelId: event.target.value,
-            protocol,
           });
-        } else if (field === 'protocol') {
-          const summary = dom.targetEditorPane.querySelector('.advanced-settings summary');
-          if (summary) {
-            summary.textContent = `协议：${protocolLabel(event.target.value)}`;
-          }
         }
       });
 
@@ -2093,6 +2074,7 @@
     getPresetLabel,
     formatQuotaSummary,
     protocolLabel,
+    initialModelProtocols,
   };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = exported;

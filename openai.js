@@ -324,8 +324,8 @@ app.put('/admin/api/upstreams/:id', api(async (req, res) => {
     const merged = withPreset({ ...existing, ...patch, id: existing.id });
     for (const route of parseRoutingConfig(next).models) {
       if (route.targets.some(target => target.config_id === existing.id &&
-          !merged.models.some(model => model.id === target.model && model.protocols.includes(target.protocol)))) {
-        reject(400, 'model_referenced', `模型或协议仍被路由 ${route.id} 引用`);
+          !merged.models.some(model => model.id === target.model))) {
+        reject(400, 'model_referenced', `模型仍被路由 ${route.id} 引用`);
       }
     }
     return updateConfigItemById(next, existing.id, merged);

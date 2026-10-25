@@ -95,7 +95,36 @@ test('built-in protocols resolve to the documented per-provider endpoints', () =
     buildUpstreamUrl(openrouter, 'chat_completions'),
     'https://openrouter.ai/api/v1/chat/completions',
   );
-  assert.equal(getProtocolPath(glm, 'messages'), null);
+  assert.equal(getProtocolPath(glm, 'messages'), '/v1/messages');
+});
+
+test('GLM Coding Plan native Messages uses regional Anthropic endpoint and shared credential', () => {
+  for (const [preset, host] of [['glm-cn', 'open.bigmodel.cn'], ['glm-global', 'api.z.ai']]) {
+    const config = { preset, type: 'apikey', apikey: 'coding-plan-fixture', base_url: `https://${host}/api/coding/paas/v4` };
+    assert.equal(buildUpstreamUrl(config, 'chat_completions'), `https://${host}/api/coding/paas/v4/chat/completions`);
+    assert.equal(buildUpstreamUrl(config, 'messages'), `https://${host}/api/anthropic/v1/messages`);
+    assert.equal(buildUpstreamUrl({ ...config, base_url: '' }, 'messages'), `https://${host}/api/anthropic/v1/messages`);
+    assert.equal(buildUpstreamAuthHeaders(config).authorization, 'Bearer coding-plan-fixture');
+    assert.equal(buildQuotaRequest(config).url, `https://${host}/api/monitor/usage/quota/limit`);
+  }
+});
+
+test('GLM custom base and explicit protocol paths never redirect back to an official host', () => {
+  const config = { preset: 'glm-cn', base_url: 'http://127.0.0.1:9123/relay', protocol_paths: { messages: '/native/messages' } };
+  assert.equal(buildUpstreamUrl(config, 'messages'), 'http://127.0.0.1:9123/relay/native/messages');
+  assert.equal(buildUpstreamUrl({ ...config, protocol_paths: undefined }, 'messages'), 'http://127.0.0.1:9123/relay/v1/messages');
+  assert.equal(buildUpstreamUrl({ ...config, protocol_paths: { messages: null } }, 'messages'), null);
+  assert.equal(buildUpstreamUrl({ ...config, protocol_paths: { messages: 'https://relay.invalid/v2/messages' } }, 'messages'), 'https://relay.invalid/v2/messages');
+});
+
+test('model discovery supports explicit multiple native protocols and conservative provider defaults', () => {
+  const { parseModelCatalog } = require('../app/provider-presets');
+  for (const preset of ['glm-cn', 'glm-global']) {
+    const models = parseModelCatalog({ data: [{ id: 'glm-5.3' }, 'glm-5.3-flash', { id: 'glm-5.3-flash[1m]' }, { id: 'unknown-glm-model' }, { id: 'explicit', supported_endpoints: ['/chat/completions', '/v1/messages'] }] }, { preset });
+    assert.deepEqual(models.map(model => model.protocols), [['chat_completions', 'messages'], ['chat_completions', 'messages'], ['chat_completions', 'messages'], ['chat_completions'], ['chat_completions', 'messages']]);
+  }
+  const go = parseModelCatalog({ data: ['claude-sonnet-native', { id: 'deepseek-native' }, { id: 'multi', supported_endpoints: ['/chat/completions', '/responses'] }] }, { preset: 'opencode-go' });
+  assert.deepEqual(go.map(model => model.protocols), [['messages'], ['chat_completions'], ['chat_completions', 'responses']]);
 });
 
 test('custom providers only use explicitly configured protocol and model endpoints', () => {

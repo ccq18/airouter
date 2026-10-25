@@ -183,7 +183,7 @@ function hasBridgeReasoning(body) {
   const messages = Array.isArray(body.messages) ? body.messages : [];
   if (messages.some(message => own(message, 'airouter_upstream_reasoning') || Array.isArray(message.content) && message.content.some(block => own(block, 'airouter_upstream_reasoning')))) return true;
   if (Array.isArray(body.input) && body.input.some(item => own(item, 'airouter_upstream_reasoning'))) return true;
-  if (messages.some(message => message.reasoning_details?.some(detail => detail?.format === BRIDGE_FORMAT))) return true;
+  if (messages.some(message => Array.isArray(message.reasoning_details) && message.reasoning_details.some(detail => detail?.format === BRIDGE_FORMAT))) return true;
   if (messages.some(message => Array.isArray(message.content) && message.content.some(block => typeof block?.signature === 'string' && /^airouter-(state|text)-v1:/.test(block.signature) || typeof block?.data === 'string' && block.data.startsWith(REASONING_OPAQUE_PREFIX)))) return true;
   return Array.isArray(body.input) && body.input.some(item => item?.type === 'reasoning' && typeof item.encrypted_content === 'string' && item.encrypted_content.startsWith(REASONING_OPAQUE_PREFIX));
 }

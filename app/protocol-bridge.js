@@ -1494,10 +1494,10 @@ function rewriteModelInPayload(protocol, payload, publicModel) {
   if (Object.prototype.hasOwnProperty.call(payload, 'model')) {
     payload.model = publicModel;
   }
-  if (payload.message && typeof payload.message === 'object' && Object.prototype.hasOwnProperty.call(payload.message, 'model')) {
+  if (protocol === 'messages' && payload.type === 'message_start' && payload.message && typeof payload.message === 'object' && Object.prototype.hasOwnProperty.call(payload.message, 'model')) {
     payload.message.model = publicModel;
   }
-  if (payload.response && typeof payload.response === 'object' && Object.prototype.hasOwnProperty.call(payload.response, 'model')) {
+  if (protocol === 'responses' && /^response\./.test(payload.type || '') && payload.response && typeof payload.response === 'object' && Object.prototype.hasOwnProperty.call(payload.response, 'model')) {
     payload.response.model = publicModel;
   }
   return payload;

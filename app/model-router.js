@@ -240,7 +240,9 @@ function createRoutingContextStore(options = {}) {
       for (const route of parsed.routing?.models || []) {
         for (const target of route.targets || []) next.set(targetKey(route.id, target.id), JSON.stringify([
           route.enabled !== false, [...(route.entry_protocols || ['responses', 'chat_completions', 'messages'])].sort(),
-          target.config_id, target.model, target.protocol,
+          target.config_id, target.model,
+          [...(validateConfigModels(parsed.configs?.find(config => config.id === target.config_id)?.models,
+            { preset: parsed.configs?.find(config => config.id === target.config_id)?.preset }).find(model => model.id === target.model)?.protocols || [])].sort(),
         ]));
       }
       for (const key of new Set([...targets.keys(), ...next.keys()])) {
@@ -318,7 +320,7 @@ function detectRequestCapabilities(entryProtocol, body) {
     reasoning: false,
     structuredOutput: false,
     builtinTools: false,
-    streaming: entryProtocol === 'responses' ? payload.stream !== false : payload.stream === true,
+    streaming: payload.stream === true,
   };
 
   capabilities.reasoning = Boolean(
@@ -390,8 +392,8 @@ function getCapabilityValue(capabilities, name) {
 }
 
 function checkTargetCompatibility(config, configModel, target, entryProtocol, requestCapabilities, requestBody) {
-  if (!configModel.protocols.includes(target.protocol)) {
-    return 'protocol_unsupported';
+  if (target.protocol !== entryProtocol || !configModel.protocols.includes(entryProtocol)) {
+    return { reason: 'native_protocol_unsupported', detail: `模型未声明支持当前原生协议 ${entryProtocol}；支持：${configModel.protocols.join(', ')}` };
   }
 
   if (!buildUpstreamUrl(config, target.protocol)) {
@@ -415,37 +417,7 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
     return 'capability_streaming_unsupported';
   }
 
-  // Run the exact converter used for forwarding before coarse capabilities so
-  // a rejected control reports its field path and never becomes a silent drop.
-  if (requestBody && target.protocol !== entryProtocol) {
-    try {
-      require('./protocol-bridge').transformRequestForTarget({ entryProtocol, targetProtocol: target.protocol,
-        body: requestBody, targetModel: target.model, stream: Boolean(requestCapabilities.streaming) });
-    } catch (error) {
-      if (error.name === 'UnsupportedProtocolFeatureError') return { reason: 'protocol_feature_unsupported', detail: error.message };
-      throw error;
-    }
-  }
   if (requestCapabilities.storedResponse && (target.protocol !== 'responses' || config.type !== 'apikey')) return 'capability_persistent_responses_unsupported';
-  if (target.protocol !== entryProtocol) {
-    // A concrete body has passed the exact converter above. Keep conservative
-    // capability-only selection, but do not re-reject validated effort mapping.
-    if (requestCapabilities.reasoning && (!requestBody || entryProtocol === 'messages' || target.protocol === 'messages')) {
-      return 'capability_reasoning_requires_same_protocol';
-    }
-    if (requestCapabilities.structuredOutput && (target.protocol === 'messages' || entryProtocol === 'messages' || !requestBody)) {
-      return 'capability_structured_output_requires_same_protocol';
-    }
-    if (requestCapabilities.builtinTools) {
-      return 'capability_builtin_tools_requires_same_protocol';
-    }
-    if (requestCapabilities.audio) {
-      return 'capability_audio_requires_same_protocol';
-    }
-    if (requestCapabilities.files) {
-      return 'capability_files_requires_same_protocol';
-    }
-  }
 
   return null;
 }
@@ -521,6 +493,7 @@ function createModelRouter(options = {}) {
       return { available: false, reason: 'credentials_missing' };
     }
 
+    if (isFreePool(config) && entryProtocol !== 'chat_completions') return { available: false, reason: 'native_protocol_unsupported', detail: '免费池当前仅支持原生 Chat Completions' };
     if (isFreePool(config) && !details.poolModel) {
       const candidates = poolEngine?.getCandidates(config, requestCapabilities || {}, details.body || {} ) || [];
       return candidates.length ? { available: true, reason: 'pool_available', probe: false }
@@ -591,6 +564,9 @@ function createModelRouter(options = {}) {
     for (const outer of route.targets) {
       const config = getConfigById(outer.config_id);
       const pool = isFreePool(config);
+      if (pool && entryProtocol !== 'chat_completions') {
+        skipped.push({ target_id: outer.id, config_id: outer.config_id, model: outer.model, protocol: entryProtocol, reason: 'native_protocol_unsupported', detail: '免费池当前仅支持原生 Chat Completions' }); continue;
+      }
       if (onlyTargetId && outer.id !== onlyTargetId) {
         skipped.push({ target_id: outer.id, reason: 'context_bound_to_other_target' }); continue;
       }
@@ -607,7 +583,7 @@ function createModelRouter(options = {}) {
       const models = pool ? (poolEngine?.getCandidates(config, requestCapabilities, selectionOptions.body || {}) || []).filter(model => (!onlyBackendModel || model.id === onlyBackendModel) && !excluded.has(JSON.stringify([outer.id, model.id]))).slice(0, Math.max(0, normalizePoolOptions(config.pool).max_attempts - poolUsed)) : [null];
       if (!models.length) skipped.push({ target_id: outer.id, config_id: outer.config_id, model: outer.model, protocol: outer.protocol, reason: 'pool_unavailable' });
       for (const model of models) {
-        const target = model ? { ...outer, id: JSON.stringify([outer.id, model.id]), model: model.id, pool_target_id: outer.id } : outer;
+        const target = model ? { ...outer, protocol: entryProtocol, id: JSON.stringify([outer.id, model.id]), model: model.id, pool_target_id: outer.id } : { ...outer, protocol: entryProtocol };
         if (excluded.has(target.id)) continue;
         const availability = getAvailability(target, entryProtocol, requestCapabilities, { poolModel: model, body: selectionOptions.body });
         if (!availability.available) {
@@ -760,7 +736,8 @@ function createModelRouter(options = {}) {
     }
 
     let selected = false;
-    const targets = route.targets.map(target => {
+    const targets = route.targets.map(candidate => {
+      const target = { ...candidate, protocol: entryProtocol };
       const availability = route.entry_protocols.includes(entryProtocol)
         ? getAvailability(target, entryProtocol, detectRequestCapabilities(entryProtocol, {}), { skipProbe: true })
         : { available: false, reason: 'entry_protocol_not_supported' };
@@ -775,6 +752,7 @@ function createModelRouter(options = {}) {
         config_id: target.config_id,
         account_label: config ? config.description || config.id : null,
         account_preset: config ? config.preset || null : null,
+        supported_protocols: getConfigModel(config, target.model)?.protocols || [],
         model: target.model,
         protocol: target.protocol,
         available: availability.available,
@@ -800,6 +778,7 @@ function createModelRouter(options = {}) {
     resolve,
     poolEngine,
     getConfig: getConfigById,
+    getModel: (configId, modelId) => getConfigModel(getConfigById(configId), modelId),
     select,
     markSuccess,
     markFailure,

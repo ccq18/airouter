@@ -1,5 +1,7 @@
 # 三协议兼容性修复与验证
 
+> 当前契约为第 11 节“原生协议路由与完整转发”。第 1—10 节保留历史修复与验证快照；其中跨协议转换能力不再对外提供。
+
 当前逐点测试计划及结果入口为第 10 节。前文测试数量为各次历史快照，不表示所有协议能力已兼容。
 
 ## 1. 范围与依据
@@ -409,3 +411,61 @@ Node v22.19.0，零 skip/todo/取消；三项命令保留真实退出码：
 网关没有删除被请求的 effort 或重试不带参数的请求。真实请求成功证明对应供应商当次接受这组控制及协议，不证明所有模型支持每个 effort 值。逐点报告的 realSupplierChecks 仍为 0，因为它只统计受控自动化；上述真实证据单独保存，不混入 995 格。
 
 仍不开放 reasoning.summary/context/私有 include 等未核实等价控制；不允许 effort 绕过不透明历史来源校验。后台任务、自动裁剪、conversation、持久续接及跨账号/模型迁移的原边界不变。本轮没有新增缓存命中实验，不借用一次回答成功宣称缓存或服务端存储验收。
+
+## 11. 原生协议路由与完整转发
+
+### 11.1 当前交付契约
+
+用户明确选择“只走原生协议，不匹配就跳过”。Chat→Chat、Responses→Responses、Messages→Messages；停止公开 HTTP 跨协议转换。前端 ID→后端模型映射、候选优先级、额度接替和恢复回切保持。`auto` 仍是普通模型 ID。
+
+候选只保存 `id/config_id/model`，账号模型 `protocols` 决定支持的原生入口。运行态给 lease 绑定实际入口协议；配置中旧候选 protocol 不再参与选择，也不要求为不同协议重复添加相同账号模型。全部候选原生协议不匹配时 400 `native_protocol_unsupported`，附候选跳过原因且零推理调用；支持但额度耗尽/健康不可用仍按 503/原有错误规则处理。免费池当前只有 Chat，不参与 Responses/Messages；协议不匹配不取得额度探测锁、不冷却健康模型。
+
+管理界面候选编辑仅选择账号和模型，展示全部支持协议并说明自动匹配；保留模型同步预览、手动编辑多协议和两个页签。GLM 中国/国际补原生 Messages 地址，与 Chat 共用凭证和套餐额度；默认内置地址仅用于官方默认 base，自定义 base/protocol_paths 不会被静默改回官方域名。无目录元数据时，仅已核实的 GLM-5.3/Flash 变体默认声明 Chat+Messages，未知模型保守处理；OpenCode 按模型声明/家族识别，不能给所有模型默认标成三协议。依据：[智谱官方](https://docs.bigmodel.cn/cn/coding-plan/tool/claude)、[Z.ai 官方](https://docs.z.ai/devpack/tool/claude)。
+
+### 11.2 原生完整性与状态
+
+| 路径 | 当前规则 |
+| --- | --- |
+| 原生 JSON 请求 | 直接改写根 model，保留未知字段、工具参数/Schema、角色/内容、缓存控制、数字词法；省略 stream 时为 JSON，不注入普通 APIKey 默认控制，不经过简化 canonical |
+| 原生 JSON/SSE 响应 | 保留 choices、原生 ID、工具、拒绝/截断、usage/缓存明细及扩展；仅替换正确层级的模型身份，应用数据内的 model 不改；UTF-8 增量解码及 SSE 原始数字保留 |
+| 同协议格式互转 | 保留既有完整原生 Responses/Chat/Messages 路径；完整终态、多个 choice/工具索引和事件生命周期继续验收；不能无损重建的未知项或精度不安全数字明确报错，不删除后成功 |
+| Token 与免费池约束 | Token 原生 Responses 保留其必需 store:false、上游 stream:true；免费池保留固定 free、具体成员选择、零价上限、隐私和调用预算。它们不授权跨协议转换或放宽训练授权 |
+| 私有状态 | 原生签名/密文/未知 vendor reasoning 原块仅回到实际产生它的账号、模型及协议；未观察、未成功完成、篡改、TTL/重启、身份/模型变化、A→B→A、迟到结果仍明确拒绝。公开文本不锁账号。旧 `airouter-state/text` 跨协议标记返回 409，需要新原生会话 |
+
+私有 history/system/tools 与源 opaque 身份使用原始 JSON 数字词法及类型隔离摘要，不能由 JS Number 舍入产生身份碰撞；数学等值的 1/1.00e0 可匹配。该精确原生上下文能力使用 Node 22，运行和验收使用 Node 22。
+
+selector、额度恢复刷新、previous_response_id 与原生 reasoning 授权共用规范化模型协议，不能一处使用平台缺省协议而另一处直接检查 raw.protocols。允许服务端保存的原生 Responses 仍需上游明确 store:true；不新增 Conversations、后台任务管理或持久化会话，不承诺跨账号、模型或供应商缓存继承。已输出内容不重放，拒绝/策略过滤不切换上游规避。
+
+### 11.3 回归证据与测试范围调整
+
+跨协议成功用例按新产品契约退役；保留三原生协议四种格式路径的字段、响应明细、精度、工具多轮、缓存、终态、取消、状态及故障切换验收。六个跨协议方向由少量严格的 400 + native_protocol_unsupported + 零调用 + 原生健康后续请求覆盖，不用大量重复拒绝测试凑“兼容数量”。内部旧转换函数单元测试尚保留，但公开 HTTP 不调用它们，不作为当前产品能力。
+
+- 核心原生选路/无固定 protocol/重复候选/协议代际以及请求 root token 改写先补红回归：`/tmp/airouter-native-core-red.log`；修复后绿色在 `airouter-native-core-green.log`。新 HTTP 验证未知根控制、大整数请求/响应、UTF-8、缺省 JSON、自动原生选择、零调用跳过：`test/native-routing.integration.test.js`。
+- GLM 预设与 UI 首轮 6 项失败，修复后 51 项通过：`/tmp/airouter-native-provider-ui-{red,green}.log`；目录 GLM-5.3 声明的更新在 `airouter-native-discovery-green.log`。
+- native vendor state 首轮 4/4 失败，包含未知 Chat 对象/详情、完整原块回传；原生上下文安全回归保留：`airouter-native-reasoning-contract-{red,green}.log`。
+- 独立审查 HTTP 复现 tools 中 9007199254740993→9007199254740992 可绕过旧私有状态摘要。新增工具/历史/指令/opaque 精度回归首轮 5/5 失败，修复后含整数、小数、下溢、类型伪造、JSON/SSE 原词法正例与篡改 409、零新增调用：`test/native-context-precision.integration.test.js`。
+- 独立审查还复现合法缺省 protocols 配置无法刷新已过期耗尽额度及续接；现已统一模型规范化并补真实 HTTP 正例。两条原始反例限定复核 24/24 通过，退出码 0：`/tmp/airouter-review-native-two-blockers.log`。
+
+### 11.4 当前自动化门禁
+
+| 命令 | 结果 | 退出码 |
+| --- | --- | --- |
+| `npm run test:compatibility -- --output /tmp/airouter-native-compatibility` | 86 点、1150 格：**402 格原生兼容通过**（401 HTTP、1 单元）；748 格跨协议产品范围不支持，另列且不计兼容成功；兼容失败/未实现/未覆盖/未验证/无效证据为 0 | 0 |
+| `npm run test:protocol` | **910/910**，无 skip/todo/取消 | 0 |
+| `npm test` | **1168/1168**，无 skip/todo/取消 | 0 |
+
+对应日志：`/tmp/airouter-native-compatibility.log`、`/tmp/airouter-native-protocol-final.log`、`/tmp/airouter-native-full-final.log`。旧 995 格映射成功率不再用于当前原生产品验收。原生同协议正向断言完整保留，不将“不再支持的跨协议”重新包装为兼容成功。
+
+### 11.5 真实供应商及管理界面
+
+当前代码使用服务器最新配置的受保护本地副本；临时增加一个原生 Responses 验收路由。`/tmp/airouter-native-live/supplier-results.json` **13 项检查通过**：
+
+- Go DeepSeek 原生 Chat、智谱 GLM-5.3 原生 Messages、Go gpt-6-luna 原生 Responses，分别 JSON/SSE，答案 `7`。
+- Messages 调用 deepseek 路由实际跳过 Chat-only Go，落在 `glm-backup/glm-5.3/messages`；没有中间内容转换。
+- GLM Messages、DeepSeek Chat 原生工具两轮完整回传历史，均答 `30`。
+- 两个免费池 Chat 实际落点为 `beam-free` 与 `cohere/north-mini-code:free`。
+- 现有 deepseek/auto 没有配置 Responses 原生候选，实际返回 400 `native_protocol_unsupported`。需要该入口时应添加真正的 Responses 模型候选，不能恢复桥接兜底。
+
+管理页实际打开候选编辑器、滚动至底部、确认候选并保存临时副本，显示支持协议并热加载成功；保存后候选无固定 protocol，既有候选 ID/顺序保留。截图为 `/tmp/airouter-native-live/native-route-ui.png` 与 `native-route-saved.png`。真实供应商结果独立于自动化报告，不以一次成功推断所有模型接受全部字段；本轮没有新增缓存命中或持久服务端状态验收。
+
+上线需要给已核实的智谱 GLM-5.3/Flash 现有模型增加 Messages 声明，作为本次功能的必要配置变更单独保存备份并核对字段差异及前后校验值；不改变账号凭证、路由顺序、入口密钥或用户文件。运行代码兼容读取配置中已存的旧候选 protocol 字段，但不再使用它做协议决策；没有恢复旧路由模式。

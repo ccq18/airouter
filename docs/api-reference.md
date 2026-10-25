@@ -14,17 +14,17 @@
 | --- | --- |
 | `GET /health` | 返回 `status`、账号数量与客户端模型 ID 列表 |
 | `GET /v1/models` | OpenAI 风格 `data[]`，只列已启用的客户端路由 ID |
-| `POST /v1/chat/completions` | Chat Completions JSON；必填已配置 `model`，按候选协议转发或桥接 |
+| `POST /v1/chat/completions` | Chat Completions JSON；必填已配置 `model`，按入口选择同协议候选原生转发 |
 | `POST /v1/responses` | Responses JSON；必填已配置 `model`，支持流式与非流式响应 |
-| `POST /v1/messages` | Messages JSON；必填已配置 `model`，按候选协议转发或桥接 |
+| `POST /v1/messages` | Messages JSON；必填已配置 `model`，按入口选择同协议候选原生转发 |
 
-请求中的客户端 `model` 与后端模型名独立；响应中的模型身份保持客户端 ID。支持的文本、图片内容、普通工具和 SSE 能力受目标模型与协议转换能力约束；不支持的结构不会静默丢弃。完整边界见[统一设计第 5 节](unified-model-routing-design.md#5-转发和上下文边界)。
+请求中的客户端 `model` 与后端模型名独立；响应保持客户端 ID。每个候选只引用账号与模型，模型 `protocols` 必须支持当前入口，且对应地址可用。只原生转发，不再跨协议转换。全部候选协议不匹配返回 400 `native_protocol_unsupported` 及跳过原因；有匹配但额度/健康不可用仍为 503。
 
-`previous_response_id` 只允许续接原调用者、原账号和模型的原生 APIKey Responses 候选，且请求未设置 store:false、上游明确返回 store:true；Token HTTP 和 Chat 桥接不建立此绑定。服务重启、TTL、账号身份或候选模型变化后需要重发完整上下文。合法 `conversation` 字符串/{id} 当前也因缺少可核实会话归属返回 409，与 previous_response_id 同用或格式非法返回 400。已经向客户端输出的流不会切换到后备拼接。
+普通 API Key 原生 JSON 请求仅改写根 model；省略 stream 时为非流式，不注入 store、工具、采样等默认字段。未知字段、工具 Schema/参数、缓存和数字词法保留。Token Responses 必须 store:false、上游 stream:true；免费池保留零价与隐私保护。原生响应 JSON/SSE 透传保留明细；同协议格式互转不能无损表达时明确报错，不删字段伪造成功。
 
-没有 `/v1/*` 通配代理，也没有图片生成/编辑或 CPA 入口；未注册路径返回 404。
+`previous_response_id` 只允许原调用者、原账号/模型/协议的原生 APIKey Responses，且请求未设置 store:false、上游明确 store:true。原生签名/密文历史同样校验来源、前置 history/system/tools；重启、TTL、身份/模型/协议变化及篡改会失效。Conversations、后台任务管理、持久本地续接尚未实现。旧跨协议网关思考标记返回 409，客户端需重新开始原生会话。
 
-同协议缓存字段与响应明细原样保留；跨协议只映射已确认等价字段，不支持的控制明确拒绝。未知用量不填零，不可等价的统计细分附于 `usage.airouter_upstream_usage`。完整转换、停止、拒绝与真实验证边界见[三协议修复记录](protocol-compatibility-verification.md)。Chat↔Responses 公共字段、输出格式、logprobs、流选项与原生格式互转见该记录第 7 节；当前公开思考文本及不透明来源状态的保留、回传与限制见第 9 节。不透明状态只可还原给原账号、模型与后端协议，不代表服务端续接或跨供应商迁移。
+没有 `/v1/*` 通配代理、图片生成/编辑或 CPA 入口，未注册路径返回 404。字段、流式、额度/恢复与当前真实验证边界见[原生协议验证记录第 11 节](protocol-compatibility-verification.md#11-原生协议路由与完整转发)。
 
 ## 3. 账号与目录管理
 

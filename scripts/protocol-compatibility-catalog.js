@@ -3,6 +3,10 @@ const CHAT = 'chat_completions', RESPONSES = 'responses', MESSAGES = 'messages';
 const PROTOCOLS = [CHAT, RESPONSES, MESSAGES];
 const HTTP_FILE = 'test/protocol-boundary-contract.integration.test.js';
 const OPENAI = [CHAT, RESPONSES];
+const NATIVE_ONLY_REASON = '产品契约仅支持原生协议；账号模型未显式支持入口协议时必须在发送前跳过，禁止跨协议转换。';
+function nativeContract(cell) {
+  return cell.source === cell.backend ? { ...cell, applicable: true } : { ...cell, applicable: false, exclusion: 'native_only', reason: NATIVE_ONLY_REASON };
+}
 const SCHEMA = { type: 'object', properties: { n: { type: 'integer' } }, required: ['n'], additionalProperties: false };
 const fn = { name: 'alpha', description: 'Fixture function', parameters: SCHEMA };
 const tools = { [CHAT]: [{ type: 'function', function: fn }], [RESPONSES]: [{ type: 'function', ...fn }], [MESSAGES]: [{ name: fn.name, description: fn.description, input_schema: SCHEMA }] };
@@ -88,9 +92,7 @@ function caseKey(id, source, backend, wire, stream) { return [id, source, backen
 function caseName(cell) { return `COMPAT ${caseKey(cell.point, cell.source, cell.backend, cell.wire, cell.stream)}`; }
 function requestCells() {
   return points.flatMap(p => Object.keys(p.patches).flatMap(source => PROTOCOLS.flatMap(backend => p.modes.map(mode => {
-    const applicable = source === backend || p.rule === 'all' || p.rule === 'openai' && backend !== MESSAGES || p.rule === 'stop' && backend !== RESPONSES;
-    const cell = { point: p.id, source, backend, wire: mode, stream: mode === 'sse', file: HTTP_FILE, kind: 'acceptance', applicable,
-      ...(applicable ? { knownGap: Boolean(p.gapCross && source !== backend || p.gapTargets?.includes(backend)) } : { reason: p.reason }) };
+    const cell = nativeContract({ point: p.id, source, backend, wire: mode, stream: mode === 'sse', file: HTTP_FILE, kind: 'acceptance' });
     cell.name = caseName(cell); return cell;
   }))));
 }
@@ -127,15 +129,14 @@ function responseCells() {
   existing('state.native-store-continuation', 'responses-state.integration.test.js', 'native Responses default stores upstream and continues only confirmed stored responses', RESPONSES, RESPONSES, 'json');
   existing('state.native-store-continuation', 'responses-state.integration.test.js', 'native SSE keeps UTF8 bytes/cache details and confirmed storage binding', RESPONSES, RESPONSES, 'sse', true);
   existing('state.encrypted-full-history', 'protocol-reasoning.integration.test.js', 'native store:false encrypted reasoning can return with complete history but never grants previous_response_id', RESPONSES, RESPONSES, 'json');
-  for (const source of [RESPONSES, MESSAGES]) existing('state.public-reasoning-tool-history', 'protocol-reasoning.integration.test.js', `public reasoning tool result roundtrip survives ${source}`, source, CHAT, 'json');
-  for (const backend of [RESPONSES, MESSAGES]) for (const source of PROTOCOLS.filter(p => p !== backend)) existing('state.opaque-origin-roundtrip', 'protocol-reasoning.integration.test.js', `opaque state ${backend} roundtrips through ${source} to its exact origin`, source, backend, 'json');
+  for (const source of PROTOCOLS) existing('state.native-reasoning-tool-history', 'protocol-reasoning.integration.test.js', `native reasoning tool history roundtrip preserves exact ${source} fields and pairing`, source, source, 'json');
   for (const [point, name] of [
     ['routing.free-pool.sync', 'automatic catalog changes preserve fixed routing and failed sync retains last valid cache'],
     ['routing.free-pool.recovery', 'paid exhaustion and source Go exhaustion allow free pool; recovery returns to higher priority'],
     ['routing.free-pool.capabilities', 'capability matching skips text-only pool for images and enforces concrete zero-price requests'],
     ['routing.free-pool.inner-failover', 'pool failures exhaust only inner candidates and then use next pool with diagnostic actual model trace'],
   ]) existing(point, 'free-pool.integration.test.js', name, '*', '*', 'json');
-  return cells;
+  return cells.map(nativeContract);
 }
 // Inventory is independent of app controls. Add fields here deliberately when
 // adopting a new API contract; native-only fields cannot silently disappear.
@@ -152,7 +153,7 @@ function validateCatalog() {
     if (!points.some(p => Object.hasOwn(p.patches[source] || {}, field))) throw Error('Uncovered request field: ' + source + '.' + field);
   }
   const keys = new Set();
-  for (const cell of [...requestCells(), ...responseCells()]) { const key = caseKey(cell.point, cell.source, cell.backend, cell.wire, cell.stream); if (keys.has(key)) throw Error('Duplicate compatibility cell: ' + key); keys.add(key); if (!cell.applicable && !cell.reason) throw Error('Missing no-equivalence reason: ' + key); }
+  for (const cell of [...requestCells(), ...responseCells()]) { const key = caseKey(cell.point, cell.source, cell.backend, cell.wire, cell.stream); if (keys.has(key)) throw Error('Duplicate compatibility cell: ' + key); keys.add(key); if (!cell.applicable && !cell.reason) throw Error('Missing exclusion reason: ' + key); }
   return true;
 }
 module.exports = { CHAT, RESPONSES, MESSAGES, PROTOCOLS, HTTP_FILE, points, usagePoints, requestCells, responseCells, caseKey, caseName, REQUEST_FIELD_INVENTORY, validateCatalog };

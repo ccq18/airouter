@@ -31,7 +31,7 @@ function createParsed() {
         preset: 'opencode-go',
         base_url: 'https://go.example.com/inference/go',
         apikey: 'sk-example-2',
-        models: [{ id: 'go-chat', protocols: ['chat_completions'], capabilities: { images: false } }],
+        models: [{ id: 'go-chat', protocols: ['chat_completions', 'responses'], capabilities: { images: false } }],
       },
       {
         id: 'cfg-messages',
@@ -145,21 +145,17 @@ test('explicit routing always uses the first available target, not token priorit
   second.lease.release();
 });
 
-test('reordering targets makes an apikey or token take priority equally', () => {
+test('reordering native Responses targets treats API keys and Tokens equally', () => {
   const parsed = createParsed();
-  parsed.routing.models[0].targets = [
-    parsed.routing.models[0].targets[1],
-    parsed.routing.models[0].targets[0],
-  ];
-  const router = createRouter({
-    parsed,
-    runtimeConfigs: createRuntimeConfigs(parsed),
-  });
-
-  const selection = select(router);
-  assert.equal(selection.lease.target.config_id, 'cfg-token');
-  assert.equal(selection.lease.target.protocol, 'responses');
-  selection.lease.release();
+  const token = parsed.routing.models[0].targets[1], apikey = parsed.routing.models[0].targets[2];
+  parsed.routing.models[0].targets = [token, apikey];
+  let router = createRouter({ parsed, runtimeConfigs: createRuntimeConfigs(parsed) });
+  let selection = router.select('public-model', 'responses');
+  assert.equal(selection.lease.target.config_id, 'cfg-token'); assert.equal(selection.lease.target.protocol, 'responses'); selection.lease.release();
+  parsed.routing.models[0].targets = [apikey, token];
+  router = createRouter({ parsed, runtimeConfigs: createRuntimeConfigs(parsed) });
+  selection = router.select('public-model', 'responses');
+  assert.equal(selection.lease.target.config_id, 'cfg-go'); assert.equal(selection.lease.target.protocol, 'responses'); selection.lease.release();
 });
 
 test('exhausted quota skips the higher-priority target; recovery prefers it again', () => {
@@ -179,7 +175,7 @@ test('exhausted quota skips the higher-priority target; recovery prefers it agai
   });
 
   let selection = select(router);
-  assert.equal(selection.lease.target.config_id, 'cfg-token');
+  assert.equal(selection.lease.target.config_id, 'cfg-go');
   selection.lease.release();
 
   quotaEngine.states.delete('cfg-glm');
@@ -222,7 +218,7 @@ test('unknown quota is allowed but only one probe per account runs concurrently'
   assert.equal(first.lease.probe, true);
 
   const second = select(router);
-  assert.equal(second.lease.target.config_id, 'cfg-token');
+  assert.equal(second.lease.target.config_id, 'cfg-go');
   assert.equal(acquired, 1);
 
   first.lease.release();
@@ -252,7 +248,7 @@ test('auth health and cooldowns are separate from quota exhaustion', () => {
   assert.equal(healthStore.getConfigState('cfg-glm').status, 'auth_failed');
 
   let selection = select(router);
-  assert.equal(selection.lease.target.config_id, 'cfg-token');
+  assert.equal(selection.lease.target.config_id, 'cfg-go');
   selection.lease.release();
 
   now += 5 * 60 * 1000 + 1;
@@ -268,7 +264,7 @@ test('bounded attempts and explicit target exclusion avoid reusing a failed cand
   first.lease.release();
 
   const second = select(router, { excludeTargetIds: ['t-glm'] });
-  assert.equal(second.lease.target.id, 't-token');
+  assert.equal(second.lease.target.id, 't-go');
   second.lease.release();
 
   assert.equal(router.getMaxAttempts(router.resolve('public-model')), 3);
@@ -297,7 +293,7 @@ test('capability-incompatible targets are skipped with clear reasons', () => {
   selection.lease.release();
 });
 
-test('structured output is never silently dropped by a cross-protocol bridge', () => {
+test('a non-native target is rejected before structured output can be changed', () => {
   const router = createRouter();
   const selection = router.select('public-model', 'chat_completions', {
     capabilities: detectRequestCapabilities('chat_completions', {
@@ -325,10 +321,10 @@ test('structured output is never silently dropped by a cross-protocol bridge', (
   });
 
   assert.equal(result.lease, null);
-  assert.equal(result.skipped[0].reason, 'capability_structured_output_requires_same_protocol');
+  assert.equal(result.skipped[0].reason, 'native_protocol_unsupported');
 });
 
-test('reasoning/thinking state is never silently dropped by a cross-protocol bridge', () => {
+test('a non-native target is rejected before reasoning controls can be changed', () => {
   const parsed = createParsed();
   parsed.routing.models[0].targets = [
     { id: 't-token', config_id: 'cfg-token', model: 'gpt-backend', protocol: 'responses' },
@@ -343,7 +339,7 @@ test('reasoning/thinking state is never silently dropped by a cross-protocol bri
   });
 
   assert.equal(result.lease, null);
-  assert.equal(result.skipped[0].reason, 'capability_reasoning_requires_same_protocol');
+  assert.equal(result.skipped[0].reason, 'native_protocol_unsupported');
 });
 
 test('targets with empty token credentials are unavailable and never routed', () => {

@@ -6,7 +6,7 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
 
-// End-to-end contract tests: the real HTTP entry, routing, bridge, and a managed
+// End-to-end contract tests: the real HTTP entry, routing, native formatting, and a managed
 // free pool run against local deterministic providers. No supplier is contacted.
 const TEXT = '中文🙂𠮷';
 const REFUSAL = '不能协助🙂';
@@ -21,33 +21,6 @@ const usage = {
 };
 let server, child, dir, base, childLog = '', serial = 0;
 const calls = [];
-// Explicit field contracts exercise routing preflight and the actual wire body.
-const CONTROL_REJECTIONS = [
-  ['chat_completions', { seed: 7 }, 'seed'],
-  ['chat_completions', { presence_penalty: 0.5 }, 'presence_penalty'],
-  ['chat_completions', { frequency_penalty: 0.5 }, 'frequency_penalty'],
-  ['chat_completions', { n: 2 }, 'n'],
-  ['chat_completions', { logit_bias: { 123: -1 } }, 'logit_bias'],
-  ['chat_completions', { messages: [{ role: 'user', name: 'named-user', content: 'MODE:ok' }] }, 'messages[0].name'],
-  ['chat_completions', { prediction: { type: 'content', content: 'predicted' } }, 'prediction'],
-  ['chat_completions', { modalities: ['text', 'audio'], audio: { voice: 'alloy', format: 'wav' } }, 'modalities'],
-  ['chat_completions', { stream_options: { include_obfuscation: true } }, 'stream_options.include_obfuscation'],
-  ['chat_completions', { stream_options: { future_control: true } }, 'stream_options.future_control'],
-  ['chat_completions', { future_control: true }, 'future_control'],
-  ['chat_completions', { max_tokens: 64, max_completion_tokens: 32 }, 'max_tokens'],
-  ['chat_completions', { logprobs: false, top_logprobs: 3 }, 'top_logprobs'],
-  ['chat_completions', { tools: [{ type: 'function', function: { name: 'f', parameters: {}, defer_loading: true } }] }, 'tools[0].function.defer_loading'],
-  ['chat_completions', { tools: [{ type: 'function', function: { name: 'f', parameters: {} } }], tool_choice: { type: 'function', function: { name: 'f', future_control: true } } }, 'tool_choice.function.future_control'],
-  ['chat_completions', { messages: [{ role: 'user', content: [{ type: 'text', text: 'MODE:ok' }, { type: 'image_url', image_url: { url: 'https://example.invalid/image.png', future_control: true } }] }] }, 'messages[0].content[1].image_url.future_control'],
-  ['messages', { messages: [{ role: 'user', content: [{ type: 'text', text: 'MODE:ok' }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/image.png', future_control: true } }] }] }, 'messages[0].content[1].source.future_control'],
-  ['responses', { background: true }, 'background'],
-  ['responses', { truncation: 'auto' }, 'truncation'],
-  ['responses', { include: ['future.output'] }, 'include[0]'],
-  ['responses', { text: { future_control: true } }, 'text.future_control'],
-  ['responses', { text: { format: { type: 'json_schema', name: 's', schema: {}, future_control: true } } }, 'text.format.future_control'],
-  ['responses', { stream_options: { include_usage: true } }, 'stream_options.include_usage'],
-  ['responses', { future_control: true }, 'future_control'],
-];
 const listen = srv => new Promise(resolve => srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); }
@@ -137,32 +110,6 @@ function nativeChatStream(model, conflict = false, identityMode = '') {
     if (identityMode === 'name') chunks[1].choices[0].delta.tool_calls[0].function.name = 'conflicting-name';
   }
   return chunks.map(value => frame('', value)).join('') + frame('', '[DONE]');
-}
-const DETAIL_LOGPROBS = [{ token: '中文🙂', bytes: [228, 184, 173, 230, 150, 135, 240, 159, 153, 130], logprob: -0.125,
-  top_logprobs: [{ token: '中文', bytes: [228, 184, 173, 230, 150, 135], logprob: -0.5 }] }];
-function crossDetailJson(protocol, model, refusal = false) {
-  if (protocol === 'chat_completions') return { id: 'chatcmpl-details', object: 'chat.completion', created: 12345, model, service_tier: 'priority',
-    choices: [{ index: 0, message: { role: 'assistant', content: refusal ? null : '中文🙂', ...(refusal ? { refusal: '不能协助' } : {}) }, finish_reason: 'stop',
-      logprobs: { content: refusal ? null : DETAIL_LOGPROBS, refusal: refusal ? DETAIL_LOGPROBS : null } }], usage: usage.chat_completions };
-  return { id: 'resp_details', object: 'response', created_at: 12345, model, status: 'completed', service_tier: 'priority',
-    output: [{ id: 'msg_details', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '中文🙂', annotations: [], logprobs: DETAIL_LOGPROBS }] }], usage: usage.responses };
-}
-function crossDetailStream(protocol, model, variant = '') {
-  const payload = crossDetailJson(protocol, model);
-  if (variant === 'no_usage') delete payload.usage;
-  const snapshotLogprobs = variant === 'order' ? [{ top_logprobs: [{ logprob: -0.5, bytes: [228, 184, 173, 230, 150, 135], token: '中文' }],
-    logprob: -0.125, bytes: [228, 184, 173, 230, 150, 135, 240, 159, 153, 130], token: '中文🙂' }]
-    : variant === 'conflict' ? [{ ...DETAIL_LOGPROBS[0], logprob: -9 }] : DETAIL_LOGPROBS;
-  if (protocol === 'chat_completions') return frame('', { id: payload.id, model, created: 12345, service_tier: 'priority',
-    choices: [{ index: 0, delta: { role: 'assistant', content: '中文🙂' }, logprobs: { content: DETAIL_LOGPROBS, refusal: null }, finish_reason: null }] })
-    + frame('', { id: payload.id, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: usage.chat_completions }) + frame('', '[DONE]');
-  return frame('response.created', { type: 'response.created', response: { ...payload, output: [], status: 'in_progress' } })
-    + frame('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { ...payload.output[0], content: [], status: 'in_progress' } })
-    + frame('response.content_part.added', { type: 'response.content_part.added', output_index: 0, content_index: 0, item_id: 'msg_details', part: { type: 'output_text', text: '', annotations: [], logprobs: [] } })
-    + frame('response.output_text.delta', { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_details', delta: '中文🙂', logprobs: DETAIL_LOGPROBS })
-    + frame('response.output_text.done', { type: 'response.output_text.done', output_index: 0, content_index: 0, item_id: 'msg_details', text: '中文🙂', logprobs: snapshotLogprobs })
-    + frame('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: payload.output[0] })
-    + frame('response.completed', { type: 'response.completed', response: payload });
 }
 function responseJson(protocol, model, mode, id) {
   const text = mode === 'refusal' ? REFUSAL : TEXT;
@@ -269,11 +216,6 @@ test.before(async () => {
     if (!protocol) return json(res, 404, {});
     const mode = JSON.stringify(body).match(/MODE:(\w+)/)?.[1] || 'ok';
     calls.push({ protocol, path: req.url, body, mode }); serial++;
-    if (mode === 'cross_detail_json' || mode === 'cross_detail_refusal') return json(res, 200, crossDetailJson(protocol, body.model, mode === 'cross_detail_refusal'));
-    if (mode === 'cross_detail_sse') return splitUnicode(res, crossDetailStream(protocol, body.model));
-    if (mode === 'cross_detail_no_usage_sse') return splitUnicode(res, crossDetailStream(protocol, body.model, 'no_usage'));
-    if (mode === 'cross_detail_no_usage_json') { const payload = crossDetailJson(protocol, body.model); delete payload.usage; return json(res, 200, payload); }
-    if (mode === 'cross_detail_order' || mode === 'cross_detail_conflict') return splitUnicode(res, crossDetailStream(protocol, body.model, mode === 'cross_detail_order' ? 'order' : 'conflict'));
     if (mode.startsWith('chat_output_')) {
       const field = mode.slice('chat_output_'.length);
       const values = { reasoning_content: '私有推理🙂', reasoning: { encrypted: 'private-state' }, audio: { id: 'audio-fixture', data: 'fixture-audio', transcript: '语音' }, function_call: { name: 'legacy', arguments: '{"n":1}' } };
@@ -282,10 +224,6 @@ test.before(async () => {
       return splitUnicode(res, frame('', { id: 'chatcmpl-unsupported-output', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta: message, finish_reason: null }] })
         + frame('', { id: 'chatcmpl-unsupported-output', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta: {}, finish_reason: field === 'function_call' ? 'function_call' : 'stop' }], usage: usage.chat_completions }) + frame('', '[DONE]'));
     }
-    if (mode === 'cross_many_choices') return splitUnicode(res,
-      frame('', { id: 'chatcmpl-cross-many', model: body.model, choices: [{ index: 0, delta: { role: 'assistant', content: TEXT }, finish_reason: null }] })
-      + frame('', { id: 'chatcmpl-cross-many', model: body.model, choices: [{ index: 1, delta: { role: 'assistant', content: '另一个候选' }, finish_reason: null }] })
-      + frame('', { id: 'chatcmpl-cross-many', model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + frame('', '[DONE]'));
     if (mode === 'native_chat_json') return json(res, 200, nativeChatJson(body.model));
     if (mode === 'native_chat_sse' || mode === 'native_chat_conflict') return splitUnicode(res, nativeChatStream(body.model, mode === 'native_chat_conflict'));
     if (mode === 'native_chat_repeat_identity' || mode === 'native_chat_conflict_id' || mode === 'native_chat_conflict_name') return splitUnicode(res, nativeChatStream(body.model, false, mode === 'native_chat_repeat_identity' ? 'repeat' : mode.endsWith('_id') ? 'id' : 'name'));
@@ -420,45 +358,6 @@ test('same-protocol JSON retains usage details without changing caller cache con
   }
 });
 
-test('all six cross-protocol HTTP paths preserve one parallel tool round and ID-paired results', async () => {
-  for (const source of PROTOCOLS) for (const target of PROTOCOLS) {
-    if (source === target) continue;
-    const before = calls.length;
-    const response = await entry(source, toolHistory(source, nativeRoute(target)));
-    const payload = await response.json(); assert.equal(response.status, 200, `${source} -> ${target}: ${JSON.stringify(payload)}`);
-    assert.equal(calls.length, before + 1, 'must not silently fall back');
-    assert.equal(calls.at(-1).protocol, target); assertToolHistory(target, calls.at(-1).body);
-  }
-});
-
-test('cross-protocol stop sequences map between Chat and Messages and reject unsupported Responses', async () => {
-  let body = input('chat_completions', nativeRoute('messages'), 'ok'); body.stop = ['END'];
-  let response = await entry('chat_completions', body); assert.equal(response.status, 200); await response.json(); assert.deepEqual(calls.at(-1).body.stop_sequences, ['END']);
-  body = input('messages', nativeRoute('chat_completions'), 'ok'); body.stop_sequences = ['END', 'STOP'];
-  response = await entry('messages', body); assert.equal(response.status, 200); await response.json(); assert.deepEqual(calls.at(-1).body.stop, ['END', 'STOP']);
-  for (const source of ['chat_completions', 'messages']) {
-    body = input(source, 'only-responses', 'ok'); body[source === 'messages' ? 'stop_sequences' : 'stop'] = ['END']; const before = calls.length;
-    response = await entry(source, body); assert.equal(response.status, 400); await response.json(); assert.equal(calls.length, before);
-  }
-});
-
-test('non-equivalent Claude cache controls and failed tool markers reject before contacting a backend', async () => {
-  for (const target of ['chat_completions', 'responses']) {
-    let body = input('messages', nativeRoute(target), 'ok'); body.cache_control = { type: 'ephemeral' }; let before = calls.length;
-    let response = await entry('messages', body); assert.equal(response.status, 400); await response.json(); assert.equal(calls.length, before);
-    body = toolHistory('messages', nativeRoute(target)); body.messages[2].content[0].is_error = true; before = calls.length;
-    response = await entry('messages', body); assert.equal(response.status, 400); await response.json(); assert.equal(calls.length, before);
-  }
-});
-
-test('explicit OpenAI storage controls do not silently disappear across Messages', async () => {
-  for (const source of ['chat_completions', 'responses']) {
-    const body = input(source, 'only-messages', 'ok'); body.store = false;
-    const before = calls.length; const response = await entry(source, body);
-    assert.equal(response.status, 400); await response.json(); assert.equal(calls.length, before);
-  }
-});
-
 test('native Responses SSE aggregated to JSON keeps final store, annotations and exact usage details', async () => {
   const body = input('responses', nativeRoute('responses'), 'force_sse', false); body.store = true;
   const response = await entry('responses', body); assert.equal(response.status, 200);
@@ -471,12 +370,12 @@ test('native Responses SSE aggregated to JSON keeps final store, annotations and
 });
 
 test('Chat refusal JSON and SSE preserve content and cannot trigger a backup', async () => {
-  for (const protocol of ['responses', 'messages']) for (const stream of [false, true]) {
+  for (const protocol of ['chat_completions']) for (const stream of [false, true]) {
     const before = calls.length;
     const response = await entry(protocol, input(protocol, nativeRoute('chat_completions'), 'refusal', stream)); assert.equal(response.status, 200);
     const text = await response.text(); assert.ok(text.includes(REFUSAL), `${protocol}, stream=${stream}`); assert.doesNotMatch(text, /�/);
     assert.equal(calls.length, before + 1); assert.ok(!calls.at(-1).path.startsWith('/backup'));
-    if (!stream) { const payload = JSON.parse(text); if (protocol === 'responses') assert.equal(payload.output[0].content[0].type, 'refusal'); else assert.equal(payload.stop_reason, 'refusal'); }
+    if (!stream) { const payload = JSON.parse(text); assert.equal(payload.choices[0].message.refusal, REFUSAL); assert.equal(payload.choices[0].finish_reason, 'stop'); }
     else if (protocol === 'responses') assert.ok(events(text).some(x => x.type === 'response.refusal.delta'));
   }
 });
@@ -484,31 +383,32 @@ test('Chat refusal JSON and SSE preserve content and cannot trigger a backup', a
 test('policy refusal HTTP 403 and JSON 200 error do not rotate to another upstream', async () => {
   for (const mode of ['filter403', 'filter200']) {
     const before = calls.length;
-    const response = await entry('responses', input('responses', nativeRoute('chat_completions'), mode));
+    const response = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), mode));
     assert.ok(response.status >= 400 && response.status < 500, `${mode} must remain a client/policy rejection`); await response.text();
     assert.equal(calls.length, before + 1, `${mode} must not fall back`);
     assert.ok(!calls.at(-1).path.startsWith('/backup'));
   }
 });
 
-test('truncation/content-filter JSON and SSE retain incomplete terminal states', async () => {
-  for (const stream of [false, true]) {
-    const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'truncated', stream)); assert.equal(response.status, 200);
-    const text = await response.text(); const payload = stream ? events(text).find(x => x.type === 'response.incomplete')?.response : JSON.parse(text);
-    assert.ok(payload, 'must emit incomplete rather than completed'); assert.equal(payload.status, 'incomplete'); assert.equal(payload.incomplete_details.reason, 'max_output_tokens');
+test('native Chat truncation and content-filter terminals retain their meaning without fallback', async () => {
+  for (const mode of ['truncated', 'filter']) for (const stream of [false, true]) {
+    const before = calls.length;
+    const response = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), mode, stream));
+    assert.equal(response.status, 200); const text = await response.text();
+    const choices = stream ? events(text).flatMap(event => event.choices || []) : JSON.parse(text).choices;
+    assert.deepEqual(choices.map(choice => choice.finish_reason).filter(Boolean), [mode === 'truncated' ? 'length' : 'content_filter']);
+    assert.equal(calls.length, before + 1);
   }
-  const before = calls.length; const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'filter'));
-  const filtered = await response.json(); assert.equal(response.status, 200); assert.equal(filtered.status, 'incomplete'); assert.equal(filtered.incomplete_details.reason, 'content_filter'); assert.equal(calls.length, before + 1);
 });
 
 test('managed pool retries transient model failure but never replays refusal or an emitted stream', async () => {
   let before = calls.length;
   let response = await entry('chat_completions', input('chat_completions', 'pool-route', 'poolfail')); assert.equal(response.status, 200); await response.json();
   assert.deepEqual(calls.slice(before).map(x => x.body.model), ['vendor/pool-a', 'vendor/pool-b']);
-  before = calls.length; response = await entry('responses', input('responses', 'pool-route', 'refusal')); assert.equal(response.status, 200); assert.match(JSON.stringify(await response.json()), /不能协助/); assert.equal(calls.length, before + 1);
-  before = calls.length; response = await entry('responses', input('responses', 'pool-route', 'cut', true)); assert.equal(response.status, 200);
+  before = calls.length; response = await entry('chat_completions', input('chat_completions', 'pool-route', 'refusal')); assert.equal(response.status, 200); assert.match(JSON.stringify(await response.json()), /不能协助/); assert.equal(calls.length, before + 1);
+  before = calls.length; response = await entry('chat_completions', input('chat_completions', 'pool-route', 'cut', true)); assert.equal(response.status, 200);
   const { text } = await streamText(response);
-  assert.ok(text.includes('中文')); assert.equal(calls.length, before + 1); assert.ok(!events(text).some(x => x.type === 'response.completed'));
+  assert.ok(text.includes('中文')); assert.equal(calls.length, before + 1); assert.ok(!events(text).some(x => x.choices?.some(choice => choice.finish_reason != null)));
 });
 
 
@@ -523,27 +423,6 @@ async function streamText(response) {
   return { text, interrupted };
 }
 
-test('unsupported Responses SSE terminal reasons fail clearly before or after output and keep server alive', async () => {
-  let before = calls.length;
-  let response = await entry('chat_completions', input('chat_completions', 'only-responses', 'unknown_empty', true));
-  const emptyText = await response.text();
-  await assertServiceAlive();
-  assert.equal(response.status, 502, `unknown terminal meaning cannot become an empty successful completion: ${emptyText}`);
-  assert.match(emptyText, /represent|保真|unsupported|error/i);
-  assert.equal(calls.length, before + 1); await assertServiceAlive();
-});
-
-test('unsupported Responses terminal after text ends with an error without replay or server termination', async () => {
-  const before = calls.length;
-  const response = await entry('chat_completions', input('chat_completions', 'only-responses', 'unknown_content', true));
-  assert.equal(response.status, 200, 'the text preceding the terminal has already been emitted');
-  const received = await streamText(response);
-  assert.ok(received.text.includes(TEXT));
-  assert.ok(received.interrupted || /represent|保真|unsupported|error/i.test(received.text));
-  assert.ok(!events(received.text).some(event => event.choices?.some(choice => choice.finish_reason === 'stop')));
-  assert.equal(calls.length, before + 1); await assertServiceAlive();
-});
-
 test('native Responses SSE to JSON preserves unknown incomplete reasons instead of canonicalizing them', async () => {
   const before = calls.length;
   const response = await entry('responses', input('responses', 'only-responses', 'unknown_empty', false));
@@ -554,31 +433,20 @@ test('native Responses SSE to JSON preserves unknown incomplete reasons instead 
   assert.equal(calls.length, before + 1); await assertServiceAlive();
 });
 
-test('malformed streamed tool arguments cannot crash the server or become a successful Messages tool turn', async () => {
-  const before = calls.length;
-  const body = input('messages', 'only-responses', 'badargs', true);
-  body.tools = [{ name: 'alpha', input_schema: { type: 'object', properties: { n: { type: 'integer' } } } }];
-  const response = await entry('messages', body);
-  assert.ok(response.status === 200 || response.status === 502);
-  const received = await streamText(response);
-  assert.ok(received.interrupted || /represent|保真|unsupported|error|JSON/i.test(received.text));
-  assert.ok(!events(received.text).some(event => event.type === 'message_delta' && event.delta?.stop_reason === 'tool_use'));
-  assert.equal(calls.length, before + 1); await assertServiceAlive();
-});
-
 
 for (const source of ['chat_completions', 'responses', 'pool']) for (const stream of [false, true]) {
   test(`refusal followed by clean EOF never replays ${source} for a ${stream ? 'streaming' : 'JSON'} client`, async () => {
     const route = source === 'pool' ? 'pool-eof-route' : `eof-${source}-${stream ? 'stream' : 'json'}`;
     const before = calls.length;
-    const response = await entry('messages', input('messages', route, 'refusal_eof', stream));
+    const protocol = source === 'pool' ? 'chat_completions' : source;
+    const response = await entry(protocol, input(protocol, route, 'refusal_eof', stream));
     const received = await streamText(response);
     assert.equal(calls.length - before, 1, `refusal delta must not be replayed to another model/account: ${calls.slice(before).map(call => call.body.model).join(' -> ')}`);
     if (stream) {
       assert.equal(response.status, 200);
       assert.ok(received.text.includes(REFUSAL));
       assert.ok(received.interrupted || /error|incomplete|中断|完整/i.test(received.text), `clean EOF must end with an explicit error or interrupted stream: ${received.text}`);
-      assert.ok(!events(received.text).some(event => event.type === 'message_delta' && event.delta?.stop_reason === 'end_turn'));
+      assert.ok(!events(received.text).some(event => event.type === 'response.completed' || event.choices?.some(choice => choice.finish_reason != null)));
     } else {
       assert.equal(response.status, 502, `truncated refusal must report an error: ${received.text}`);
       assert.ok(JSON.parse(received.text).error);
@@ -588,21 +456,6 @@ for (const source of ['chat_completions', 'responses', 'pool']) for (const strea
 }
 
 
-test('provider JSON with an unknown Responses incomplete reason rejects a streaming cross-protocol client without fallback or native cooldown', async () => {
-  let before = calls.length;
-  let response = await entry('chat_completions', input('chat_completions', nativeRoute('responses'), 'force_json_incomplete', true));
-  const text = await response.text();
-  assert.equal(response.status, 502, text);
-  assert.match(text, /represent|保真|unsupported|error/i);
-  assert.equal(calls.length, before + 1, 'a conversion error must not replay the request');
-  assert.equal(calls.at(-1).protocol, 'responses');
-  before = calls.length;
-  response = await entry('responses', input('responses', nativeRoute('responses'), 'ok', false));
-  assert.equal(response.status, 200, 'gateway conversion failure must not cool the native model');
-  assert.equal((await response.json()).model, nativeRoute('responses'));
-  assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'responses');
-  await assertServiceAlive();
-});
 
 test('native Responses JSON synthesized as SSE preserves the incomplete final payload and response details', async () => {
   const before = calls.length;
@@ -625,7 +478,7 @@ test('native Responses JSON synthesized as SSE preserves the incomplete final pa
 });
 
 
-// Nine entry/backend pairs x four wire paths. Each case observes the real HTTP
+// Three native entry/backend pairs x four wire paths. Each case observes the real HTTP
 // body/headers, and compares client semantics to literal independent expectations.
 function assertMatrixUsage(entryProtocol, backendProtocol, value) {
   assert.ok(value, 'usage must be present');
@@ -724,7 +577,7 @@ function assertMatrixSse(protocol, wire, route, backend) {
   }
   assert.equal(text, TEXT); assertMatrixUsage(protocol, backend, reportedUsage);
 }
-for (const entryProtocol of PROTOCOLS) for (const backendProtocol of PROTOCOLS) {
+for (const entryProtocol of PROTOCOLS) for (const backendProtocol of [entryProtocol]) {
   for (const upstreamSse of [false, true]) for (const clientSse of [false, true]) {
     test(`wire matrix ${entryProtocol} <- ${backendProtocol}: ${upstreamSse ? 'SSE' : 'JSON'} -> ${clientSse ? 'SSE' : 'JSON'}`, async () => {
       const route = nativeRoute(backendProtocol), mode = upstreamSse ? 'matrix_sse' : 'matrix_json';
@@ -747,49 +600,6 @@ for (const entryProtocol of PROTOCOLS) for (const backendProtocol of PROTOCOLS) 
 }
 
 
-for (const backend of ['messages', 'responses']) {
-  test(`opaque ${backend} state preserves native wires and transports verified cross-protocol state without fallback or cooldown`, async () => {
-    for (const stream of [false, true]) {
-      const native = input(backend, nativeRoute(backend), 'private', stream);
-      const before = calls.length; const response = await entry(backend, native); const wire = await response.text();
-      assert.equal(response.status, 200); assert.equal(calls.length, before + 1);
-      assert.match(wire, backend === 'messages' ? /signed-state/ : /encrypted-state/);
-      for (const client of PROTOCOLS.filter(value => value !== backend)) {
-        const body = input(client, nativeRoute(backend), 'private', stream); delete body.store;
-        const before = calls.length; const converted = await entry(client, body); const wire = await converted.text();
-        assert.equal(converted.status, 200, wire); assert.equal(calls.length, before + 1, 'one generation, no replay');
-        const values = stream ? events(wire) : [JSON.parse(wire)];
-        assert.ok(!values.some(value => value.error), wire);
-        assert.match(wire, backend === 'messages' ? /signed-state/ : /encrypted-state/);
-        assert.match(wire, /airouter-state-v1:/, 'opaque data has an explicit verifiable replay handle');
-        const provenance = [];
-        function inspect(value) {
-          if (!value || typeof value !== 'object') return;
-          if (value.airouter_upstream_reasoning) provenance.push(value.airouter_upstream_reasoning);
-          for (const nested of Object.values(value)) inspect(nested);
-        }
-        inspect(values);
-        const original = backend === 'messages' ? { type: 'thinking', thinking: 'private reasoning', signature: 'signed-state', protocol: 'messages' }
-          : { id: 'rs-private', type: 'reasoning', encrypted_content: 'encrypted-state', summary: [], protocol: 'responses' };
-        assert.ok(provenance.some(value => { try { assert.deepEqual(value, original); return true; } catch (_) { return false; } }), 'complete original source state remains separate from answer');
-        assert.equal(calls.at(-1).protocol, backend);
-      }
-      const healthy = await entry(backend, native); assert.equal(healthy.status, 200, 'gateway conversion rejection must not cool native support'); await healthy.text();
-      assert.equal(calls.at(-1).protocol, backend);
-    }
-  });
-}
-test('signed thinking discovered after text retains ordering and completes without replay', async () => {
-  const before = calls.length;
-  const response = await entry('chat_completions', input('chat_completions', nativeRoute('messages'), 'private_late', true));
-  assert.equal(response.status, 200); const received = await streamText(response);
-  const parsed = events(received.text);
-  assert.equal(parsed.flatMap(value => value.choices || []).map(choice => choice.delta?.content || '').join(''), TEXT);
-  assert.match(received.text, /signed-state/); assert.match(received.text, /airouter-state-v1:/);
-  assert.ok(!parsed.some(value => value.error));
-  assert.equal(parsed.flatMap(value => value.choices || []).filter(choice => choice.finish_reason === 'stop').length, 1);
-  assert.equal(calls.length, before + 1); await assertServiceAlive();
-});
 
 test('native Messages forced SSE aggregates private blocks, raw usage and extra message fields into JSON', async () => {
   const before = calls.length;
@@ -825,34 +635,6 @@ test('native Messages forced JSON synthesizes private SSE blocks without droppin
   assert.equal(parsed.at(-1).type, 'message_stop'); assert.ok(!parsed.some(value => value.error));
 });
 
-for (const client of PROTOCOLS) for (const backend of PROTOCOLS) {
-  if (client === backend) continue;
-  test(`terminal matrix ${client} <- ${backend}: refusal and truncation JSON/SSE keep meaning and one attempt`, async () => {
-    for (const mode of ['refusal', 'truncated']) for (const stream of [false, true]) {
-      const body = input(client, nativeRoute(backend), mode, stream); delete body.store;
-      const before = calls.length; const response = await entry(client, body); const wire = await response.text();
-      assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
-      const parsed = stream ? events(wire) : null;
-      const payload = !stream ? JSON.parse(wire) : client === 'responses' ? parsed.at(-1).response : null;
-      if (client === 'responses') {
-        assert.equal(payload.status, mode === 'refusal' ? 'completed' : 'incomplete');
-        if (mode === 'refusal') assert.ok(payload.output.some(item => item.content?.some(part => part.type === 'refusal' && part.refusal === REFUSAL)));
-        else { assert.deepEqual(payload.incomplete_details, { reason: 'max_output_tokens' }); assert.equal(payload.output[0].content[0].text, TEXT); }
-      } else if (client === 'chat_completions') {
-        const choices = stream ? parsed.flatMap(x => x.choices || []) : payload.choices;
-        assert.deepEqual(choices.map(x => x.finish_reason).filter(Boolean), [mode === 'refusal' ? 'content_filter' : 'length']);
-        const refusal = stream ? choices.map(x => x.delta?.refusal || '').join('') : choices[0].message.refusal;
-        if (mode === 'refusal') assert.equal(refusal, REFUSAL);
-        else assert.equal(stream ? choices.map(x => x.delta?.content || '').join('') : choices[0].message.content, TEXT);
-      } else {
-        const terminal = stream ? parsed.find(x => x.type === 'message_delta').delta : payload;
-        assert.equal(terminal.stop_reason, mode === 'refusal' ? 'refusal' : 'max_tokens');
-        const text = stream ? parsed.filter(x => x.type === 'content_block_delta' && x.delta.type === 'text_delta').map(x => x.delta.text).join('') : payload.content.map(x => x.text).join('');
-        assert.equal(text, mode === 'refusal' ? REFUSAL : TEXT);
-      }
-    }
-  });
-}
 
 
 for (const protocol of PROTOCOLS) for (const ending of ['clean', 'abrupt']) {
@@ -868,144 +650,6 @@ for (const protocol of PROTOCOLS) for (const ending of ['clean', 'abrupt']) {
   });
 }
 
-for (const backend of ['chat_completions', 'responses']) for (const upstreamSse of [false, true]) for (const stream of [false, true]) {
-  const client = backend === 'chat_completions' ? 'responses' : 'chat_completions';
-  test(`cross detail ${client} <- ${backend}: ${upstreamSse ? 'SSE' : 'JSON'} -> ${stream ? 'SSE' : 'JSON'} preserves token logprobs and service tier`, async () => {
-    const body = input(client, nativeRoute(backend), upstreamSse ? 'cross_detail_sse' : 'cross_detail_json', stream);
-    body.service_tier = 'priority'; body.safety_identifier = 'safety-fixture';
-    if (client === 'chat_completions') { body.logprobs = true; body.top_logprobs = 1; if (stream) body.stream_options = { include_usage: true }; }
-    else { body.include = ['message.output_text.logprobs']; body.top_logprobs = 1; }
-    const before = calls.length, response = await entry(client, body), wire = await response.text();
-    assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
-    assert.equal(calls.at(-1).protocol, backend);
-    assert.equal(calls.at(-1).body.service_tier, 'priority'); assert.equal(calls.at(-1).body.safety_identifier, 'safety-fixture');
-    assert.equal(calls.at(-1).body.top_logprobs, 1);
-    if (backend === 'responses') { assert.deepEqual(calls.at(-1).body.include, ['message.output_text.logprobs']); assert.equal(calls.at(-1).body.logprobs, undefined); }
-    else { assert.equal(calls.at(-1).body.logprobs, true); assert.equal(calls.at(-1).body.include, undefined); }
-    if (client === 'responses') {
-      const parsed = stream ? events(wire) : null;
-      const payload = stream ? parsed.find(value => value.type === 'response.completed')?.response : JSON.parse(wire);
-      assert.equal(payload.service_tier, 'priority');
-      assert.deepEqual(payload.output[0].content[0], { type: 'output_text', text: '中文🙂', annotations: [], logprobs: DETAIL_LOGPROBS });
-      if (stream) {
-        assert.deepEqual(parsed.filter(value => value.type === 'response.output_text.delta').flatMap(value => value.logprobs), DETAIL_LOGPROBS);
-        assert.deepEqual(parsed.find(value => value.type === 'response.output_text.done').logprobs, DETAIL_LOGPROBS);
-        assert.deepEqual(parsed.find(value => value.type === 'response.content_part.done').part.logprobs, DETAIL_LOGPROBS);
-      }
-    } else if (!stream) {
-      const payload = JSON.parse(wire); assert.equal(payload.service_tier, 'priority');
-      assert.equal(payload.choices[0].message.content, '中文🙂'); assert.deepEqual(payload.choices[0].logprobs, { content: DETAIL_LOGPROBS, refusal: null });
-    } else {
-      const parsed = events(wire), content = parsed.flatMap(value => value.choices || []).filter(choice => choice.delta?.content);
-      assert.equal(content.map(choice => choice.delta.content).join(''), '中文🙂');
-      assert.deepEqual(content.flatMap(choice => choice.logprobs?.content || []), DETAIL_LOGPROBS);
-      assert.ok(parsed.every(value => value.service_tier === 'priority'));
-      assert.deepEqual(parsed.find(value => Array.isArray(value.choices) && value.choices.length === 0)?.usage, usage.chat_completions);
-      assert.ok(parsed.filter(value => value.choices.length > 0).every(value => value.usage === null));
-    }
-  });
-}
-
-test('non-equivalent Chat refusal logprobs cannot be silently dropped or retried as Responses', async () => {
-  const before = calls.length;
-  const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'cross_detail_refusal', false));
-  const payload = await response.json(); assert.equal(response.status, 502, JSON.stringify(payload));
-  assert.equal(payload.error.code, 'upstream_response_not_representable'); assert.match(payload.error.message, /logprobs.*refusal|refusal.*logprobs/i);
-  assert.equal(calls.length, before + 1);
-});
-
-test('cross Chat streaming usage is opt-in and never exposes an unsolicited usage chunk', async () => {
-  for (const upstreamSse of [false, true]) for (const explicitFalse of [false, true]) {
-    const body = input('chat_completions', nativeRoute('responses'), upstreamSse ? 'cross_detail_sse' : 'cross_detail_json', true);
-    if (explicitFalse) body.stream_options = { include_usage: false };
-    const before = calls.length, response = await entry('chat_completions', body), wire = await response.text();
-    assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
-    const parsed = events(wire); assert.equal(parsed.flatMap(x => x.choices || []).map(x => x.delta?.content || '').join(''), '中文🙂');
-    assert.ok(parsed.every(x => !Object.prototype.hasOwnProperty.call(x, 'usage')));
-    assert.ok(parsed.every(x => x.choices.length > 0)); assert.match(wire, /data: \[DONE\]/);
-  }
-});
-
-for (const stream of [false, true]) {
-  test(`Responses logprob snapshot object-key order preserves semantic values for ${stream ? 'SSE' : 'JSON'} clients`, async () => {
-    const before = calls.length;
-    const response = await entry('chat_completions', input('chat_completions', nativeRoute('responses'), 'cross_detail_order', stream));
-    const wire = await response.text(); assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
-    if (stream) {
-      const parsed = events(wire); assert.ok(!parsed.some(value => value.error), wire);
-      assert.equal(parsed.flatMap(value => value.choices || []).map(choice => choice.delta?.content || '').join(''), '中文🙂');
-      assert.deepEqual(parsed.flatMap(value => value.choices || []).flatMap(choice => choice.logprobs?.content || []), DETAIL_LOGPROBS);
-      assert.deepEqual(parsed.flatMap(value => value.choices || []).map(choice => choice.finish_reason).filter(Boolean), ['stop']);
-      assert.match(wire, /data: \[DONE\]/);
-    } else {
-      const payload = JSON.parse(wire); assert.equal(payload.choices[0].message.content, '中文🙂');
-      assert.deepEqual(payload.choices[0].logprobs, { content: DETAIL_LOGPROBS, refusal: null });
-    }
-  });
-  test(`Responses logprob snapshot truly changed values still reject without replay for ${stream ? 'SSE' : 'JSON'} clients`, async () => {
-    const before = calls.length;
-    const response = await entry('chat_completions', input('chat_completions', nativeRoute('responses'), 'cross_detail_conflict', stream));
-    const wire = await response.text(); assert.equal(calls.length, before + 1);
-    if (stream) {
-      assert.equal(response.status, 200); const parsed = events(wire);
-      assert.match(wire, /logprobs.*不一致/); assert.ok(parsed.some(value => value.error));
-      assert.ok(!parsed.some(value => value.choices?.some(choice => choice.finish_reason === 'stop'))); assert.doesNotMatch(wire, /data: \[DONE\]/);
-    } else { assert.equal(response.status, 502); assert.match(JSON.parse(wire).error.message, /logprobs.*不一致/); }
-  });
-}
-
-test('different Chat choice indices arriving in separate SSE frames cannot merge into one Responses success', async () => {
-  const before = calls.length;
-  const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'cross_many_choices', true));
-  const received = await streamText(response); assert.equal(response.status, 200);
-  assert.match(received.text, /choices/); assert.ok(!events(received.text).some(x => x.type === 'response.completed'));
-  assert.equal(calls.length, before + 1);
-});
-
-for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']) for (const stream of [false, true]) {
-  test(`Chat output ${field} ${stream ? 'SSE' : 'JSON'} preserves public reasoning or rejects unsupported private structures without replay`, async () => {
-    const expected = { reasoning_content: '私有推理🙂', reasoning: { encrypted: 'private-state' }, audio: { id: 'audio-fixture', data: 'fixture-audio', transcript: '语音' }, function_call: { name: 'legacy', arguments: '{"n":1}' } }[field];
-    let before = calls.length;
-    const native = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'chat_output_' + field, stream));
-    const wire = await native.text(); assert.equal(native.status, 200); assert.equal(calls.length, before + 1);
-    const message = stream ? events(wire)[0].choices[0].delta : JSON.parse(wire).choices[0].message;
-    assert.deepEqual(message[field], expected); assert.equal(message.content, TEXT);
-    for (const client of ['responses', 'messages']) {
-      before = calls.length;
-      const body = input(client, nativeRoute('chat_completions'), 'chat_output_' + field, stream); delete body.store;
-      const response = await entry(client, body), wire = await response.text();
-      assert.equal(calls.length, before + 1, 'must not retry after receiving source output');
-      if (field === 'reasoning_content') {
-        assert.equal(response.status, 200, wire);
-        const values = stream ? events(wire) : [JSON.parse(wire)];
-        assert.ok(!values.some(value => value.error));
-        if (client === 'responses') {
-          const payload = stream ? values.findLast(value => value.type === 'response.completed')?.response : values[0];
-          assert.equal(payload.output[0].type, 'reasoning');
-          assert.deepEqual(payload.output[0].content, [{ type: 'reasoning_text', text: expected }]);
-          assert.equal(payload.output[1].content[0].text, TEXT);
-          assert.deepEqual(payload.output[0].airouter_upstream_reasoning, { protocol: 'chat_completions', reasoning_content: expected });
-        } else if (!stream) {
-          assert.equal(values[0].content[0].thinking, expected); assert.match(values[0].content[0].signature, /^airouter-text-v1:/);
-          assert.equal(values[0].content[1].text, TEXT);
-        } else {
-          assert.equal(values.filter(value => value.delta?.type === 'thinking_delta').map(value => value.delta.thinking).join(''), expected);
-          assert.equal(values.filter(value => value.delta?.type === 'text_delta').map(value => value.delta.text).join(''), TEXT);
-          assert.equal(values.filter(value => value.type === 'message_stop').length, 1);
-        }
-      } else {
-        const payload = JSON.parse(wire);
-        assert.equal(response.status, 502, wire);
-        assert.equal(payload.error.code || payload.error.type, 'upstream_response_not_representable');
-        assert.match(payload.error.message, new RegExp('choices.*' + field));
-      }
-    }
-    before = calls.length;
-    const healthy = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'ok', false));
-    assert.equal(healthy.status, 200, 'unsupported conversion must not cool native model'); await healthy.text();
-    assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'chat_completions');
-  });
-}
 
 for (const upstreamSse of [false, true]) for (const clientSse of [false, true]) {
   test(`native Chat multi-choice raw details ${upstreamSse ? 'SSE' : 'JSON'} -> ${clientSse ? 'SSE' : 'JSON'}`, async () => {
@@ -1134,45 +778,7 @@ test('native Chat and Responses reject requested obfuscation during JSON synthes
   }
 });
 
-for (const [source, controls, field] of CONTROL_REJECTIONS) {
-  test(`HTTP cross-protocol field rule rejects ${source} ${field} before any attempt`, async () => {
-    const target = source === 'responses' ? 'chat_completions' : 'responses';
-    const before = calls.length;
-    const response = await entry(source, { ...input(source, 'only-' + target, 'ok'), ...controls });
-    const payload = await response.json();
-    assert.equal(response.status, 400, `${field} must not disappear: ${JSON.stringify(payload)}`);
-    assert.equal(payload.error.code || payload.error.type, 'unsupported_protocol_feature');
-    assert.ok(JSON.stringify(payload).includes(field), 'diagnostic must identify the exact field path: ' + JSON.stringify(payload));
-    assert.equal(calls.length, before, 'incompatibility cannot consume an upstream attempt');
-    const healthy = await entry(target, input(target, nativeRoute(target), 'ok'));
-    assert.equal(healthy.status, 200); await healthy.text();
-    assert.equal(calls.at(-1).protocol, target, 'no health cooldown from client compatibility');
-  });
-}
-
 for (const source of ['chat_completions', 'responses']) {
-  test(`HTTP equivalent controls and nested user data map completely ${source}`, async () => {
-    const target = source === 'responses' ? 'chat_completions' : 'responses';
-    const schema = { type: 'object', properties: { cache_control: { type: 'string' }, seed: { type: 'number' }, future_control: { type: 'object' } }, required: ['cache_control'], additionalProperties: false };
-    for (const type of ['text', 'json_object', 'json_schema']) {
-      const format = type === 'json_schema' ? { type, name: 'answer', description: 'exact original schema', strict: true, schema } : { type };
-      const body = { ...input(source, 'only-' + target, 'ok'), service_tier: 'flex', safety_identifier: 'safe-fixture', user: 'user-fixture', metadata: { cache_control: 'application data', future_control: 'application data' }, prompt_cache_key: 'field-fixture', prompt_cache_retention: '24h', prompt_cache_options: { mode: 'explicit', ttl: '5m' }, top_logprobs: 2, stream_options: { include_obfuscation: false } };
-      if (source === 'responses') { body.text = { verbosity: 'low', format }; body.include = ['message.output_text.logprobs']; body.max_output_tokens = 123; body.background = false; body.truncation = 'disabled'; }
-      else { body.verbosity = 'low'; body.response_format = type === 'json_schema' ? { type, json_schema: { name: 'answer', description: 'exact original schema', strict: true, schema } } : format; body.logprobs = true; body.max_completion_tokens = 123; }
-      const before = calls.length; const response = await entry(source, body); const payload = await response.json();
-      assert.equal(response.status, 200, JSON.stringify(payload)); assert.equal(calls.length, before + 1);
-      const sent = calls.at(-1).body; assert.equal(calls.at(-1).protocol, target);
-      for (const key of ['service_tier', 'safety_identifier', 'user', 'metadata', 'prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options', 'top_logprobs', 'stream_options']) assert.deepEqual(sent[key], body[key], key);
-      if (target === 'responses') {
-        assert.deepEqual(sent.text, { verbosity: 'low', format }); assert.deepEqual(sent.include, ['message.output_text.logprobs']); assert.equal(sent.max_output_tokens, 123);
-        for (const key of ['verbosity', 'response_format', 'logprobs', 'max_tokens', 'max_completion_tokens']) assert.equal(Object.hasOwn(sent, key), false, 'must not leak source control ' + key);
-      } else {
-        assert.equal(sent.verbosity, 'low'); assert.deepEqual(sent.response_format, type === 'json_schema' ? { type, json_schema: { name: 'answer', description: 'exact original schema', strict: true, schema } } : format);
-        assert.equal(sent.logprobs, true); assert.equal(sent.max_completion_tokens, 123); assert.equal(Object.hasOwn(sent, 'max_tokens'), false);
-        for (const key of ['text', 'include', 'background', 'truncation', 'max_output_tokens']) assert.equal(Object.hasOwn(sent, key), false, 'must not leak source control ' + key);
-      }
-    }
-  });
   test(`HTTP same-protocol unknown and nested controls remain raw ${source}`, async () => {
     const body = { ...input(source, nativeRoute(source), 'ok'), future_control: { opaque: true }, metadata: { name: 'user-data', cache_control: 'not an API directive' }, stream_options: { future_control: 'vendor-extension' } };
     const response = await entry(source, body); assert.equal(response.status, 200); await response.json();
@@ -1180,20 +786,9 @@ for (const source of ['chat_completions', 'responses']) {
   });
 }
 
-test('Responses output budget maps only to the destination protocol field', async () => {
-  for (const target of ['chat_completions', 'messages']) {
-    const before = calls.length;
-    const response = await entry('responses', { model: 'only-' + target, input: [{ role: 'user', content: 'MODE:ok' }], stream: false, max_output_tokens: 31 });
-    assert.equal(response.status, 200); await response.json(); assert.equal(calls.length, before + 1);
-    const sent = calls.at(-1).body; assert.equal(calls.at(-1).protocol, target);
-    assert.equal(sent[target === 'messages' ? 'max_tokens' : 'max_completion_tokens'], 31);
-    assert.equal(Object.hasOwn(sent, target === 'messages' ? 'max_completion_tokens' : 'max_tokens'), false);
-    assert.equal(Object.hasOwn(sent, 'max_output_tokens'), false);
-  }
-});
 
 for (const source of ['chat_completions', 'responses']) {
-  test(`field preflight skips the incompatible candidate and preserves the native fallback ${source}`, async () => {
+  test(`native protocol selection skips the incompatible candidate and preserves the native fallback ${source}`, async () => {
     const incompatible = source === 'chat_completions' ? 'responses' : 'chat_completions';
     const body = { ...input(source, source === 'chat_completions' ? nativeRoute('responses') : 'fields-fallback-responses', 'ok'), future_control: { private_provider_option: 'keep' }, ...(source === 'chat_completions' ? { seed: 42 } : { background: false, truncation: 'disabled' }) };
     const before = calls.length; const response = await entry(source, body); const payload = await response.json();
@@ -1206,25 +801,26 @@ for (const source of ['chat_completions', 'responses']) {
   });
 }
 
-for (const upstream of ['json', 'sse']) test(`Chat include_usage preserves unknown source counters as null (${upstream})`, async () => {
-  const body = input('chat_completions', nativeRoute('responses'), 'cross_detail_no_usage_' + upstream, true); body.stream_options = { include_usage: true };
-  const before = calls.length, response = await entry('chat_completions', body), wire = await response.text();
-  assert.equal(response.status, 200); assert.equal(calls.length, before + 1);
-  const parsed = events(wire); assert.equal(parsed.flatMap(x => x.choices || []).map(x => x.delta?.content || '').join(''), '中文🙂');
-  const usageChunks = parsed.filter(x => x.choices.length === 0); assert.equal(usageChunks.length, 1);
-  assert.equal(usageChunks[0].usage, null); assert.equal(parsed.at(-1), usageChunks[0]);
-  assert.ok(parsed.filter(x => x.choices.length).every(x => x.usage === null));
-  assert.match(wire, /data: \[DONE\]\n\n$/);
-});
 
 test('HTTP 200 content-policy error payload returns 403 without another provider attempt', async () => {
   const before = calls.length;
-  const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'filter200'));
+  const response = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'filter200'));
   const payload = await response.json();
   assert.equal(response.status, 403);
   assert.equal(payload.error.code, 'content_policy_violation');
   assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'chat_completions');
-  const healthy = await entry('responses', input('responses', nativeRoute('chat_completions'), 'ok'));
+  const healthy = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'ok'));
   assert.equal(healthy.status, 200); await healthy.json();
   assert.equal(calls.length, before + 2); assert.equal(calls.at(-1).body.model, 'backend-chat_completions', 'policy rejection must not cool the original model');
 });
+
+for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']) for (const stream of [false, true]) {
+  test(`native Chat ${stream ? 'SSE' : 'JSON'} preserves provider ${field} separately from answer text`, async () => {
+    const expected = { reasoning_content: '私有推理🙂', reasoning: { encrypted: 'private-state' }, audio: { id: 'audio-fixture', data: 'fixture-audio', transcript: '语音' }, function_call: { name: 'legacy', arguments: '{"n":1}' } }[field];
+    const before = calls.length;
+    const response = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'chat_output_' + field, stream));
+    const wire = await response.text(); assert.equal(response.status, 200); assert.equal(calls.length, before + 1);
+    const message = stream ? events(wire)[0].choices[0].delta : JSON.parse(wire).choices[0].message;
+    assert.deepEqual(message[field], expected); assert.equal(message.content, TEXT);
+  });
+}

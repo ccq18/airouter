@@ -55,7 +55,7 @@ test('non-Go providers fall back to preset protocols when discovery has no metad
     base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
     apikey: 'unit-test-key',
   });
-  assert.deepEqual(glmCatalog[0].protocols, ['chat_completions']);
+  assert.deepEqual(glmCatalog[0].protocols, ['chat_completions', 'messages']);
 
   const openrouterCatalog = parseModelCatalog({
     data: [{ id: 'openai/gpt-5.2' }],

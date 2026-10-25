@@ -23,7 +23,7 @@ async function main() {
     console.log('Compatibility reports: ' + output + '.{json,md}');
   }
   console.log(JSON.stringify({ ok: report.ok, summary: report.summary, regressions: { boundary: report.regressions.boundary, other: report.regressions.other } }, null, 2));
-  for (const cell of report.cells.filter(cell => !['compatible', 'no_equivalent'].includes(cell.status))) console.error(cell.key + ': ' + cell.status + '\n' + (cell.error || 'Required positive evidence missing'));
+  for (const cell of report.cells.filter(cell => !['compatible', 'no_equivalent', 'unsupported'].includes(cell.status))) console.error(cell.key + ': ' + cell.status + '\n' + (cell.error || 'Required positive evidence missing'));
   for (const item of report.regressions.failures) console.error(item.file + ': ' + item.name + ': ' + item.status + '\n' + (item.error || 'Test was not verified'));
   if (!report.ok) process.exitCode = 1;
 }

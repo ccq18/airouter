@@ -103,7 +103,7 @@ test('account editing uses platform, credential, editable models, sync preview, 
   assert.match(saveUpstream, /isTokenPreset\(preset\) && !state\.editingUpstreamId/);
 });
 
-test('routing UI maps arbitrary public IDs to ordered account/model/protocol targets', () => {
+test('routing UI maps arbitrary public IDs to ordered account/model targets with automatic native protocol matching', () => {
   for (const id of [
     'routeModelIdInput',
     'routeEntryProtocol',
@@ -119,7 +119,8 @@ test('routing UI maps arbitrary public IDs to ordered account/model/protocol tar
   assert.match(html, /<details class="advanced-settings"[\s\S]*?routeEntryProtocol/);
   assert.match(routingJs, /data-target-editor-field="account"/);
   assert.match(routingJs, /data-target-editor-field="model"/);
-  assert.match(routingJs, /data-target-editor-field="protocol"/);
+  assert.doesNotMatch(routingJs, /data-target-editor-field="protocol"/);
+  assert.match(routingJs, /支持协议/);
   assert.match(routingJs, /data-move-target-up/);
   assert.match(routingJs, /data-move-target-down/);
   assert.match(routingJs, /\/admin\/api\/model-routes/);
@@ -130,6 +131,11 @@ test('routing UI maps arbitrary public IDs to ordered account/model/protocol tar
   assert.match(saveRoute, /closeLayer\('routeDialog'\)/);
   assert.match(saveRoute, /resetRouteForm\(\{ close: false \}\)/);
   assert.match(saveRoute, /await loadAll\(\)/);
+});
+
+test('manually added OpenCode models require explicit native protocol selection rather than all provider endpoints', () => {
+  for (const id of ['opencode-go', 'opencode-zen']) assert.deepEqual(routingAdmin.initialModelProtocols({ id, protocols: ['chat_completions', 'responses', 'messages'] }), []);
+  assert.deepEqual(routingAdmin.initialModelProtocols({ id: 'claude', protocols: ['messages'] }), ['messages']);
 });
 
 test('account cards keep platforms equal and quota unknown is never exhausted', () => {
@@ -378,6 +384,22 @@ function poolHarness() {
   harness.admin.state.routes = { models: [], max_attempts: 4 };
   return { ...harness, configs, pool, calls };
 }
+
+test('saving a route omits candidate protocol and displays all declared native model protocols', async () => {
+  const { admin, nodes, document, calls, configs } = poolHarness();
+  configs[0].models[0].protocols = ['chat_completions', 'messages'];
+  admin.state.formTargets = [{ id: 'native-choice', config_id: 'go', model: 'paid-model', protocol: 'chat_completions' }];
+  nodes.get('routeModelIdInput').value = 'arbitrary-model';
+  document.querySelectorAll = selector => selector.includes('routeEntryProtocol') ? [{ checked: true, value: 'messages' }, { checked: true, value: 'chat_completions' }] : [];
+  await admin.saveRoute();
+  const saved = calls.find(call => call.options.method === 'PUT');
+  assert.deepEqual(JSON.parse(saved.options.body).models[0].targets, [{ id: 'native-choice', config_id: 'go', model: 'paid-model' }]);
+  admin.state.routes = { models: [{ id: 'arbitrary-model', entry_protocols: ['messages', 'chat_completions'], targets: [{ id: 'native-choice', config_id: 'go', model: 'paid-model' }] }] };
+  admin.renderRoutes();
+  const cards = nodes.get('modelRoutesList').innerHTML;
+  assert.match(cards, /Chat Completions/); assert.match(cards, /Claude Messages/);
+  assert.doesNotMatch(cards, /undefined/);
+});
 
 test('pool editor reuses saved credentials, hides editable model lists, and saves fixed free', async () => {
   const { admin, nodes, calls } = poolHarness();

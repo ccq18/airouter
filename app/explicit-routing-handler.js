@@ -1,10 +1,10 @@
 const { buildAuthHeadersForConfig } = require('./openai-config');
 const crypto = require('node:crypto');
 const { buildUpstreamUrl } = require('./provider-presets');
+const { validateConfigModels } = require('./routing-config');
 const {
   UnsupportedProtocolFeatureError,
   normalizeEntryProtocol,
-  transformRequestForTarget,
   transformResponseForEntry,
   serializeCanonicalResponse,
   createSseEventParser,
@@ -21,13 +21,19 @@ const {
     detectRequestCapabilities: require('./model-router').detectRequestCapabilities,
   };
 })();
-const { normalizeResponsesRequestBody } = require('./responses-defaults');
 const { nativeChatToSse, createNativeChatAccumulator } = require('./native-chat-bridge');
 const { createReasoningSession } = require('./reasoning-transport');
-const { rewriteJsonModels, assertRepresentableJsonNumbers } = require('./json-wire');
+const { hasBridgeReasoning } = require('./reasoning-content');
+const { rewriteJsonModels, rewriteJsonRoot, assertRepresentableJsonNumbers } = require('./json-wire');
 
 const RETRYABLE_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 429]);
 const MAX_UPSTREAM_ERROR_BODY_BYTES = 512 * 1024;
+
+function getNativeModel(router, configId, modelId) {
+  if (typeof router.getModel === 'function') return router.getModel(configId, modelId);
+  const config = router.getConfig?.(configId);
+  return validateConfigModels(config?.models, { preset: config?.preset }).find(model => model.id === modelId);
+}
 
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -77,9 +83,9 @@ function validateResponsesState(body) {
   return '';
 }
 
-function observeUpstreamState(lease, payload) {
+function observeUpstreamState(lease, payload, rawJSON) {
   if (!payload || typeof payload !== 'object') return;
-  lease.reasoningSession?.observe(payload);
+  lease.reasoningSession?.observe(payload, rawJSON);
   const response = payload.response && typeof payload.response === 'object' ? payload.response : payload;
   if (lease.target.protocol === 'responses' && typeof response.store === 'boolean') lease.responseStorage = response.store;
   const choice = payload.choices?.[0];
@@ -537,13 +543,13 @@ function createExplicitRoutingHandler(options = {}) {
   const error = typeof options.error === 'function' ? options.error : () => {};
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
 
-  async function refreshExhaustedCandidates(router, route) {
+  async function refreshExhaustedCandidates(router, route, entryProtocol) {
     const quotaEngine = getQuotaEngine();
     if (!quotaEngine || typeof quotaEngine.ensureFresh !== 'function') {
       return;
     }
 
-    const configIds = new Set((route.targets || []).map(target => target.config_id).filter(Boolean));
+    const configIds = new Set((route.targets || []).filter(target => getNativeModel(router, target.config_id, target.model)?.protocols.includes(entryProtocol)).map(target => target.config_id).filter(Boolean));
     for (const configId of configIds) {
       const snapshot = typeof quotaEngine.getSnapshot === 'function'
         ? quotaEngine.getSnapshot(configId)
@@ -644,12 +650,15 @@ function createExplicitRoutingHandler(options = {}) {
       return;
     }
 
-    await refreshExhaustedCandidates(router, route);
+    if (hasBridgeReasoning(body)) {
+      sendProtocolError(res, entryProtocol, 409, 'upstream_context_unavailable', '已停止跨协议转换；旧网关思考标记不能迁移到原生会话，请开始新会话'); return;
+    }
+    await refreshExhaustedCandidates(router, route, entryProtocol);
     if (req.aborted || res.destroyed || res.writableEnded) return;
 
     let forcedTargetId = '';
     let forcedBackendModel = '';
-    const reasoningSession = createReasoningSession({ store: getContextStore(), router, route, entryProtocol, body, authHash: requestAuthHash, publicModel });
+    const reasoningSession = createReasoningSession({ store: getContextStore(), router, route, entryProtocol, body, rawBody, authHash: requestAuthHash, publicModel });
     try {
       const origin = reasoningSession.inspect();
       if (origin) { forcedTargetId = origin.targetId; forcedBackendModel = origin.model; }
@@ -680,7 +689,8 @@ function createExplicitRoutingHandler(options = {}) {
       if (
         !boundTarget ||
         boundTarget.model !== binding.model ||
-        boundTarget.protocol !== binding.protocol
+        binding.protocol !== entryProtocol ||
+        !getNativeModel(router, boundTarget.config_id, boundTarget.model)?.protocols.includes(binding.protocol)
       ) {
         sendProtocolError(
           res,
@@ -714,9 +724,7 @@ function createExplicitRoutingHandler(options = {}) {
       return;
     }
 
-    const clientWantsStream = entryProtocol === 'responses'
-      ? body.stream !== false
-      : body.stream === true;
+    const clientWantsStream = body.stream === true;
     const excludeTargetIds = [];
     let attempts = 0;
     const attemptedTargetIds = new Set();
@@ -804,8 +812,8 @@ function createExplicitRoutingHandler(options = {}) {
           );
           return;
         }
-        if (!attempts && lastSkipped.some(item => item.reason === 'protocol_feature_unsupported')) {
-          sendProtocolError(res, entryProtocol, 400, 'unsupported_protocol_feature', '候选无法保真表达请求中的协议语义', { skipped: lastSkipped }); return;
+        if (!attempts && lastSkipped.length && lastSkipped.every(item => item.reason === 'native_protocol_unsupported')) {
+          sendProtocolError(res, entryProtocol, 400, 'native_protocol_unsupported', `没有上游模型支持当前原生协议 ${entryProtocol}`, { skipped: lastSkipped }); return;
         }
         break;
       }
@@ -864,24 +872,11 @@ function createExplicitRoutingHandler(options = {}) {
 
       let requestBody;
       try {
-        let sourceBody = body;
-        if (entryProtocol === 'responses' && targetProtocol === 'responses') {
-          sourceBody = normalizeResponsesRequestBody('/responses', body, {
-            forceStoreFalse: runtime && runtime.type === 'token',
-          });
-        }
-
-        requestBody = transformRequestForTarget({
-          entryProtocol,
-          targetProtocol,
-          body: sourceBody,
-          targetModel: target.model,
-          stream: targetStream,
-          reasoningTransport: lease.reasoningSession,
-        });
-
+        if (targetProtocol !== entryProtocol) throw new UnsupportedProtocolFeatureError('只允许转发到相同原生协议', 'native_protocol_unsupported');
+        requestBody = { ...body, model: target.model };
         if (targetProtocol === 'responses' && runtime && runtime.type === 'token') {
           requestBody.store = false;
+          requestBody.stream = true;
         }
       } catch (err) {
         releaseLease();
@@ -923,7 +918,16 @@ function createExplicitRoutingHandler(options = {}) {
       }
 
       const headers = buildTargetHeaders(req, runtime, targetProtocol, targetStream, clientVersion, requestSessionId);
-      const upstreamBody = Buffer.from(JSON.stringify(requestBody));
+      const overrides = { model: target.model };
+      if (runtime?.type === 'token' && targetProtocol === 'responses') { overrides.store = false; overrides.stream = true; }
+      if (lease.pool) {
+        if (body.max_tokens == null && body.max_completion_tokens == null) overrides.max_tokens = requestBody.max_tokens;
+        if (lease.config.preset === 'openrouter-free') {
+          overrides.provider = requestBody.provider;
+          for (const key of ['models', 'route', 'plugins', 'web_search_options', 'transforms']) overrides[key] = undefined;
+        }
+      }
+      const upstreamBody = rewriteJsonRoot(rawBody, overrides);
 
       if (options.accessLogEnabled) {
         log(`统一路由: ${publicModel} -> ${target.config_id}/${target.model} (${targetProtocol}, try ${attempts + 1}/${maxAttempts})`);
@@ -1090,7 +1094,7 @@ function createExplicitRoutingHandler(options = {}) {
             if (!parsed.data || typeof parsed.data !== 'object') {
               return;
             }
-            observeUpstreamState(lease, parsed.data);
+            observeUpstreamState(lease, parsed.data, parsed.dataText);
             if (isUpstreamErrorPayload(parsed.data)) {
               const descriptor = classifyUpstreamErrorPayload(parsed.data);
               if (!committed) {
@@ -1106,7 +1110,11 @@ function createExplicitRoutingHandler(options = {}) {
               : bridge.accept(parsed.event, parsed.data);
             // Native SSE needs only model identity substitution. Preserve the
             // original JSON number tokens just as on the native JSON path.
-            if (rewriter && entries.length === 1 && typeof parsed.dataText === 'string') entries[0].wireData = rewriteJsonModels(parsed.dataText, publicModel);
+            if (rewriter && entries.length === 1 && typeof parsed.dataText === 'string') {
+              const nestedModels = entryProtocol === 'responses' && /^response\./.test(parsed.data.type || '') ? ['response']
+                : entryProtocol === 'messages' && parsed.data.type === 'message_start' ? ['message'] : [];
+              entries[0].wireData = rewriteJsonModels(parsed.dataText, publicModel, { nestedModels });
+            }
             processEntries(entries);
             if (bridge && bridge.isComplete()) {
               sawTerminal = true;
@@ -1334,7 +1342,7 @@ function createExplicitRoutingHandler(options = {}) {
           continue;
         }
 
-        observeUpstreamState(lease, parsedPayload);
+        observeUpstreamState(lease, parsedPayload, responseBody);
         if (isUpstreamErrorPayload(parsedPayload)) {
           const descriptor = classifyUpstreamErrorPayload(parsedPayload);
           if (
@@ -1423,7 +1431,7 @@ function createExplicitRoutingHandler(options = {}) {
         const nativeChat = entryProtocol === 'chat_completions' && targetProtocol === 'chat_completions' ? createNativeChatAccumulator(publicModel) : null;
         let nativeFinalResponse = null;
         const acceptPayload = parsed => {
-          observeUpstreamState(lease, parsed.data);
+          observeUpstreamState(lease, parsed.data, parsed.dataText);
           if (entryProtocol === targetProtocol) assertRepresentableJsonNumbers(parsed.dataText);
           if (nativeResponses && ['response.completed', 'response.incomplete'].includes(parsed.data.type || parsed.event) && parsed.data.response) nativeFinalResponse = parsed.data.response;
           if (nativeChat) nativeChat.accept(parsed.data);
@@ -1461,7 +1469,7 @@ function createExplicitRoutingHandler(options = {}) {
               if (!parsed.data || typeof parsed.data !== 'object') {
                 continue;
               }
-              observeUpstreamState(lease, parsed.data);
+              observeUpstreamState(lease, parsed.data, parsed.dataText);
               if (isUpstreamErrorPayload(parsed.data)) {
                 if (!streamError) {
                   streamError = classifyUpstreamErrorPayload(parsed.data);
@@ -1478,7 +1486,7 @@ function createExplicitRoutingHandler(options = {}) {
                 sawDone = true;
                 bridge.finish();
               } else if (parsed.data && typeof parsed.data === 'object') {
-                observeUpstreamState(lease, parsed.data);
+                observeUpstreamState(lease, parsed.data, parsed.dataText);
                 if (isUpstreamErrorPayload(parsed.data)) {
                   if (!streamError) {
                     streamError = classifyUpstreamErrorPayload(parsed.data);
@@ -1621,7 +1629,7 @@ function createExplicitRoutingHandler(options = {}) {
         continue;
       }
 
-      observeUpstreamState(lease, parsedPayload);
+      observeUpstreamState(lease, parsedPayload, responseBody);
       if (isUpstreamErrorPayload(parsedPayload)) {
         const descriptor = classifyUpstreamErrorPayload(parsedPayload);
         if (
@@ -1700,7 +1708,7 @@ function createExplicitRoutingHandler(options = {}) {
       if (entryProtocol === targetProtocol && options.preserveNativeJson !== false) {
         res.status(200);
         res.setHeader('content-type', 'application/json; charset=utf-8');
-        res.end(rewriteJsonModels(responseBody, publicModel));
+        res.end(rewriteJsonModels(responseBody, publicModel, { nestedModels: [] }));
       } else res.status(200).json(payload);
       router.markSuccess(lease);
       bindResponseContext(getContextStore(), entryProtocol, payload.id, lease, publicModel, requestAuthHash);
