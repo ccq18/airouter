@@ -160,60 +160,57 @@ function createRoutingContextStore(options = {}) {
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : DEFAULT_CONTEXT_TTL_MS;
   const bindings = new Map();
-
-  function prune(timestamp) {
-    for (const [id, binding] of bindings.entries()) {
-      if (!binding || binding.expiresAt <= timestamp) {
-        bindings.delete(id);
-      }
-    }
+  const accounts = new Map();
+  let lifecycle = 0;
+  const targetEpochs = new Map();
+  let targets = new Map();
+  const targetKey = (publicModel, targetId) => JSON.stringify([publicModel, targetId]);
+  const epoch = (configId, publicModel, targetId) => `${lifecycle}:${accounts.get(configId) || 0}:${targetEpochs.get(targetKey(publicModel, targetId)) || 0}`;
+  function prune() {
+    for (const [id, binding] of bindings) if (binding.expiresAt <= now()) bindings.delete(id);
   }
-
   return {
+    getEpoch: epoch,
+    forgetResponse(responseId) { bindings.delete(normalizeString(responseId)); },
+    // Keep monotonic tombstones: switching an account or target A -> B -> A
+    // must not make a request from the first A current again.
+    syncRoutes(parsed) {
+      const next = new Map();
+      for (const route of parsed.routing?.models || []) {
+        for (const target of route.targets || []) next.set(targetKey(route.id, target.id), JSON.stringify([
+          route.enabled !== false, (route.entry_protocols || ['responses', 'chat_completions', 'messages']).includes('responses'),
+          target.config_id, target.model, target.protocol,
+        ]));
+      }
+      for (const key of new Set([...targets.keys(), ...next.keys()])) {
+        if (targets.get(key) === next.get(key)) continue;
+        targetEpochs.set(key, (targetEpochs.get(key) || 0) + 1);
+        for (const [id, binding] of bindings) if (targetKey(binding.public_model, binding.target_id) === key) bindings.delete(id);
+      }
+      targets = next;
+    },
     bind(responseId, details) {
       const id = normalizeString(responseId);
-      if (!id) {
-        return null;
-      }
+      if (!id) return null;
+      if (details.expected_epoch !== undefined && details.expected_epoch !== epoch(details.config_id, details.public_model, details.target_id)) return null;
+      prune();
       const timestamp = now();
-      prune(timestamp);
-      const binding = {
-        id,
-        config_id: normalizeString(details.config_id),
-        target_id: normalizeString(details.target_id),
-        model: normalizeString(details.model),
-        protocol: normalizeString(details.protocol),
-        public_model: normalizeString(details.public_model),
-        auth_hash: normalizeString(details.auth_hash),
-        created_at: timestamp,
-        expiresAt: timestamp + ttlMs,
-      };
-      bindings.set(id, binding);
-      return binding;
+      const binding = { id, config_id: normalizeString(details.config_id), target_id: normalizeString(details.target_id),
+        model: normalizeString(details.model), protocol: normalizeString(details.protocol), public_model: normalizeString(details.public_model),
+        auth_hash: normalizeString(details.auth_hash), created_at: timestamp, expiresAt: timestamp + ttlMs };
+      bindings.set(id, binding); return binding;
     },
-    resolve(responseId) {
-      const id = normalizeString(responseId);
-      const binding = bindings.get(id);
-      if (!binding) {
-        return null;
-      }
-      if (binding.expiresAt <= now()) {
-        bindings.delete(id);
-        return null;
-      }
-      return binding;
-    },
+    resolve(responseId) { prune(); return bindings.get(normalizeString(responseId)) || null; },
     forgetConfig(configId) {
-      for (const [key, binding] of bindings) {
-        if (binding.config_id === configId) bindings.delete(key);
-      }
+      accounts.set(configId, (accounts.get(configId) || 0) + 1);
+      for (const [id, binding] of bindings) if (binding.config_id === configId) bindings.delete(id);
     },
     clear() {
+      lifecycle += 1;
+      for (const key of new Set([...targets.keys(), ...targetEpochs.keys()])) targetEpochs.set(key, (targetEpochs.get(key) || 0) + 1);
       bindings.clear();
     },
-    get size() {
-      return bindings.size;
-    },
+    get size() { prune(); return bindings.size; },
   };
 }
 
@@ -266,6 +263,8 @@ function detectRequestCapabilities(entryProtocol, body) {
     payload.reasoning_effort ||
     (Array.isArray(payload.include) && payload.include.some(value => String(value).includes('reasoning'))),
   );
+
+  capabilities.storedResponse = entryProtocol === 'responses' && payload.store === true;
 
   const tools = Array.isArray(payload.tools) ? payload.tools : [];
   capabilities.tools = tools.length > 0;
@@ -325,7 +324,7 @@ function getCapabilityValue(capabilities, name) {
     : undefined;
 }
 
-function checkTargetCompatibility(config, configModel, target, entryProtocol, requestCapabilities) {
+function checkTargetCompatibility(config, configModel, target, entryProtocol, requestCapabilities, requestBody) {
   if (!configModel.protocols.includes(target.protocol)) {
     return 'protocol_unsupported';
   }
@@ -333,6 +332,8 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
   if (!buildUpstreamUrl(config, target.protocol)) {
     return 'protocol_endpoint_unsupported';
   }
+
+  if (requestCapabilities.storedResponse && (target.protocol !== 'responses' || config.type !== 'apikey')) return 'capability_persistent_responses_unsupported';
 
   const modelCapabilities = configModel.capabilities || {};
   if (requestCapabilities.images && getCapabilityValue(modelCapabilities, 'images') === false) {
@@ -369,6 +370,15 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
     }
   }
 
+  if (requestBody && target.protocol !== entryProtocol) {
+    try {
+      require('./protocol-bridge').transformRequestForTarget({ entryProtocol, targetProtocol: target.protocol,
+        body: requestBody, targetModel: target.model, stream: Boolean(requestCapabilities.streaming) });
+    } catch (error) {
+      if (error.name === 'UnsupportedProtocolFeatureError') return { reason: 'protocol_feature_unsupported', detail: error.message };
+      throw error;
+    }
+  }
   return null;
 }
 
@@ -459,9 +469,10 @@ function createModelRouter(options = {}) {
       target,
       entryProtocol,
       requestCapabilities || detectRequestCapabilities(entryProtocol, {}),
+      details.body,
     );
     if (compatibility) {
-      return { available: false, reason: compatibility };
+      return { available: false, ...(typeof compatibility === 'string' ? { reason: compatibility } : compatibility) };
     }
 
     if (isFreePool(config)) return { available: true, reason: 'pool_available', probe: false };
@@ -567,6 +578,7 @@ function createModelRouter(options = {}) {
   }
 
   function markFailure(lease, details = {}) {
+    if (['unsupported_protocol_feature', 'upstream_response_not_representable'].includes(details.errorCode || details.code || details.reason)) return;
     if (!lease || !lease.config) {
       return;
     }

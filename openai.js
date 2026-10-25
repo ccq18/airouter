@@ -83,6 +83,7 @@ function applyConfig(config) {
     healthStore.forget(id);
     contextStore.forgetConfig(id);
   }
+  contextStore.syncRoutes(config);
   applyProxyEnvironment(config);
   poolEngine.syncConfigs();
   if (server) for (const item of config.configs.filter(isFreePool)) {

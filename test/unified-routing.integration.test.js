@@ -955,7 +955,8 @@ test('Messages and Responses entries bridge text, tools and SSE to Chat or Respo
   assert.equal(response.status, 200);
   payload = await response.json();
   assert.equal(payload.model, 'Responses-Public');
-  assert.equal(payload.output_text, 'from-token');
+  assert.equal(payload.output[0].content[0].text, 'from-token');
+  assert.equal(payload.status, 'completed');
   assert.equal(tokenFake.stats.responseRequests.length, beforeToken + 1);
   assert.equal(tokenFake.stats.responseRequests[beforeToken].body.model, 'gpt-backend');
 
@@ -1017,7 +1018,7 @@ test('Messages and Responses entries bridge text, tools and SSE to Chat or Respo
   assert.ok(Array.isArray(bridgeRequest.tools));
 });
 
-test('previous_response_id stays on its original candidate and never migrates across protocols', async () => {
+test('Token HTTP and Chat bridges reject unsupported continuation and opaque state', async () => {
   let response = await entryFetch('/v1/responses', {
     model: 'Responses-Public',
     input: 'first context request',
@@ -1034,10 +1035,9 @@ test('previous_response_id stays on its original candidate and never migrates ac
     previous_response_id: bound.id,
     stream: false,
   });
-  assert.equal(response.status, 200);
-  const continued = await response.json();
-  assert.equal(continued.model, 'Responses-Public');
-  assert.equal(tokenFake.stats.responseRequests.length, beforeToken + 1);
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, 'upstream_context_unavailable');
+  assert.equal(tokenFake.stats.responseRequests.length, beforeToken);
 
   response = await entryFetch('/v1/responses', {
     model: 'Responses-Public',

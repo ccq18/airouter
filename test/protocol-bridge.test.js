@@ -59,7 +59,9 @@ test('chat entry to responses target preserves text, tools, tool results and mod
   });
 
   assert.equal(transformed.model, 'gpt-backend');
-  assert.equal(transformed.instructions, 'be concise');
+  assert.equal(transformed.instructions, '');
+  assert.equal(transformed.input[0].role, 'system');
+  assert.deepEqual(transformed.input[0].content, [{ type: 'input_text', text: 'be concise' }]);
   assert.equal(transformed.max_output_tokens, 256);
   assert.equal(transformed.stream, true);
   assert.equal(transformed.tools[0].name, 'get_weather');
@@ -237,7 +239,9 @@ test('responses target JSON can be rendered as a Claude Messages response with t
   assert.equal(result.content[1].id, 'call_1');
   assert.deepEqual(result.content[1].input, { id: 1 });
   assert.equal(result.stop_reason, 'tool_use');
-  assert.deepEqual(result.usage, { input_tokens: 4, output_tokens: 2 });
+  // OpenAI reports total input, Claude reports non-cached input. Without cache
+  // read/write counters the latter cannot be inferred from the former.
+  assert.deepEqual(result.usage, { output_tokens: 2, airouter_upstream_usage: { protocol: 'responses', input_tokens: 4 } });
 });
 
 test('chat target JSON can be rendered as a Responses response with tool calls', () => {

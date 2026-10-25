@@ -339,7 +339,7 @@ function normalizeResponsesRequestBody(requestPath, body, options = {}) {
     }
 
     const normalizedBody = {
-        ...RESPONSES_DEFAULTS,
+        ...(options.codexCompatibility ? RESPONSES_DEFAULTS : {}),
         ...body
     };
     normalizedBody.model = normalizeModelAlias(body.model, options);

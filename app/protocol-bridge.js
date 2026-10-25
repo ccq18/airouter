@@ -9,6 +9,8 @@
  * silently dropped.
  */
 
+const { StringDecoder } = require('node:string_decoder');
+const { randomUUID } = require('node:crypto');
 const SUPPORTED_PROTOCOLS = ['chat_completions', 'responses', 'messages'];
 
 class UnsupportedProtocolFeatureError extends Error {
@@ -130,7 +132,7 @@ function mapChatStopToCanonical(reason) {
     case 'function_call':
       return 'tool_use';
     case 'content_filter':
-      return 'refusal';
+      return 'content_filter';
     default:
       return reason || 'end_turn';
   }
@@ -142,6 +144,8 @@ function mapMessagesStopToCanonical(reason) {
       return 'end_turn';
     case 'max_tokens':
       return 'max_tokens';
+    case 'model_context_window_exceeded':
+      return 'model_context_window_exceeded';
     case 'tool_use':
       return 'tool_use';
     case 'stop_sequence':
@@ -156,15 +160,20 @@ function mapMessagesStopToCanonical(reason) {
 function mapCanonicalStopToChat(reason) {
   switch (reason) {
     case 'max_tokens':
+    case 'model_context_window_exceeded':
       return 'length';
     case 'tool_use':
       return 'tool_calls';
     case 'refusal':
+    case 'content_filter':
       return 'content_filter';
     case 'end_turn':
     case 'stop_sequence':
-    default:
+    case undefined:
+    case null:
       return 'stop';
+    default:
+      throw new UnsupportedProtocolFeatureError(`无法保真转换为 Chat 终态: ${reason}`);
   }
 }
 
@@ -177,10 +186,12 @@ function mapCanonicalStopToMessages(reason) {
     case 'stop_sequence':
       return 'stop_sequence';
     case 'refusal':
+    case 'content_filter':
       return 'refusal';
     case 'end_turn':
-    default:
       return 'end_turn';
+    default:
+      return reason || 'end_turn';
   }
 }
 
@@ -188,33 +199,81 @@ function usageFromChat(usage) {
   if (!usage || typeof usage !== 'object') {
     return null;
   }
-  const inputTokens = Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : 0;
-  const outputTokens = Number.isFinite(usage.completion_tokens) ? usage.completion_tokens : 0;
-  const totalTokens = Number.isFinite(usage.total_tokens) ? usage.total_tokens : inputTokens + outputTokens;
-  return { inputTokens, outputTokens, totalTokens };
+  return canonicalUsage(usage, 'prompt_tokens', 'completion_tokens', 'prompt_tokens_details', 'completion_tokens_details');
 }
 
 function usageFromMessages(usage, previous = null) {
   if (!usage || typeof usage !== 'object') {
     return previous;
   }
-  const inputTokens = Number.isFinite(usage.input_tokens)
-    ? usage.input_tokens
-    : previous ? previous.inputTokens : 0;
-  const outputTokens = Number.isFinite(usage.output_tokens)
-    ? usage.output_tokens
-    : previous ? previous.outputTokens : 0;
-  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+  const result = { ...(previous || {}), sourceProtocol: 'messages', rawUsage: { ...(previous?.rawUsage || {}), ...cloneJson(usage) } };
+  if (Number.isFinite(usage.cache_read_input_tokens)) result.cacheReadTokens = usage.cache_read_input_tokens;
+  if (Number.isFinite(usage.cache_creation_input_tokens)) result.cacheWriteTokens = usage.cache_creation_input_tokens;
+  if (usage.cache_creation) result.messagesCacheCreation = cloneJson(usage.cache_creation);
+  if (Number.isFinite(usage.input_tokens)) result.uncachedInputTokens = usage.input_tokens;
+  if (Number.isFinite(result.uncachedInputTokens) && Number.isFinite(result.cacheReadTokens) && Number.isFinite(result.cacheWriteTokens)) result.inputTokens = result.uncachedInputTokens + result.cacheReadTokens + result.cacheWriteTokens;
+  if (Number.isFinite(usage.output_tokens)) result.outputTokens = usage.output_tokens;
+  if (Number.isFinite(result.inputTokens) && Number.isFinite(result.outputTokens)) result.totalTokens = result.inputTokens + result.outputTokens;
+  return result;
 }
 
 function usageFromResponses(usage) {
   if (!usage || typeof usage !== 'object') {
     return null;
   }
-  const inputTokens = Number.isFinite(usage.input_tokens) ? usage.input_tokens : 0;
-  const outputTokens = Number.isFinite(usage.output_tokens) ? usage.output_tokens : 0;
-  const totalTokens = Number.isFinite(usage.total_tokens) ? usage.total_tokens : inputTokens + outputTokens;
-  return { inputTokens, outputTokens, totalTokens };
+  return canonicalUsage(usage, 'input_tokens', 'output_tokens', 'input_tokens_details', 'output_tokens_details');
+}
+
+// OpenAI input totals already include cached reads/writes. Claude reports its
+// non-cached input separately; usageFromMessages adds those buckets once.
+function canonicalUsage(usage, input, output, inputDetails, outputDetails) {
+  const result = { sourceProtocol: input === 'prompt_tokens' ? 'chat_completions' : 'responses', rawUsage: cloneJson(usage) };
+  if (Number.isFinite(usage[input])) result.inputTokens = usage[input];
+  if (Number.isFinite(usage[output])) result.outputTokens = usage[output];
+  if (Number.isFinite(usage.total_tokens)) result.totalTokens = usage.total_tokens;
+  else if (Number.isFinite(result.inputTokens) && Number.isFinite(result.outputTokens)) result.totalTokens = result.inputTokens + result.outputTokens;
+  if (isPlainObject(usage[inputDetails])) {
+    result.inputDetails = cloneJson(usage[inputDetails]);
+    if (Number.isFinite(usage[inputDetails].cached_tokens)) result.cacheReadTokens = usage[inputDetails].cached_tokens;
+    if (Number.isFinite(usage[inputDetails].cache_write_tokens)) result.cacheWriteTokens = usage[inputDetails].cache_write_tokens;
+  }
+  if (isPlainObject(usage[outputDetails])) result.outputDetails = cloneJson(usage[outputDetails]);
+  return result;
+}
+
+function serializeUsage(usage, protocol) {
+  if (!usage) return undefined;
+  if (protocol === usage.sourceProtocol && usage.rawUsage) return cloneJson(usage.rawUsage);
+  const result = {};
+  const inputKey = protocol === 'chat_completions' ? 'prompt_tokens' : 'input_tokens';
+  const outputKey = protocol === 'chat_completions' ? 'completion_tokens' : 'output_tokens';
+  if (Number.isFinite(usage.inputTokens)) {
+    if (protocol !== 'messages') result[inputKey] = usage.inputTokens;
+    else if (Number.isFinite(usage.uncachedInputTokens)) result[inputKey] = usage.uncachedInputTokens;
+    else if (Number.isFinite(usage.cacheReadTokens) && Number.isFinite(usage.cacheWriteTokens)) {
+      const uncached = usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens;
+      if (uncached >= 0) result[inputKey] = uncached;
+    }
+  }
+  if (Number.isFinite(usage.outputTokens)) result[outputKey] = usage.outputTokens;
+  if (protocol === 'messages') {
+    if (Number.isFinite(usage.cacheReadTokens)) result.cache_read_input_tokens = usage.cacheReadTokens;
+    if (Number.isFinite(usage.cacheWriteTokens)) result.cache_creation_input_tokens = usage.cacheWriteTokens;
+    if (usage.messagesCacheCreation) result.cache_creation = cloneJson(usage.messagesCacheCreation);
+    if (!Number.isFinite(result.input_tokens) && Number.isFinite(usage.inputTokens)) result.airouter_upstream_usage = { protocol: usage.sourceProtocol, input_tokens: usage.inputTokens };
+  } else {
+    if (Number.isFinite(usage.totalTokens)) result.total_tokens = usage.totalTokens;
+    const details = { ...(usage.inputDetails || {}) };
+    if (Number.isFinite(usage.cacheReadTokens)) details.cached_tokens = usage.cacheReadTokens;
+    if (Number.isFinite(usage.cacheWriteTokens)) details.cache_write_tokens = usage.cacheWriteTokens;
+    if (Object.keys(details).length) result[protocol === 'chat_completions' ? 'prompt_tokens_details' : 'input_tokens_details'] = details;
+    if (usage.outputDetails) result[protocol === 'chat_completions' ? 'completion_tokens_details' : 'output_tokens_details'] = cloneJson(usage.outputDetails);
+    if (usage.messagesCacheCreation || (usage.sourceProtocol === 'messages' && !Number.isFinite(usage.inputTokens) && Number.isFinite(usage.uncachedInputTokens))) result.airouter_upstream_usage = {
+      protocol: 'messages', ...(usage.messagesCacheCreation ? { cache_creation: cloneJson(usage.messagesCacheCreation) } : {}),
+      ...(!Number.isFinite(usage.inputTokens) && Number.isFinite(usage.uncachedInputTokens) ? { input_tokens: usage.uncachedInputTokens } : {}),
+    };
+  }
+  return result;
 }
 
 function imagePartFromChat(contentPart) {
@@ -267,15 +326,17 @@ function parseChatContent(content, role) {
       continue;
     }
     if ((block.type === 'text' || block.type === 'input_text' || block.type === 'output_text') && typeof block.text === 'string') {
-      parts.push({ type: 'text', text: block.text });
+      parts.push(requestContentPart(block, { type: 'text', text: block.text }));
     } else if (block.type === 'image_url' || Object.prototype.hasOwnProperty.call(block, 'image_url')) {
-      parts.push(imagePartFromChat(block));
+      const part = imagePartFromChat(block);
+      if (block.image_url && block.image_url.detail) part.detail = block.image_url.detail;
+      parts.push(requestContentPart(block, part));
     } else if (block.type === 'input_image') {
       const url = typeof block.image_url === 'string' ? block.image_url : '';
       if (!url) {
         throw new UnsupportedProtocolFeatureError('图片输入缺少 image_url');
       }
-      parts.push({ type: 'image', url });
+      parts.push(requestContentPart(block, { type: 'image', url }));
     } else if (block.type === 'input_file' || block.type === 'file') {
       throw new UnsupportedProtocolFeatureError('跨协议路由暂不支持文件输入');
     } else if (block.type === 'input_audio' || block.type === 'audio') {
@@ -298,15 +359,21 @@ function normalizeTools(tools, protocol) {
     }
 
     const type = typeof tool.type === 'string' ? tool.type : '';
-    if (type && type !== 'function' && type !== 'custom') {
+    if (type && type !== 'function' && !(protocol === 'messages' && type === 'custom')) {
       throw new UnsupportedProtocolFeatureError(`跨协议路由不支持内置工具: ${type}`);
     }
+
+    const definition = isPlainObject(tool.function) ? tool.function : tool;
+    if (typeof definition.name !== 'string' || !definition.name) throw new UnsupportedProtocolFeatureError('工具定义缺少名称');
+    if (definition.strict !== undefined && typeof definition.strict !== 'boolean') throw new UnsupportedProtocolFeatureError('工具 strict 必须为布尔值');
+    const strict = definition.strict === undefined ? {} : { strict: definition.strict };
 
     if (tool.function && typeof tool.function === 'object') {
       return {
         name: tool.function.name,
         description: tool.function.description || '',
         inputSchema: tool.function.parameters || tool.function.input_schema || { type: 'object', properties: {} },
+        ...strict,
       };
     }
 
@@ -315,6 +382,7 @@ function normalizeTools(tools, protocol) {
         name: tool.name,
         description: tool.description || '',
         inputSchema: tool.input_schema || { type: 'object', properties: {} },
+        ...strict,
       };
     }
 
@@ -322,6 +390,7 @@ function normalizeTools(tools, protocol) {
       name: tool.name,
       description: tool.description || '',
       inputSchema: tool.parameters || tool.input_schema || { type: 'object', properties: {} },
+      ...strict,
     };
   });
 }
@@ -331,10 +400,11 @@ function parseToolChoice(toolChoice) {
     return null;
   }
   if (typeof toolChoice === 'string') {
+    if (!['auto', 'none', 'required', 'any'].includes(toolChoice)) throw new UnsupportedProtocolFeatureError('无法保留此工具选择策略');
     return toolChoice === 'any' ? 'required' : toolChoice;
   }
   if (!isPlainObject(toolChoice)) {
-    return null;
+    throw new UnsupportedProtocolFeatureError('工具选择必须为字符串或对象');
   }
   if (toolChoice.type === 'auto') {
     return 'auto';
@@ -357,7 +427,103 @@ function parseToolChoice(toolChoice) {
       return { type: 'tool', name };
     }
   }
-  return null;
+  throw new UnsupportedProtocolFeatureError('无法保留此工具选择策略');
+}
+
+function requestContentPart(block, part) {
+  if (Object.prototype.hasOwnProperty.call(block, 'prompt_cache_breakpoint')) part.prompt_cache_breakpoint = cloneJson(block.prompt_cache_breakpoint);
+  return part;
+}
+
+function requestToolUse(id, name, argumentsText) {
+  if (typeof id !== 'string' || !id || typeof name !== 'string' || !name) throw new UnsupportedProtocolFeatureError('工具调用缺少调用 ID 或名称');
+  if (typeof argumentsText !== 'string') throw new UnsupportedProtocolFeatureError('OpenAI 工具参数必须为原始字符串');
+  return { type: 'tool_use', id, name, arguments: argumentsText };
+}
+
+function requestNumberSignature(literal) {
+  const [coefficient, exponent = '0'] = literal.toLowerCase().split('e');
+  const negative = coefficient.startsWith('-');
+  const [whole, fraction = ''] = (negative ? coefficient.slice(1) : coefficient).split('.');
+  let digits = (whole + fraction).replace(/^0+/, '') || '0';
+  if (digits === '0') return negative ? '-0' : '0';
+  const trailing = digits.length - digits.replace(/0+$/, '').length;
+  if (trailing) digits = digits.slice(0, -trailing);
+  return `${negative ? '-' : ''}${digits}:${BigInt(exponent) - BigInt(fraction.length) + BigInt(trailing)}`;
+}
+
+function requestToolInput(part) {
+  if (Object.prototype.hasOwnProperty.call(part, 'arguments')) {
+    let parsed;
+    try {
+      parsed = JSON.parse(part.arguments);
+      // Read number lexemes outside strings. This also works on Node versions
+      // without JSON.parse reviver context.source, which must not silently
+      // disable decimal precision checks.
+      const tokens = /"(?:\\.|[^"\\])*"|(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+      for (const token of part.arguments.matchAll(tokens)) {
+        if (token[1] === undefined) continue;
+        const number = Number(token[1]);
+        if (!Number.isFinite(number) || (Number.isInteger(number) && !Number.isSafeInteger(number)) || requestNumberSignature(token[1]) !== requestNumberSignature(String(number))) throw new Error('工具数值精度无法无损转换');
+      }
+    } catch (error) { throw new UnsupportedProtocolFeatureError('Messages 工具参数必须为可无损表示的 JSON 对象，不能修复为 {}'); }
+    if (!isPlainObject(parsed)) throw new UnsupportedProtocolFeatureError('Messages 工具参数必须为 JSON 对象');
+    return parsed;
+  }
+  if (!isPlainObject(part.input)) throw new UnsupportedProtocolFeatureError('Messages 工具参数必须为 JSON 对象');
+  return cloneJson(part.input);
+}
+
+function requestToolArguments(part) {
+  return Object.prototype.hasOwnProperty.call(part, 'arguments') ? part.arguments : JSON.stringify(part.input);
+}
+
+function collectRequestControls(body, canonical, protocol) {
+  for (const name of ['prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options', 'store']) {
+    if (Object.prototype.hasOwnProperty.call(body, name)) canonical.params[name] = cloneJson(body[name]);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'parallel_tool_calls')) {
+    if (typeof body.parallel_tool_calls !== 'boolean') throw new UnsupportedProtocolFeatureError('parallel_tool_calls 必须为布尔值');
+    canonical.params.parallel_tool_calls = body.parallel_tool_calls;
+  }
+  if (protocol === 'messages' && body.tool_choice && Object.prototype.hasOwnProperty.call(body.tool_choice, 'disable_parallel_tool_use')) {
+    if (typeof body.tool_choice.disable_parallel_tool_use !== 'boolean') throw new UnsupportedProtocolFeatureError('disable_parallel_tool_use 必须为布尔值');
+    canonical.params.parallel_tool_calls = !body.tool_choice.disable_parallel_tool_use;
+  }
+}
+
+function requestToolResultContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) throw new UnsupportedProtocolFeatureError('跨协议工具结果必须为文本字符串或文本内容块数组');
+  const parts = content.map(block => {
+    if (!block || !['text', 'input_text', 'output_text'].includes(block.type) || typeof block.text !== 'string') throw new UnsupportedProtocolFeatureError('跨协议工具结果仅支持文本，不能丢弃图片或其他内容块');
+    return requestContentPart(block, { type: 'text', text: block.text });
+  });
+  return parts.length === 1 && !Object.prototype.hasOwnProperty.call(parts[0], 'prompt_cache_breakpoint') ? parts[0].text : parts;
+}
+
+function responseToolResultContent(content) {
+  return typeof content === 'string' ? content : content.map(part => requestContentPart(part, { type: 'input_text', text: part.text }));
+}
+
+function validateToolRounds(canonical) {
+  const pending = new Set();
+  let returningResults = false;
+  for (const message of canonical.messages) {
+    for (const part of message.parts) {
+      if (part.type === 'tool_use') {
+        if (message.role !== 'assistant' || returningResults || typeof part.id !== 'string' || !part.id || typeof part.name !== 'string' || !part.name || pending.has(part.id)) throw new UnsupportedProtocolFeatureError('工具调用分组、ID 或名称无效');
+        pending.add(part.id);
+      } else if (part.type === 'tool_result') {
+        if (message.role !== 'user' || typeof part.toolUseId !== 'string' || !pending.has(part.toolUseId)) throw new UnsupportedProtocolFeatureError('工具结果没有匹配的未完成调用 ID');
+        pending.delete(part.toolUseId);
+        returningResults = pending.size > 0;
+      } else if (pending.size && (message.role !== 'assistant' || returningResults)) {
+        throw new UnsupportedProtocolFeatureError('同轮工具结果未全部返回，不能重排后续消息');
+      }
+    }
+    if (!pending.size) returningResults = false;
+  }
 }
 
 function parseChatRequest(body) {
@@ -377,18 +543,13 @@ function parseChatRequest(body) {
       continue;
     }
 
-    if (message.role === 'system' || message.role === 'developer') {
-      canonical.system = [canonical.system, contentToText(message.content)].filter(Boolean).join('\n\n');
-      continue;
-    }
-
     if (message.role === 'tool') {
       canonical.messages.push({
         role: 'user',
         parts: [{
           type: 'tool_result',
           toolUseId: message.tool_call_id,
-          content: toolResultContentToText(message.content),
+          content: requestToolResultContent(message.content),
         }],
       });
       continue;
@@ -396,14 +557,15 @@ function parseChatRequest(body) {
 
     const parts = parseChatContent(message.content, message.role);
     for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
-      parts.push({
-        type: 'tool_use',
-        id: call.id,
-        name: call.function && call.function.name,
-        input: safeParseJson(call.function && call.function.arguments),
-      });
+      if (call.type && call.type !== 'function') throw new UnsupportedProtocolFeatureError('跨协议路由不能将自定义工具调用当作函数');
+      parts.push(requestToolUse(call.id, call.function && call.function.name, call.function && call.function.arguments));
     }
-    canonical.messages.push({ role: message.role === 'assistant' ? 'assistant' : 'user', parts });
+    if (message.refusal != null) {
+      if (message.role !== 'assistant' || typeof message.refusal !== 'string') throw new UnsupportedProtocolFeatureError('拒绝消息结构无法保真转换');
+      parts.push({ type: 'refusal', text: message.refusal });
+    }
+    if (!['system', 'developer', 'assistant', 'user'].includes(message.role)) throw new UnsupportedProtocolFeatureError(`不支持的消息角色: ${message.role}`);
+    canonical.messages.push({ role: message.role, parts });
   }
 
   for (const name of ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty', 'seed', 'user', 'stop', 'parallel_tool_calls', 'metadata']) {
@@ -412,13 +574,15 @@ function parseChatRequest(body) {
     }
   }
 
+  collectRequestControls(body, canonical, 'chat_completions');
+
   return canonical;
 }
 
 function parseMessagesRequest(body) {
   const canonical = {
     model: body.model,
-    system: contentToText(body.system),
+    system: typeof body.system === 'string' ? body.system : '',
     messages: [],
     tools: normalizeTools(body.tools, 'messages'),
     toolChoice: parseToolChoice(body.tool_choice),
@@ -426,6 +590,8 @@ function parseMessagesRequest(body) {
     stream: body.stream === true,
     params: {},
   };
+
+  if (Array.isArray(body.system)) canonical.messages.push({ role: 'system', parts: parseChatContent(body.system, 'system') });
 
   for (const message of Array.isArray(body.messages) ? body.messages : []) {
     if (!message || typeof message !== 'object') {
@@ -443,12 +609,14 @@ function parseMessagesRequest(body) {
       } else if (block.type === 'document') {
         parts.push(filePartFromMessages(block));
       } else if (block.type === 'tool_use') {
-        parts.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input || {} });
+        if (!isPlainObject(block.input)) throw new UnsupportedProtocolFeatureError('Messages 工具 input 必须为对象');
+        parts.push({ type: 'tool_use', id: block.id, name: block.name, input: cloneJson(block.input) });
       } else if (block.type === 'tool_result') {
+        if (block.is_error === true) throw new UnsupportedProtocolFeatureError('跨协议无法准确保留工具结果的 is_error 错误标记');
         parts.push({
           type: 'tool_result',
           toolUseId: block.tool_use_id,
-          content: toolResultContentToText(block.content),
+          content: requestToolResultContent(block.content),
         });
       } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
         throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移 thinking/encrypted reasoning 内容');
@@ -469,6 +637,8 @@ function parseMessagesRequest(body) {
     }
   }
 
+  collectRequestControls(body, canonical, 'messages');
+
   return canonical;
 }
 
@@ -479,7 +649,7 @@ function parseResponsesContent(content, role) {
       continue;
     }
     if ((block.type === 'input_text' || block.type === 'output_text' || block.type === 'text') && typeof block.text === 'string') {
-      parts.push({ type: 'text', text: block.text });
+      parts.push(requestContentPart(block, { type: 'text', text: block.text }));
     } else if (block.type === 'input_image' || block.type === 'image_url') {
       const url = typeof block.image_url === 'string'
         ? block.image_url
@@ -489,7 +659,9 @@ function parseResponsesContent(content, role) {
       if (!url) {
         throw new UnsupportedProtocolFeatureError('图片输入缺少 image_url');
       }
-      parts.push({ type: 'image', url });
+      parts.push(requestContentPart(block, { type: 'image', url, ...(block.detail ? { detail: block.detail } : {}) }));
+    } else if (block.type === 'refusal' && typeof block.refusal === 'string' && role === 'assistant') {
+      parts.push({ type: 'refusal', text: block.refusal });
     } else if (block.type === 'input_file' || block.type === 'file') {
       throw new UnsupportedProtocolFeatureError('跨协议路由暂不支持文件输入');
     } else if (block.type === 'input_audio' || block.type === 'audio') {
@@ -521,30 +693,32 @@ function parseResponsesRequest(body) {
       if (!item || typeof item !== 'object') {
         continue;
       }
-      if (item.type === 'message') {
-        canonical.messages.push({
-          role: item.role === 'assistant' ? 'assistant' : 'user',
+      if (item.type === 'message' || (!item.type && typeof item.role === 'string' && Object.prototype.hasOwnProperty.call(item, 'content'))) {
+        if (!['system', 'developer', 'assistant', 'user'].includes(item.role)) throw new UnsupportedProtocolFeatureError(`不支持的 Responses 消息角色: ${item.role}`);
+        const message = {
+          role: item.role,
           parts: parseResponsesContent(item.content, item.role),
-        });
+        };
+        const previous = canonical.messages[canonical.messages.length - 1];
+        if (message.role === 'assistant' && previous?.role === 'assistant' && previous.parts.some(part => part.type === 'tool_use')) previous.parts.push(...message.parts);
+        else canonical.messages.push(message);
       } else if (item.type === 'function_call') {
-        canonical.messages.push({
-          role: 'assistant',
-          parts: [{
-            type: 'tool_use',
-            id: item.call_id || item.id,
-            name: item.name,
-            input: safeParseJson(item.arguments),
-          }],
-        });
+        const part = requestToolUse(item.call_id, item.name, item.arguments);
+        const previous = canonical.messages[canonical.messages.length - 1];
+        if (previous && previous.role === 'assistant') previous.parts.push(part);
+        else canonical.messages.push({ role: 'assistant', parts: [part] });
       } else if (item.type === 'function_call_output') {
-        canonical.messages.push({
+        const result = {
           role: 'user',
           parts: [{
             type: 'tool_result',
             toolUseId: item.call_id,
-            content: typeof item.output === 'string' ? item.output : JSON.stringify(item.output ?? ''),
+            content: requestToolResultContent(item.output),
           }],
-        });
+        };
+        const previous = canonical.messages[canonical.messages.length - 1];
+        if (previous && previous.role === 'user' && previous.parts.every(part => part.type === 'tool_result')) previous.parts.push(...result.parts);
+        else canonical.messages.push(result);
       } else if (item.type === 'reasoning' || item.type === 'item_reference') {
         throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移服务端 reasoning/item_reference 状态');
       } else {
@@ -564,6 +738,8 @@ function parseResponsesRequest(body) {
       canonical.params[name] = body[name];
     }
   }
+
+  collectRequestControls(body, canonical, 'responses');
 
   return canonical;
 }
@@ -615,6 +791,7 @@ function serializeTools(tools, targetProtocol) {
         name: tool.name,
         description: tool.description || '',
         input_schema: tool.inputSchema,
+        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
       };
     }
     if (targetProtocol === 'responses') {
@@ -623,7 +800,7 @@ function serializeTools(tools, targetProtocol) {
         name: tool.name,
         description: tool.description || '',
         parameters: tool.inputSchema,
-        strict: false,
+        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
       };
     }
     return {
@@ -632,6 +809,7 @@ function serializeTools(tools, targetProtocol) {
         name: tool.name,
         description: tool.description || '',
         parameters: tool.inputSchema,
+        ...(tool.strict === undefined ? {} : { strict: tool.strict }),
       },
     };
   });
@@ -656,47 +834,45 @@ function serializeChatRequest(canonical, targetModel, stream) {
   for (const message of canonical.messages) {
     const textParts = [];
     const toolCalls = [];
-    const toolResults = [];
+    let refusal;
+    function flushMessage() {
+      if (!textParts.length && !toolCalls.length && refusal === undefined) return;
+      const onlyText = textParts.length === 1 && textParts[0].type === 'text' && !Object.prototype.hasOwnProperty.call(textParts[0], 'prompt_cache_breakpoint');
+      const payload = { role: message.role, content: onlyText ? textParts[0].text : textParts.length ? [...textParts] : null };
+      if (toolCalls.length) payload.tool_calls = [...toolCalls];
+      if (refusal !== undefined) payload.refusal = refusal;
+      messages.push(payload);
+      textParts.length = 0; toolCalls.length = 0; refusal = undefined;
+    }
     for (const part of message.parts) {
       if (part.type === 'text') {
-        textParts.push({ type: 'text', text: part.text });
+        textParts.push(requestContentPart(part, { type: 'text', text: part.text }));
       } else if (part.type === 'image') {
-        textParts.push({ type: 'image_url', image_url: { url: canonicalImageUrl(part) } });
+        textParts.push(requestContentPart(part, { type: 'image_url', image_url: { url: canonicalImageUrl(part), ...(part.detail ? { detail: part.detail } : {}) } }));
       } else if (part.type === 'tool_use') {
         toolCalls.push({
           id: part.id,
           type: 'function',
           function: {
             name: part.name,
-            arguments: JSON.stringify(part.input || {}),
+            arguments: requestToolArguments(part),
           },
         });
       } else if (part.type === 'tool_result') {
-        toolResults.push({
+        flushMessage();
+        messages.push({
           role: 'tool',
           tool_call_id: part.toolUseId,
-          content: part.content || '',
+          content: part.content ?? '',
         });
+      } else if (part.type === 'refusal') {
+        refusal = (refusal || '') + part.text;
       } else if (part.type === 'file') {
         throw new UnsupportedProtocolFeatureError('跨协议路由暂不支持文件输入');
       }
     }
 
-    const onlyText = textParts.length === 1 && textParts[0].type === 'text';
-    if (textParts.length > 0 || toolCalls.length > 0) {
-      const payload = {
-        role: message.role,
-        content: onlyText ? textParts[0].text : textParts,
-      };
-      if (toolCalls.length > 0) {
-        payload.tool_calls = toolCalls;
-        if (onlyText && !textParts[0].text) {
-          payload.content = null;
-        }
-      }
-      messages.push(payload);
-    }
-    messages.push(...toolResults);
+    flushMessage();
   }
 
   const result = {
@@ -706,11 +882,9 @@ function serializeChatRequest(canonical, targetModel, stream) {
   };
   if (canonical.tools.length > 0) {
     result.tools = serializeTools(canonical.tools, 'chat_completions');
-    const choice = serializeToolChoice(canonical.toolChoice, 'chat_completions');
-    if (choice !== undefined) {
-      result.tool_choice = choice;
-    }
   }
+  const choice = serializeToolChoice(canonical.toolChoice, 'chat_completions');
+  if (choice !== undefined) result.tool_choice = choice;
   if (Number.isFinite(canonical.maxOutputTokens)) {
     result.max_tokens = canonical.maxOutputTokens;
   }
@@ -735,12 +909,26 @@ function serializeChatRequest(canonical, targetModel, stream) {
   if (Object.prototype.hasOwnProperty.call(canonical.params, 'stop')) {
     result.stop = canonical.params.stop;
   }
+  if (Object.prototype.hasOwnProperty.call(canonical.params, 'stop_sequences')) result.stop = cloneJson(canonical.params.stop_sequences);
+  for (const name of ['parallel_tool_calls', 'prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options', 'store']) {
+    if (Object.prototype.hasOwnProperty.call(canonical.params, name)) result[name] = cloneJson(canonical.params[name]);
+  }
   return result;
 }
 
 function serializeMessagesRequest(canonical, targetModel, stream) {
   const messages = [];
+  const systemParts = canonical.system ? [{ type: 'text', text: canonical.system }] : [];
+  let dialogueStarted = false;
   for (const message of canonical.messages) {
+    if (message.role === 'developer') throw new UnsupportedProtocolFeatureError('Messages 无法保留 developer 与 system 的指令层级区别');
+    if (message.role === 'system') {
+      if (dialogueStarted) throw new UnsupportedProtocolFeatureError('Messages 无法保留对话中途的 system 指令位置');
+      if (message.parts.some(part => part.type !== 'text')) throw new UnsupportedProtocolFeatureError('Messages system 只能保留文本指令');
+      systemParts.push(...message.parts.map(part => ({ type: 'text', text: part.text })));
+      continue;
+    }
+    dialogueStarted = true;
     const content = [];
     for (const part of message.parts) {
       if (part.type === 'text') {
@@ -761,20 +949,21 @@ function serializeMessagesRequest(canonical, targetModel, stream) {
           source: { type: 'base64', media_type: part.mediaType, data: part.data },
         });
       } else if (part.type === 'tool_use') {
-        content.push({ type: 'tool_use', id: part.id, name: part.name, input: part.input || {} });
+        content.push({ type: 'tool_use', id: part.id, name: part.name, input: requestToolInput(part) });
       } else if (part.type === 'tool_result') {
-        content.push({ type: 'tool_result', tool_use_id: part.toolUseId, content: part.content || '' });
+        content.push({ type: 'tool_result', tool_use_id: part.toolUseId, content: part.content ?? '' });
+      } else if (part.type === 'refusal') {
+        throw new UnsupportedProtocolFeatureError('Messages 输入无法保留 OpenAI refusal 机器可读标记');
       }
     }
-    messages.push({
-      role: message.role === 'assistant' ? 'assistant' : 'user',
-      content,
-    });
+    const previous = messages[messages.length - 1];
+    if (message.role === 'user' && previous && previous.role === 'user' && previous.content.every(part => part.type === 'tool_result')) previous.content.push(...content);
+    else messages.push({ role: message.role, content });
   }
 
   const result = {
     model: targetModel,
-    system: canonical.system || undefined,
+    system: systemParts.length === 1 ? systemParts[0].text : systemParts.length ? systemParts : undefined,
     messages,
     max_tokens: Number.isFinite(canonical.maxOutputTokens) ? canonical.maxOutputTokens : 4096,
     stream,
@@ -784,10 +973,11 @@ function serializeMessagesRequest(canonical, targetModel, stream) {
   }
   if (canonical.tools.length > 0) {
     result.tools = serializeTools(canonical.tools, 'messages');
-    const choice = serializeToolChoice(canonical.toolChoice, 'messages');
-    if (choice !== undefined) {
-      result.tool_choice = choice;
-    }
+  }
+  const choice = serializeToolChoice(canonical.toolChoice, 'messages');
+  if (choice !== undefined) result.tool_choice = choice;
+  if (canonical.tools.length && Object.prototype.hasOwnProperty.call(canonical.params, 'parallel_tool_calls') && result.tool_choice?.type !== 'none') {
+    result.tool_choice = { ...(result.tool_choice || { type: 'auto' }), disable_parallel_tool_use: !canonical.params.parallel_tool_calls };
   }
   if (Object.prototype.hasOwnProperty.call(canonical.params, 'temperature')) {
     result.temperature = canonical.params.temperature;
@@ -801,6 +991,7 @@ function serializeMessagesRequest(canonical, targetModel, stream) {
   if (Object.prototype.hasOwnProperty.call(canonical.params, 'stop_sequences')) {
     result.stop_sequences = canonical.params.stop_sequences;
   }
+  if (canonical.params.stop != null) result.stop_sequences = Array.isArray(canonical.params.stop) ? cloneJson(canonical.params.stop) : [canonical.params.stop];
   return result;
 }
 
@@ -808,14 +999,19 @@ function serializeResponsesRequest(canonical, targetModel, stream) {
   const input = [];
   for (const message of canonical.messages) {
     const content = [];
+    function flushContent() {
+      if (!content.length) return;
+      input.push({ type: 'message', role: message.role, content: [...content] });
+      content.length = 0;
+    }
     for (const part of message.parts) {
       if (part.type === 'text') {
-        content.push({
+        content.push(requestContentPart(part, {
           type: message.role === 'assistant' ? 'output_text' : 'input_text',
           text: part.text,
-        });
+        }));
       } else if (part.type === 'image') {
-        content.push({ type: 'input_image', image_url: canonicalImageUrl(part) });
+        content.push(requestContentPart(part, { type: 'input_image', image_url: canonicalImageUrl(part), ...(part.detail ? { detail: part.detail } : {}) }));
       } else if (part.type === 'file') {
         content.push({
           type: 'input_file',
@@ -823,27 +1019,25 @@ function serializeResponsesRequest(canonical, targetModel, stream) {
           file_data: `data:${part.mediaType};base64,${part.data}`,
         });
       } else if (part.type === 'tool_use') {
+        flushContent();
         input.push({
           type: 'function_call',
           call_id: part.id,
           name: part.name,
-          arguments: JSON.stringify(part.input || {}),
+          arguments: requestToolArguments(part),
         });
       } else if (part.type === 'tool_result') {
+        flushContent();
         input.push({
           type: 'function_call_output',
           call_id: part.toolUseId,
-          output: part.content || '',
+          output: responseToolResultContent(part.content),
         });
+      } else if (part.type === 'refusal') {
+        content.push({ type: 'refusal', refusal: part.text });
       }
     }
-    if (content.length > 0) {
-      input.push({
-        type: 'message',
-        role: message.role === 'assistant' ? 'assistant' : 'user',
-        content,
-      });
-    }
+    flushContent();
   }
 
   const result = {
@@ -851,19 +1045,16 @@ function serializeResponsesRequest(canonical, targetModel, stream) {
     instructions: canonical.system || '',
     input,
     tools: serializeTools(canonical.tools, 'responses'),
-    tool_choice: serializeToolChoice(canonical.toolChoice, 'responses') || 'auto',
-    parallel_tool_calls: canonical.params.parallel_tool_calls === true,
-    store: false,
     stream,
-    include: [],
   };
   if (Number.isFinite(canonical.maxOutputTokens)) {
     result.max_output_tokens = canonical.maxOutputTokens;
   }
   if (!result.tools.length) {
     delete result.tools;
-    delete result.tool_choice;
   }
+  const choice = serializeToolChoice(canonical.toolChoice, 'responses');
+  if (choice !== undefined) result.tool_choice = choice;
   if (Object.prototype.hasOwnProperty.call(canonical.params, 'temperature')) {
     result.temperature = canonical.params.temperature;
   }
@@ -872,6 +1063,9 @@ function serializeResponsesRequest(canonical, targetModel, stream) {
   }
   if (Object.prototype.hasOwnProperty.call(canonical.params, 'metadata')) {
     result.metadata = canonical.params.metadata;
+  }
+  for (const name of ['parallel_tool_calls', 'prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options', 'store']) {
+    if (Object.prototype.hasOwnProperty.call(canonical.params, name)) result[name] = cloneJson(canonical.params[name]);
   }
   return result;
 }
@@ -911,6 +1105,34 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
   if (hasReasoningState(body)) {
     throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移 reasoning/thinking 状态');
   }
+
+  const crossesMessages = entryProtocol === 'messages' || targetProtocol === 'messages';
+  function checkCache(value) {
+    if (Array.isArray(value)) return value.forEach(checkCache);
+    if (!isPlainObject(value)) return;
+    if (Object.prototype.hasOwnProperty.call(value, 'cache_control')) throw new UnsupportedProtocolFeatureError('Claude cache_control 与 OpenAI prompt 缓存控制没有等价跨协议映射');
+    if (crossesMessages && Object.prototype.hasOwnProperty.call(value, 'prompt_cache_breakpoint')) throw new UnsupportedProtocolFeatureError('Messages 无法保留 OpenAI prompt_cache_breakpoint 缓存边界');
+    for (const [name, nested] of Object.entries(value)) {
+      // Application metadata and tool schemas/arguments are user data, not API controls.
+      if (['metadata', 'parameters', 'input_schema'].includes(name) || (value.type === 'tool_use' && name === 'input')) continue;
+      checkCache(nested);
+    }
+  }
+  checkCache(body);
+  const cacheKeys = ['prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options'];
+  if (crossesMessages && cacheKeys.some(name => Object.prototype.hasOwnProperty.call(body, name))) throw new UnsupportedProtocolFeatureError('OpenAI prompt 缓存控制无法准确映射到 Claude cache_control');
+  if (body.prompt_cache_options && Object.keys(body.prompt_cache_options).some(name => !['mode', 'ttl'].includes(name))) throw new UnsupportedProtocolFeatureError('跨 Chat/Responses 只支持共有的 prompt_cache_options mode/ttl，不迁移预热或比较响应 ID');
+  if (Object.prototype.hasOwnProperty.call(body, 'store')) {
+    if (typeof body.store !== 'boolean' || body.store || crossesMessages) throw new UnsupportedProtocolFeatureError('跨协议无法保留请求的服务端保存/续接语义');
+  }
+  const stop = entryProtocol === 'messages' ? body.stop_sequences : body.stop;
+  if (stop != null) {
+    if (entryProtocol === 'responses') throw new UnsupportedProtocolFeatureError('Responses 不支持 stop 停止条件');
+    const values = typeof stop === 'string' && entryProtocol === 'chat_completions' ? [stop] : stop;
+    if (!Array.isArray(values) || values.some(value => typeof value !== 'string')) throw new UnsupportedProtocolFeatureError('停止条件必须为字符串或字符串数组');
+    if (targetProtocol === 'responses' && values.length) throw new UnsupportedProtocolFeatureError('Responses 无法等价表达 stop / stop_sequences 停止条件');
+    if (targetProtocol === 'chat_completions' && values.length > 4) throw new UnsupportedProtocolFeatureError('Chat 最多支持四个停止序列');
+  }
 }
 
 function transformRequestForTarget({ entryProtocol, targetProtocol, body, targetModel, stream }) {
@@ -933,6 +1155,7 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
 
   assertCrossProtocolSupported(entryProtocol, targetProtocol, body);
   const canonical = parseEntryRequest(entryProtocol, body);
+  validateToolRounds(canonical);
   const result = targetProtocol === 'chat_completions'
     ? serializeChatRequest(canonical, targetModel, stream)
     : targetProtocol === 'messages'
@@ -952,46 +1175,55 @@ function parseChatResponse(payload) {
   if (text) {
     parts.push({ type: 'text', text });
   }
+  if (typeof message.refusal === 'string' && message.refusal) parts.push({ type: 'refusal', text: message.refusal });
   for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
     parts.push({
       type: 'tool_use',
       id: call.id,
       name: call.function && call.function.name,
-      input: safeParseJson(call.function && call.function.arguments),
+      arguments: call.function && call.function.arguments,
     });
   }
   return {
+    sourceProtocol: 'chat_completions',
     id: payload.id || '',
     model: payload.model || '',
     createdAt: Number.isFinite(payload.created) ? payload.created : Math.floor(Date.now() / 1000),
     parts,
-    stopReason: mapChatStopToCanonical(choice.finish_reason),
+    stopReason: choice.finish_reason === 'content_filter' ? 'content_filter' : message.refusal ? 'refusal' : mapChatStopToCanonical(choice.finish_reason),
     usage: usageFromChat(payload.usage),
   };
 }
 
 function parseMessagesResponse(payload) {
+  if (payload?.error) throw new UnsupportedProtocolFeatureError(payload.error.message || '上游 Messages 响应失败');
+  if (payload?.stop_reason === 'pause_turn') throw new UnsupportedProtocolFeatureError('Messages pause_turn 不能转换成已完成的跨协议响应');
   const parts = [];
   for (const block of Array.isArray(payload && payload.content) ? payload.content : []) {
     if (!block || typeof block !== 'object') {
       continue;
     }
     if (block.type === 'text' && typeof block.text === 'string') {
-      parts.push({ type: 'text', text: block.text });
+      parts.push({ type: payload.stop_reason === 'refusal' ? 'refusal' : 'text', text: block.text });
     } else if (block.type === 'tool_use') {
       parts.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input || {} });
     }
   }
   return {
+    sourceProtocol: 'messages',
     id: payload.id || '',
     model: payload.model || '',
     parts,
     stopReason: mapMessagesStopToCanonical(payload.stop_reason),
+    ...(Object.prototype.hasOwnProperty.call(payload, 'stop_sequence') ? { stopSequence: payload.stop_sequence } : {}),
     usage: usageFromMessages(payload.usage),
   };
 }
 
 function parseResponsesResponse(payload) {
+  if (payload?.error || ['failed', 'cancelled'].includes(payload?.status)) throw new UnsupportedProtocolFeatureError(payload.error?.message || `上游 Responses 响应 ${payload.status}`);
+  if (['queued', 'in_progress'].includes(payload?.status)) throw new UnsupportedProtocolFeatureError(`上游 Responses 响应尚未完成: ${payload.status}`);
+  if (payload?.status === 'incomplete' && !['max_output_tokens', 'content_filter'].includes(payload.incomplete_details?.reason)) throw new UnsupportedProtocolFeatureError(`无法准确映射 Responses incomplete 原因: ${payload.incomplete_details?.reason || 'unknown'}`);
   const parts = [];
   for (const item of Array.isArray(payload && payload.output) ? payload.output : []) {
     if (!item || typeof item !== 'object') {
@@ -1002,24 +1234,28 @@ function parseResponsesResponse(payload) {
       if (text) {
         parts.push({ type: 'text', text });
       }
+      for (const block of Array.isArray(item.content) ? item.content : []) {
+        if (block?.type === 'refusal') parts.push({ type: 'refusal', text: block.refusal || '' });
+      }
     } else if (item.type === 'function_call') {
       parts.push({
         type: 'tool_use',
         id: item.call_id || item.id,
         name: item.name,
-        input: safeParseJson(item.arguments),
+        arguments: item.arguments,
       });
     }
   }
   if (parts.length === 0 && typeof payload.output_text === 'string' && payload.output_text) {
     parts.push({ type: 'text', text: payload.output_text });
   }
-  const stopReason = parts.some(part => part.type === 'tool_use')
-    ? 'tool_use'
+  const stopReason = payload.incomplete_details?.reason === 'content_filter' ? 'content_filter' : parts.some(part => part.type === 'refusal')
+    ? 'refusal'
     : payload.incomplete_details && payload.incomplete_details.reason === 'max_output_tokens'
       ? 'max_tokens'
-      : 'end_turn';
+      : parts.some(part => part.type === 'tool_use') ? 'tool_use' : 'end_turn';
   return {
+    sourceProtocol: 'responses',
     id: payload.id || '',
     model: payload.model || '',
     createdAt: Number.isFinite(payload.created_at) ? payload.created_at : Math.floor(Date.now() / 1000),
@@ -1042,15 +1278,14 @@ function parseTargetResponse(targetProtocol, payload) {
   throw new UnsupportedProtocolFeatureError(`不支持的响应协议: ${targetProtocol}`);
 }
 
-function responseIdFor(entryProtocol, upstreamId) {
-  const id = typeof upstreamId === 'string' && upstreamId ? upstreamId : `airouter-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  if (entryProtocol === 'responses') {
-    return id.startsWith('resp_') ? id : `resp_${id.replace(/^[^_]+[_-]?/, '')}`;
-  }
-  if (entryProtocol === 'messages') {
-    return id.startsWith('msg_') ? id : `msg_${id.replace(/^[^_]+[_-]?/, '')}`;
-  }
-  return id.startsWith('chatcmpl-') ? id : `chatcmpl-${id}`;
+function responseIdFor(entryProtocol, upstreamId, sourceProtocol) {
+  const id = typeof upstreamId === 'string' && upstreamId ? upstreamId : `airouter-${randomUUID()}`;
+  // Prefix-looking source IDs are still arbitrary source data when bridging.
+  // Keeping them unchanged creates collisions with encoded non-prefix IDs.
+  if (sourceProtocol === entryProtocol && typeof upstreamId === 'string' && upstreamId) return upstreamId;
+  const prefix = entryProtocol === 'responses' ? 'resp_' : entryProtocol === 'messages' ? 'msg_' : 'chatcmpl-';
+  const source = SUPPORTED_PROTOCOLS.includes(sourceProtocol) ? sourceProtocol : 'unknown';
+  return `${prefix}airouter_${source}_${Buffer.from(id).toString('hex')}`;
 }
 
 function chatToolCalls(parts) {
@@ -1061,7 +1296,7 @@ function chatToolCalls(parts) {
       type: 'function',
       function: {
         name: part.name,
-        arguments: JSON.stringify(part.input || {}),
+        arguments: typeof part.arguments === 'string' ? part.arguments : JSON.stringify(part.input || {}),
       },
     }));
 }
@@ -1070,11 +1305,13 @@ function serializeChatResponse(entryProtocol, canonical, publicModel) {
   const text = canonical.parts.filter(part => part.type === 'text').map(part => part.text).join('');
   const toolCalls = chatToolCalls(canonical.parts);
   const message = { role: 'assistant', content: text || null };
+  const refusal = canonical.parts.filter(part => part.type === 'refusal').map(part => part.text).join('');
+  if (refusal) message.refusal = refusal;
   if (toolCalls.length) {
     message.tool_calls = toolCalls;
   }
   return {
-    id: responseIdFor('chat_completions', canonical.id),
+    id: responseIdFor('chat_completions', canonical.id, canonical.sourceProtocol),
     object: 'chat.completion',
     created: canonical.createdAt || Math.floor(Date.now() / 1000),
     model: publicModel,
@@ -1083,46 +1320,41 @@ function serializeChatResponse(entryProtocol, canonical, publicModel) {
       message,
       finish_reason: mapCanonicalStopToChat(canonical.stopReason),
     }],
-    usage: {
-      prompt_tokens: canonical.usage ? canonical.usage.inputTokens : 0,
-      completion_tokens: canonical.usage ? canonical.usage.outputTokens : 0,
-      total_tokens: canonical.usage ? canonical.usage.totalTokens : 0,
-    },
+    ...(canonical.usage ? { usage: serializeUsage(canonical.usage, 'chat_completions') } : {}),
   };
 }
 
 function serializeMessagesResponse(entryProtocol, canonical, publicModel) {
   const content = canonical.parts.map(part => {
-    if (part.type === 'text') {
+    if (part.type === 'text' || part.type === 'refusal') {
       return { type: 'text', text: part.text };
     }
-    return { type: 'tool_use', id: part.id, name: part.name, input: part.input || {} };
+    return { type: 'tool_use', id: part.id, name: part.name, input: responseToolInput(part) };
   });
   return {
-    id: responseIdFor('messages', canonical.id),
+    id: responseIdFor('messages', canonical.id, canonical.sourceProtocol),
     type: 'message',
     role: 'assistant',
     model: publicModel,
     content,
     stop_reason: mapCanonicalStopToMessages(canonical.stopReason),
-    stop_sequence: null,
-    usage: {
-      input_tokens: canonical.usage ? canonical.usage.inputTokens : 0,
-      output_tokens: canonical.usage ? canonical.usage.outputTokens : 0,
-    },
+    ...(Object.prototype.hasOwnProperty.call(canonical, 'stopSequence') ? { stop_sequence: canonical.stopSequence } : {}),
+    ...(canonical.usage ? { usage: serializeUsage(canonical.usage, 'messages') } : {}),
   };
 }
 
 function serializeResponsesResponse(entryProtocol, canonical, publicModel) {
+  if (!['end_turn', 'stop_sequence', 'max_tokens', 'tool_use', 'refusal', 'content_filter', undefined, null].includes(canonical.stopReason)) throw new UnsupportedProtocolFeatureError(`无法保真转换为 Responses 终态: ${canonical.stopReason}`);
   const output = [];
   const text = canonical.parts.filter(part => part.type === 'text').map(part => part.text).join('');
-  if (text) {
+  const refusal = canonical.parts.filter(part => part.type === 'refusal').map(part => part.text).join('');
+  if (text || refusal) {
     output.push({
-      id: `msg_${responseIdFor('responses', canonical.id).replace(/^resp_/, '')}`,
+      id: `msg_${responseIdFor('responses', canonical.id, canonical.sourceProtocol).replace(/^resp_/, '')}`,
       type: 'message',
       status: 'completed',
       role: 'assistant',
-      content: [{ type: 'output_text', text, annotations: [] }],
+      content: [...(text ? [{ type: 'output_text', text, annotations: [] }] : []), ...(refusal ? [{ type: 'refusal', refusal }] : [])],
     });
   }
   for (const part of canonical.parts.filter(item => item.type === 'tool_use')) {
@@ -1132,26 +1364,28 @@ function serializeResponsesResponse(entryProtocol, canonical, publicModel) {
       status: 'completed',
       call_id: part.id,
       name: part.name,
-      arguments: JSON.stringify(part.input || {}),
+      arguments: typeof part.arguments === 'string' ? part.arguments : JSON.stringify(part.input || {}),
     });
   }
   return {
-    id: responseIdFor('responses', canonical.id),
+    id: responseIdFor('responses', canonical.id, canonical.sourceProtocol),
     object: 'response',
     created_at: canonical.createdAt || Math.floor(Date.now() / 1000),
-    status: canonical.stopReason === 'max_tokens' ? 'incomplete' : 'completed',
-    ...(canonical.stopReason === 'max_tokens'
-      ? { incomplete_details: { reason: 'max_output_tokens' } }
+    status: ['max_tokens', 'content_filter'].includes(canonical.stopReason) ? 'incomplete' : 'completed',
+    ...(['max_tokens', 'content_filter'].includes(canonical.stopReason)
+      ? { incomplete_details: { reason: canonical.stopReason === 'content_filter' ? 'content_filter' : 'max_output_tokens' } }
       : {}),
     model: publicModel,
     output,
     output_text: text,
-    usage: {
-      input_tokens: canonical.usage ? canonical.usage.inputTokens : 0,
-      output_tokens: canonical.usage ? canonical.usage.outputTokens : 0,
-      total_tokens: canonical.usage ? canonical.usage.totalTokens : 0,
-    },
+    ...(canonical.usage ? { usage: serializeUsage(canonical.usage, 'responses') } : {}),
   };
+}
+
+function responseToolInput(part) {
+  // Use the same lossless object conversion as request history. OpenAI's raw
+  // argument string may contain numbers a JavaScript object cannot represent.
+  return requestToolInput(part);
 }
 
 function transformResponseForEntry({ entryProtocol, targetProtocol, payload, publicModel }) {
@@ -1194,16 +1428,15 @@ function rewriteModelInPayload(protocol, payload, publicModel) {
 
 function createSseEventParser() {
   let buffer = '';
-  let lastEventName = '';
+  const decoder = new StringDecoder('utf8');
 
   function parseBlock(block) {
     const lines = block.split('\n');
-    let eventName = lastEventName;
+    let eventName = '';
     const dataLines = [];
     for (const line of lines) {
       if (line.startsWith('event:')) {
         eventName = line.slice(6).trim();
-        lastEventName = eventName;
       } else if (line.startsWith('data:')) {
         dataLines.push(line.slice(5).replace(/^ /, ''));
       }
@@ -1233,7 +1466,7 @@ function createSseEventParser() {
 
   return {
     push(chunk) {
-      buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+      buffer += Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? decoder.write(Buffer.from(chunk)) : decoder.end() + String(chunk || '');
       const events = [];
       while (true) {
         const match = /\r?\n\r?\n/.exec(buffer);
@@ -1253,6 +1486,7 @@ function createSseEventParser() {
       return events;
     },
     finish() {
+      buffer += decoder.end();
       if (!buffer.trim()) {
         buffer = '';
         return [];
@@ -1281,7 +1515,7 @@ function canonicalEventStart(accumulator, payload, fallbackModel = '') {
   if (accumulator.id) {
     return [];
   }
-  accumulator.id = payload.id || payload.response?.id || '';
+  accumulator.id = payload.id || payload.response?.id || `airouter-${randomUUID()}`;
   accumulator.createdAt = payload.created || payload.created_at || Math.floor(Date.now() / 1000);
   accumulator.model = payload.model || payload.response?.model || fallbackModel;
   return [{
@@ -1302,34 +1536,38 @@ function accumulateCanonicalEvent(accumulator, event) {
     accumulator.model = event.model || accumulator.model;
   } else if (event.type === 'text_delta') {
     accumulator.text += event.text || '';
+  } else if (event.type === 'refusal_delta') {
+    accumulator.refusal += event.text || '';
   } else if (event.type === 'tool_start') {
     const index = Number(event.index);
     if (!accumulator.tools.has(index)) {
       accumulator.toolOrder.push(index);
     }
-    accumulator.tools.set(index, {
-      id: event.id,
-      name: event.name,
-      arguments: '',
-    });
+    const previous = accumulator.tools.get(index);
+    accumulator.tools.set(index, { id: event.id || previous?.id, name: event.name || previous?.name, arguments: previous?.arguments || '' });
   } else if (event.type === 'tool_args_delta') {
     const tool = accumulator.tools.get(Number(event.index));
     if (tool) {
       tool.arguments += event.partial || '';
     }
   } else if (event.type === 'finish') {
-    accumulator.stopReason = event.stopReason || accumulator.stopReason;
+    accumulator.stopReason = event.stopReason === 'content_filter' ? 'content_filter' : accumulator.refusal ? 'refusal' : event.stopReason || accumulator.stopReason;
     accumulator.usage = event.usage || accumulator.usage;
+    if (Object.prototype.hasOwnProperty.call(event, 'stopSequence')) accumulator.stopSequence = event.stopSequence;
     accumulator.finished = true;
+  } else if (event.type === 'error') {
+    accumulator.error = { message: event.message, code: event.code };
   }
 }
 
-function createCanonicalAccumulator(publicModel) {
+function createCanonicalAccumulator(publicModel, sourceProtocol) {
   const accumulator = {
+    sourceProtocol,
     id: '',
     model: publicModel || '',
     createdAt: Math.floor(Date.now() / 1000),
     text: '',
+    refusal: '',
     tools: new Map(),
     toolOrder: [],
     stopReason: 'end_turn',
@@ -1348,8 +1586,9 @@ function createCanonicalAccumulator(publicModel) {
     build() {
       const parts = [];
       if (accumulator.text) {
-        parts.push({ type: 'text', text: accumulator.text });
+        parts.push({ type: accumulator.stopReason === 'refusal' ? 'refusal' : 'text', text: accumulator.text });
       }
+      if (accumulator.refusal) parts.push({ type: 'refusal', text: accumulator.refusal });
       for (const index of accumulator.toolOrder) {
         const tool = accumulator.tools.get(index);
         if (tool) {
@@ -1357,7 +1596,7 @@ function createCanonicalAccumulator(publicModel) {
             type: 'tool_use',
             id: tool.id,
             name: tool.name,
-            input: safeParseJson(tool.arguments),
+            arguments: tool.arguments,
           });
         }
       }
@@ -1365,12 +1604,15 @@ function createCanonicalAccumulator(publicModel) {
         ? 'tool_use'
         : accumulator.stopReason;
       return {
+        sourceProtocol: accumulator.sourceProtocol,
         id: accumulator.id,
         model: publicModel || accumulator.model,
         createdAt: accumulator.createdAt,
         parts,
         stopReason,
+        ...(Object.prototype.hasOwnProperty.call(accumulator, 'stopSequence') ? { stopSequence: accumulator.stopSequence } : {}),
         usage: accumulator.usage,
+        ...(accumulator.error ? { error: accumulator.error } : {}),
       };
     },
   };
@@ -1385,7 +1627,7 @@ function collectCanonicalEvents(events, publicModel = '') {
 }
 
 function createTargetEventParser(targetProtocol, publicModel) {
-  const accumulator = createCanonicalAccumulator(publicModel);
+  const accumulator = createCanonicalAccumulator(publicModel, targetProtocol);
   const toolIndexes = new Map();
   let nextToolIndex = 0;
   let sawFinish = false;
@@ -1413,6 +1655,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
     }
 
     if (payload.error) {
+      sawFinish = true;
       return emit([{
         type: 'error',
         message: payload.error.message || String(payload.error),
@@ -1432,6 +1675,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
         if (text) {
           events.push({ type: 'text_delta', text });
         }
+        if (typeof delta.refusal === 'string' && delta.refusal) events.push({ type: 'refusal_delta', text: delta.refusal });
         for (const [callIndex, call] of (Array.isArray(delta.tool_calls) ? delta.tool_calls : []).entries()) {
           const index = resolveToolIndex(call.index ?? callIndex);
           if (call.id || call.function?.name) {
@@ -1448,7 +1692,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
         }
         if (choice.finish_reason) {
           pendingChatFinish = {
-            stopReason: mapChatStopToCanonical(choice.finish_reason),
+            stopReason: choice.finish_reason === 'content_filter' ? 'content_filter' : delta.refusal || accumulator.accumulator.refusal ? 'refusal' : mapChatStopToCanonical(choice.finish_reason),
           };
           if (payload.usage) {
             sawFinish = true;
@@ -1496,6 +1740,10 @@ function createTargetEventParser(targetProtocol, publicModel) {
         }
       } else if (type === 'response.output_text.delta') {
         events.push({ type: 'text_delta', text: payload.delta || '' });
+      } else if (type === 'response.refusal.delta') {
+        events.push({ type: 'refusal_delta', text: payload.delta || '' });
+      } else if (type === 'response.refusal.done' && !accumulator.accumulator.refusal && payload.refusal) {
+        events.push({ type: 'refusal_delta', text: payload.refusal });
       } else if (type === 'response.output_text.done' && !accumulator.accumulator.text && payload.text) {
         events.push({ type: 'text_delta', text: payload.text });
       } else if (type === 'response.function_call_arguments.delta') {
@@ -1515,6 +1763,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
         }
       } else if (type === 'response.completed' || type === 'response.incomplete') {
         const response = payload.response || {};
+        if (!accumulator.accumulator.id) events.push(...canonicalEventStart(accumulator.accumulator, response));
         if (!accumulator.accumulator.text) {
           const responseText = typeof response.output_text === 'string' && response.output_text
             ? response.output_text
@@ -1528,14 +1777,32 @@ function createTargetEventParser(targetProtocol, publicModel) {
           }
         }
         const usage = usageFromResponses(response.usage) || accumulator.accumulator.usage;
+        if (!accumulator.accumulator.refusal) {
+          const refusal = (response.output || []).flatMap(item => item?.content || []).filter(block => block?.type === 'refusal').map(block => block.refusal || '').join('');
+          if (refusal) events.push({ type: 'refusal_delta', text: refusal });
+        }
         const hasTool = Array.isArray(response.output) && response.output.some(item => item.type === 'function_call');
-        const stopReason = hasTool
-          ? 'tool_use'
+        for (const item of Array.isArray(response.output) ? response.output : []) {
+          if (item?.type !== 'function_call') continue;
+          const index = resolveToolIndex(item.id || item.call_id);
+          const existing = accumulator.accumulator.tools.get(index);
+          if (!existing) events.push({ type: 'tool_start', index, id: item.call_id || item.id, name: item.name });
+          if (!existing?.arguments && typeof item.arguments === 'string' && item.arguments) events.push({ type: 'tool_args_delta', index, partial: item.arguments });
+        }
+        if (type === 'response.incomplete' && !['max_output_tokens', 'content_filter'].includes(response.incomplete_details?.reason)) {
+          sawFinish = true;
+          events.push({ type: 'error', code: 'unsupported_protocol_feature', message: `无法准确映射 Responses incomplete 原因: ${response.incomplete_details?.reason || 'unknown'}` });
+          return emit(events);
+        }
+        const stopReason = response.incomplete_details?.reason === 'content_filter' ? 'content_filter' : accumulator.accumulator.refusal || events.some(event => event.type === 'refusal_delta')
+          ? 'refusal'
           : response.incomplete_details && response.incomplete_details.reason === 'max_output_tokens'
             ? 'max_tokens'
-            : 'end_turn';
+            : hasTool ? 'tool_use' : 'end_turn';
         events.push({ type: 'finish', stopReason, usage });
+        sawFinish = true;
       } else if (type === 'response.failed') {
+        sawFinish = true;
         events.push({
           type: 'error',
           message: payload.response?.error?.message || '上游 Responses 响应失败',
@@ -1587,19 +1854,19 @@ function createTargetEventParser(targetProtocol, publicModel) {
       }
     } else if (type === 'message_delta') {
       accumulator.accumulator.usage = usageFromMessages(payload.usage, accumulator.accumulator.usage);
-      events.push({
+      if (payload.delta?.stop_reason) events.push({
         type: 'finish',
         stopReason: mapMessagesStopToCanonical(payload.delta?.stop_reason),
+        ...(Object.prototype.hasOwnProperty.call(payload.delta, 'stop_sequence') ? { stopSequence: payload.delta.stop_sequence } : {}),
         usage: accumulator.accumulator.usage,
       });
     } else if (type === 'message_stop') {
       if (!sawFinish) {
         events.push({
-          type: 'finish',
-          stopReason: accumulator.accumulator.toolOrder.length ? 'tool_use' : 'end_turn',
-          usage: accumulator.accumulator.usage,
+          type: 'error', code: 'incomplete_upstream_stream', message: 'Messages 流缺少有效 stop_reason',
         });
       }
+      sawFinish = true;
     } else if (type === 'error') {
       events.push({
         type: 'error',
@@ -1608,7 +1875,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
       });
     }
 
-    if (type === 'message_delta') {
+    if (type === 'message_delta' && payload.delta?.stop_reason) {
       sawFinish = true;
     }
     return emit(events);
@@ -1633,11 +1900,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
         return emit([finish]);
       }
       sawFinish = true;
-      return emit([{
-        type: 'finish',
-        stopReason: accumulator.accumulator.toolOrder.length ? 'tool_use' : 'end_turn',
-        usage: accumulator.accumulator.usage,
-      }]);
+      return emit([{ type: 'error', code: 'incomplete_upstream_stream', message: '上游流在有效终态前结束' }]);
     },
     build() {
       return accumulator.build();
@@ -1648,13 +1911,16 @@ function createTargetEventParser(targetProtocol, publicModel) {
   };
 }
 
-function createEntryEventSerializer(entryProtocol, publicModel) {
+function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) {
   const state = {
     started: false,
     finished: false,
-    responseId: responseIdFor(entryProtocol, undefined),
+    responseId: responseIdFor(entryProtocol, undefined, sourceProtocol),
     createdAt: Math.floor(Date.now() / 1000),
     text: '',
+    refusal: '',
+    refusalOutputIndex: null,
+    refusalItemId: null,
     tools: new Map(),
     toolOrder: [],
     openTextBlock: false,
@@ -1676,7 +1942,7 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
     }
     state.started = true;
     if (canonicalEvent.id) {
-      state.responseId = responseIdFor(entryProtocol, canonicalEvent.id);
+      state.responseId = responseIdFor(entryProtocol, canonicalEvent.id, sourceProtocol);
     }
     if (canonicalEvent.createdAt) {
       state.createdAt = canonicalEvent.createdAt;
@@ -1706,7 +1972,7 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
             content: [],
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: state.usage ? state.usage.inputTokens : 0, output_tokens: 0 },
+            usage: serializeUsage(state.usage, 'messages') || {},
           },
         },
       });
@@ -1815,6 +2081,12 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
 
   function handleToolStart(event) {
     const events = ensureStarted();
+    if (state.tools.has(event.index)) {
+      const existing = state.tools.get(event.index);
+      existing.id = event.id || existing.id;
+      existing.name = event.name || existing.name;
+      return events;
+    }
     const tool = {
       id: event.id,
       name: event.name,
@@ -1876,6 +2148,29 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
         },
       });
     }
+    return events;
+  }
+
+  function handleRefusal(text) {
+    const events = ensureStarted();
+    state.refusal += text;
+    state.stopReason = 'refusal';
+    if (entryProtocol === 'messages') return [...events, ...handleText(text)];
+    if (entryProtocol === 'chat_completions') {
+      events.push({ event: null, data: { id: state.responseId, object: 'chat.completion.chunk', created: state.createdAt, model: publicModel,
+        choices: [{ index: 0, delta: { refusal: text }, finish_reason: null }] } });
+      return events;
+    }
+    if (state.refusalOutputIndex === null) {
+      state.refusalOutputIndex = state.nextOutputIndex++;
+      state.refusalItemId = `msg_${state.responseId.replace(/^resp_/, '')}_refusal`;
+      events.push({ event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index: state.refusalOutputIndex,
+        item: { id: state.refusalItemId, type: 'message', status: 'in_progress', role: 'assistant', content: [] } } });
+      events.push({ event: 'response.content_part.added', data: { type: 'response.content_part.added', item_id: state.refusalItemId,
+        output_index: state.refusalOutputIndex, content_index: 0, part: { type: 'refusal', refusal: '' } } });
+    }
+    events.push({ event: 'response.refusal.delta', data: { type: 'response.refusal.delta', item_id: state.refusalItemId,
+      output_index: state.refusalOutputIndex, content_index: 0, delta: text } });
     return events;
   }
 
@@ -1961,10 +2256,24 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
     if (state.finished) {
       return [];
     }
+    if (entryProtocol !== 'messages' && !['end_turn', 'stop_sequence', 'max_tokens', 'tool_use', 'refusal', 'content_filter', ...(entryProtocol === 'chat_completions' ? ['model_context_window_exceeded'] : [])].includes(event.stopReason || 'end_turn')) {
+      state.finished = true;
+      return [{ event: 'error', data: { type: 'error', error: { code: 'unsupported_protocol_feature', message: `无法保真转换上游终态 ${event.stopReason}` } } }];
+    }
+    let terminalRefusal = [];
+    if (event.stopReason === 'refusal' && !state.refusal && state.text && entryProtocol !== 'messages') terminalRefusal = handleRefusal(state.text);
+    if (entryProtocol === 'messages' && !['max_tokens', 'refusal', 'content_filter'].includes(event.stopReason)) {
+      try { for (const tool of state.tools.values()) responseToolInput({ arguments: tool.args }); }
+      catch (error) {
+        state.finished = true;
+        return [{ event: 'error', data: { type: 'error', error: { code: error.code, message: error.message } } }];
+      }
+    }
     state.finished = true;
     state.usage = event.usage || state.usage;
-    state.stopReason = event.stopReason || state.stopReason;
-    const events = ensureStarted();
+    if (Object.prototype.hasOwnProperty.call(event, 'stopSequence')) state.stopSequence = event.stopSequence;
+    state.stopReason = event.stopReason === 'content_filter' ? 'content_filter' : state.refusal ? 'refusal' : event.stopReason || state.stopReason;
+    const events = [...terminalRefusal, ...ensureStarted()];
     const text = state.text;
 
     if (entryProtocol === 'chat_completions') {
@@ -1980,11 +2289,7 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
             delta: {},
             finish_reason: mapCanonicalStopToChat(state.stopReason),
           }],
-          usage: state.usage ? {
-            prompt_tokens: state.usage.inputTokens,
-            completion_tokens: state.usage.outputTokens,
-            total_tokens: state.usage.totalTokens,
-          } : undefined,
+          usage: serializeUsage(state.usage, 'chat_completions'),
         },
       });
       events.push({ event: null, raw: '[DONE]' });
@@ -2004,12 +2309,9 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
           type: 'message_delta',
           delta: {
             stop_reason: mapCanonicalStopToMessages(state.stopReason),
-            stop_sequence: null,
+            ...(Object.prototype.hasOwnProperty.call(state, 'stopSequence') ? { stop_sequence: state.stopSequence } : {}),
           },
-          usage: {
-            input_tokens: state.usage ? state.usage.inputTokens : 0,
-            output_tokens: state.usage ? state.usage.outputTokens : 0,
-          },
+          usage: serializeUsage(state.usage, 'messages') || {},
         },
       });
       events.push({ event: 'message_stop', data: { type: 'message_stop' } });
@@ -2076,23 +2378,30 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
         });
       }
     }
+    if (state.refusalOutputIndex !== null) {
+      const content = { type: 'refusal', refusal: state.refusal };
+      const item = { id: state.refusalItemId, type: 'message', status: 'completed', role: 'assistant', content: [content] };
+      const position = { item_id: state.refusalItemId, output_index: state.refusalOutputIndex, content_index: 0 };
+      events.push({ event: 'response.refusal.done', data: { type: 'response.refusal.done', ...position, refusal: state.refusal } });
+      events.push({ event: 'response.content_part.done', data: { type: 'response.content_part.done', ...position, part: content } });
+      events.push({ event: 'response.output_item.done', data: { type: 'response.output_item.done', output_index: state.refusalOutputIndex, item } });
+      output.push(item);
+    }
+    const incomplete = ['max_tokens', 'content_filter'].includes(state.stopReason);
     events.push({
-      event: 'response.completed',
+      event: incomplete ? 'response.incomplete' : 'response.completed',
       data: {
-        type: 'response.completed',
+        type: incomplete ? 'response.incomplete' : 'response.completed',
         response: {
           id: state.responseId,
           object: 'response',
           created_at: state.createdAt,
-          status: 'completed',
+          status: incomplete ? 'incomplete' : 'completed',
+          ...(incomplete ? { incomplete_details: { reason: state.stopReason === 'content_filter' ? 'content_filter' : 'max_output_tokens' } } : {}),
           model: publicModel,
           output,
           output_text: text,
-          usage: {
-            input_tokens: state.usage ? state.usage.inputTokens : 0,
-            output_tokens: state.usage ? state.usage.outputTokens : 0,
-            total_tokens: state.usage ? state.usage.totalTokens : 0,
-          },
+          ...(state.usage ? { usage: serializeUsage(state.usage, 'responses') } : {}),
         },
       },
     });
@@ -2110,6 +2419,7 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
       if (event.type === 'text_delta') {
         return handleText(event.text || '');
       }
+      if (event.type === 'refusal_delta') return handleRefusal(event.text || '');
       if (event.type === 'tool_start') {
         return handleToolStart(event);
       }
@@ -2129,14 +2439,16 @@ function createEntryEventSerializer(entryProtocol, publicModel) {
       return [];
     },
     finish() {
-      return handleFinish({ stopReason: state.toolOrder.length ? 'tool_use' : 'end_turn', usage: state.usage });
+      if (state.finished) return [];
+      state.finished = true;
+      return [{ event: 'error', data: { type: 'error', error: { code: 'incomplete_upstream_stream', message: '上游流在有效终态前结束' } } }];
     },
   };
 }
 
 function createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel }) {
   const targetParser = createTargetEventParser(targetProtocol, publicModel);
-  const entrySerializer = createEntryEventSerializer(entryProtocol, publicModel);
+  const entrySerializer = createEntryEventSerializer(entryProtocol, publicModel, targetProtocol);
   let finished = false;
 
   return {
@@ -2182,7 +2494,7 @@ const CANONICAL_RESPONSE_EVENTS = [
 ];
 
 function responseToEntrySse(entryProtocol, canonicalResponse, publicModel) {
-  const serializer = createEntryEventSerializer(entryProtocol, publicModel);
+  const serializer = createEntryEventSerializer(entryProtocol, publicModel, canonicalResponse.sourceProtocol);
   const events = [];
   events.push(...serializer.handle({
     type: 'start',
@@ -2195,6 +2507,8 @@ function responseToEntrySse(entryProtocol, canonicalResponse, publicModel) {
   for (const part of canonicalResponse.parts || []) {
     if (part.type === 'text') {
       events.push(...serializer.handle({ type: 'text_delta', text: part.text }));
+    } else if (part.type === 'refusal') {
+      events.push(...serializer.handle({ type: 'refusal_delta', text: part.text }));
     } else if (part.type === 'tool_use') {
       const index = toolIndex;
       toolIndex += 1;
@@ -2207,7 +2521,7 @@ function responseToEntrySse(entryProtocol, canonicalResponse, publicModel) {
       events.push(...serializer.handle({
         type: 'tool_args_delta',
         index,
-        partial: JSON.stringify(part.input || {}),
+        partial: typeof part.arguments === 'string' ? part.arguments : JSON.stringify(part.input || {}),
       }));
       events.push(...serializer.handle({ type: 'tool_end', index }));
     }
@@ -2216,6 +2530,7 @@ function responseToEntrySse(entryProtocol, canonicalResponse, publicModel) {
   events.push(...serializer.handle({
     type: 'finish',
     stopReason: canonicalResponse.stopReason,
+    ...(Object.prototype.hasOwnProperty.call(canonicalResponse, 'stopSequence') ? { stopSequence: canonicalResponse.stopSequence } : {}),
     usage: canonicalResponse.usage,
   }));
   events.push(...serializer.finish());

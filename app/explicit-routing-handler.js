@@ -42,7 +42,7 @@ function hasOpaqueServerState(body) {
     return false;
   }
 
-  if (typeof body.conversation === 'string' && body.conversation) {
+  if (body.conversation !== undefined && body.conversation !== null) {
     return true;
   }
 
@@ -56,6 +56,33 @@ function hasOpaqueServerState(body) {
   }
 
   return false;
+}
+
+function validateResponsesState(body) {
+  const previous = body.previous_response_id;
+  const conversation = body.conversation;
+  const present = value => value !== undefined && value !== null;
+  const validId = value => typeof value === 'string' && value.length > 0 && value === value.trim();
+  if (present(previous) && !validId(previous)) return 'previous_response_id 必须为非空响应 ID 字符串';
+  if (present(conversation) && !(validId(conversation) || (conversation && typeof conversation === 'object' && !Array.isArray(conversation) && Object.keys(conversation).length === 1 && validId(conversation.id)))) return 'conversation 必须为非空会话 ID 或 {id: 会话 ID}';
+  if (present(previous) && present(conversation)) return 'conversation 与 previous_response_id 不能同时使用';
+  return '';
+}
+
+function observeUpstreamState(lease, payload) {
+  if (!payload || typeof payload !== 'object') return;
+  const response = payload.response && typeof payload.response === 'object' ? payload.response : payload;
+  if (lease.target.protocol === 'responses' && typeof response.store === 'boolean') lease.responseStorage = response.store;
+  const choice = payload.choices?.[0];
+  const type = payload.type || '';
+  const refusalParts = (response.output || []).flatMap(item => Array.isArray(item.content) ? item.content : []).filter(item => item.type === 'refusal');
+  if (type.startsWith('response.refusal.') || typeof choice?.delta?.refusal === 'string' || typeof choice?.message?.refusal === 'string' ||
+      choice?.finish_reason === 'content_filter' || payload.stop_reason === 'refusal' || payload.delta?.stop_reason === 'refusal' || refusalParts.length || response.incomplete_details?.reason === 'content_filter') {
+    lease.policyObserved = true;
+    const text = payload.delta && typeof payload.delta === 'string' ? payload.delta
+      : choice?.delta?.refusal || choice?.message?.refusal || refusalParts.map(item => item.refusal || '').join('');
+    if (text) lease.policyReason = `${lease.policyReason || ''}${text}`.slice(0, 4096);
+  }
 }
 
 function sendProtocolError(res, entryProtocol, statusCode, code, message, details = {}) {
@@ -142,7 +169,7 @@ function isClientRejectionFailure(statusCode, errorCode, message) {
     statusCode === 413 ||
     statusCode === 422 ||
     statusCode === 405 ||
-    /invalid_request|invalid_argument|invalid_prompt|content_policy|policy_violation|context_length|string_too_long/.test(text);
+    /invalid_request|invalid_argument|invalid_prompt|content_policy|content_filter|refusal|policy_violation|context_length|string_too_long/.test(text);
 }
 
 function isUpstreamErrorPayload(payload) {
@@ -190,7 +217,7 @@ function classifyUpstreamErrorPayload(payload) {
     statusCode = 429;
   } else if (/unauthor|invalid.*(?:api.?key|token)|authentication|auth_failed/.test(text)) {
     statusCode = 401;
-  } else if (/invalid_request|invalid_argument|invalid_prompt|content_policy|policy_violation|context_length/.test(text)) {
+  } else if (/invalid_request|invalid_argument|invalid_prompt|content_policy|content_filter|refusal|policy_violation|context_length/.test(text)) {
     statusCode = 400;
   }
 
@@ -246,6 +273,7 @@ function isMeaningfulStreamEntry(entry, entryProtocol) {
     if (typeof delta.content === 'string' && delta.content.length > 0) {
       return true;
     }
+    if (typeof delta.refusal === 'string' && delta.refusal.length > 0) return true;
     return Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0;
   }
 
@@ -259,6 +287,7 @@ function isMeaningfulStreamEntry(entry, entryProtocol) {
   }
 
   return Boolean(
+    entry.event === 'response.refusal.delta' ||
     entry.event === 'response.output_text.delta' ||
     entry.event === 'response.function_call_arguments.delta' ||
     entry.event === 'response.output_item.added' && data.item && data.item.type === 'function_call' ||
@@ -392,7 +421,9 @@ function applyStreamHeaders(res) {
 
 function bindResponseContext(contextStore, entryProtocol, responseId, lease, publicModel, authHash) {
   if (lease && lease.isCurrent && !lease.isCurrent()) return;
-  if (entryProtocol !== 'responses' || !contextStore || !normalizeString(responseId)) {
+  if (entryProtocol !== 'responses' || !contextStore || !normalizeString(responseId) ||
+      lease.target.protocol !== 'responses' || lease.runtime.type !== 'apikey' ||
+      lease.requestedStore === false || lease.responseStorage !== true) {
     return;
   }
 
@@ -403,7 +434,39 @@ function bindResponseContext(contextStore, entryProtocol, responseId, lease, pub
     protocol: lease.target.protocol,
     public_model: publicModel,
     auth_hash: authHash,
+    expected_epoch: lease.contextEpoch,
   });
+}
+
+function nativeResponsesToSse(payload, publicModel) {
+  const response = transformResponseForEntry({ entryProtocol: 'responses', targetProtocol: 'responses', payload, publicModel });
+  if (!['completed', 'incomplete', 'failed'].includes(response.status)) throw new UnsupportedProtocolFeatureError('原生 JSON 响应尚未到可表示的终态，不能伪造已完成的流');
+  const events = [{ event: 'response.created', data: { type: 'response.created', response: { ...response, status: 'in_progress', output: [], usage: null } } }];
+  for (const [output_index, item] of (response.output || []).entries()) {
+    const initial = { ...item, ...(item.status ? { status: 'in_progress' } : {}), ...(item.type === 'message' ? { content: [] } : {}), ...(item.type === 'function_call' ? { arguments: '' } : {}) };
+    events.push({ event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index, item: initial } });
+    if (item.type === 'message') {
+      for (const [content_index, part] of (item.content || []).entries()) {
+        const common = { item_id: item.id, output_index, content_index };
+        events.push({ event: 'response.content_part.added', data: { type: 'response.content_part.added', ...common, part: { ...part, ...(part.type === 'output_text' ? { text: '' } : {}), ...(part.type === 'refusal' ? { refusal: '' } : {}) } } });
+        if (part.type === 'output_text' || part.type === 'refusal') {
+          const name = part.type === 'refusal' ? 'refusal' : 'output_text';
+          const text = part.type === 'refusal' ? part.refusal : part.text;
+          events.push({ event: `response.${name}.delta`, data: { type: `response.${name}.delta`, ...common, delta: text } });
+          events.push({ event: `response.${name}.done`, data: { type: `response.${name}.done`, ...common, ...(part.type === 'refusal' ? { refusal: text } : { text }) } });
+        }
+        events.push({ event: 'response.content_part.done', data: { type: 'response.content_part.done', ...common, part } });
+      }
+    } else if (item.type === 'function_call') {
+      const common = { item_id: item.id, output_index };
+      events.push({ event: 'response.function_call_arguments.delta', data: { type: 'response.function_call_arguments.delta', ...common, delta: item.arguments } });
+      events.push({ event: 'response.function_call_arguments.done', data: { type: 'response.function_call_arguments.done', ...common, arguments: item.arguments } });
+    }
+    events.push({ event: 'response.output_item.done', data: { type: 'response.output_item.done', output_index, item } });
+  }
+  const type = `response.${response.status}`;
+  events.push({ event: type, data: { type, response } });
+  return events;
 }
 
 function minRetryAfterFromSkipped(skipped, now = Date.now()) {
@@ -514,6 +577,13 @@ function createExplicitRoutingHandler(options = {}) {
       return;
     }
 
+    if (entryProtocol === 'responses') {
+      const stateError = validateResponsesState(body);
+      if (stateError) { sendProtocolError(res, entryProtocol, 400, 'invalid_request_body', stateError); return; }
+      if (body.conversation !== undefined && body.conversation !== null) {
+        sendProtocolError(res, entryProtocol, 409, 'upstream_context_unavailable', '当前未建立 Conversations 会话归属，不能安全转发 conversation；请发送完整上下文'); return;
+      }
+    }
     const requestAuthHash = normalizeString(getAuthIdentityHash(req));
     const requestSessionId = buildStableSessionId(getSessionKey(req, body));
 
@@ -609,6 +679,7 @@ function createExplicitRoutingHandler(options = {}) {
       attempts = attemptedTargetIds.size;
     }
     function retryable(status, lease, message = '') {
+      if (/content[_ -]filter|content_policy|policy_violation|refusal|responsible_ai_policy/i.test(message)) return false;
       return isRetryableStatus(status) || Boolean(lease.pool && status === 400 && /privacy|training|not.?support|unavailable|not available|context.{0,20}length/i.test(message));
     }
     let lastFailure = null;
@@ -633,6 +704,7 @@ function createExplicitRoutingHandler(options = {}) {
     }
 
     function markNotCommittedFailure(lease, details) {
+      if (previousResponseId && (details.statusCode === 404 || /previous_response.*not_found|response_not_found/.test(details.errorCode || ''))) getContextStore()?.forgetResponse?.(previousResponseId);
       router.markFailure(lease, details);
     }
 
@@ -676,6 +748,9 @@ function createExplicitRoutingHandler(options = {}) {
           );
           return;
         }
+        if (!attempts && lastSkipped.some(item => item.reason === 'protocol_feature_unsupported')) {
+          sendProtocolError(res, entryProtocol, 400, 'unsupported_protocol_feature', '候选无法保真表达请求中的协议语义', { skipped: lastSkipped }); return;
+        }
         break;
       }
 
@@ -685,6 +760,8 @@ function createExplicitRoutingHandler(options = {}) {
       const runtime = lease.runtime;
       const target = lease.target;
       const targetProtocol = target.protocol;
+      lease.requestedStore = body.store;
+      lease.contextEpoch = getContextStore()?.getEpoch?.(lease.config.id, publicModel, lease.target.id);
 
       try {
       if (previousResponseId && targetProtocol !== 'responses') {
@@ -884,7 +961,7 @@ function createExplicitRoutingHandler(options = {}) {
           retryAfterMs,
         };
 
-        if (!retryable(statusCode, lease, errorInfo.message)) {
+        if (!retryable(statusCode, lease, `${errorInfo.code} ${errorInfo.type} ${errorInfo.message}`)) {
           break;
         }
         continue;
@@ -893,7 +970,7 @@ function createExplicitRoutingHandler(options = {}) {
       // Success. From here on, once any downstream bytes are written, failover is
       // forbidden and the response must be terminated, never spliced.
       if (clientWantsStream) {
-        if (targetStream && isSse) {
+        if (isSse) {
           const parser = createSseEventParser();
           const rewriter = entryProtocol === targetProtocol
             ? createSameProtocolSseRewriter(entryProtocol, publicModel)
@@ -911,6 +988,12 @@ function createExplicitRoutingHandler(options = {}) {
 
           const processEntries = entries => {
             for (const entry of entries) {
+              if (entry?.event === 'error') {
+                const descriptor = classifyUpstreamErrorPayload(entry.data || {});
+                if (!committed) { retryDescriptor = { ...descriptor, nonRetryable: true }; return; }
+                streamError = descriptor;
+                sawTerminal = true;
+              }
               if (entry && entry.event === 'response.created' && entry.data?.response?.id) {
                 downstreamResponseId = entry.data.response.id;
               }
@@ -949,6 +1032,7 @@ function createExplicitRoutingHandler(options = {}) {
             if (!parsed.data || typeof parsed.data !== 'object') {
               return;
             }
+            observeUpstreamState(lease, parsed.data);
             if (isUpstreamErrorPayload(parsed.data)) {
               const descriptor = classifyUpstreamErrorPayload(parsed.data);
               if (!committed) {
@@ -972,8 +1056,8 @@ function createExplicitRoutingHandler(options = {}) {
 
           const result = await new Promise(resolve => {
             const cleanup = () => {
-              response.removeListener('data', onData);
-              response.removeListener('end', onEnd);
+              response.removeListener('data', safeOnData);
+              response.removeListener('end', safeOnEnd);
               response.removeListener('error', onError);
               response.removeListener('close', onClose);
             };
@@ -1028,7 +1112,7 @@ function createExplicitRoutingHandler(options = {}) {
                   message: '上游流式响应在完成标记前结束',
                 };
                 if (!committed) {
-                  finishAttempt({ retry: descriptor });
+                  finishAttempt({ retry: { ...descriptor, ...(lease.policyObserved ? { nonRetryable: true } : {}) } });
                   return;
                 }
                 router.markFailure(lease, descriptor);
@@ -1049,6 +1133,7 @@ function createExplicitRoutingHandler(options = {}) {
                 });
                 releaseLease();
                 if (!res.writableEnded) {
+                  writeSse(res, { event: 'error', data: { type: 'error', error: { code: streamError.code || 'incomplete_upstream_stream', message: streamError.message } } });
                   res.end();
                 }
                 finishAttempt({ error: streamError });
@@ -1100,8 +1185,20 @@ function createExplicitRoutingHandler(options = {}) {
               onError(response.errored || new Error('上游流式响应提前关闭'));
             };
 
-            response.on('data', onData);
-            response.on('end', onEnd);
+            const guard = callback => value => {
+              try { callback(value); } catch (conversionError) {
+                responseFinished = true;
+                releaseLease();
+                if (res.headersSent) res.destroy(conversionError);
+                else sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || conversionError.message);
+                finishAttempt({ error: conversionError });
+                upstream.abort(conversionError);
+              }
+            };
+            const safeOnData = guard(onData);
+            const safeOnEnd = guard(onEnd);
+            response.on('data', safeOnData);
+            response.on('end', safeOnEnd);
             response.on('error', onError);
             response.on('close', onClose);
           });
@@ -1129,14 +1226,14 @@ function createExplicitRoutingHandler(options = {}) {
                 error(`统一路由凭证刷新失败: ${target.config_id} (${err.message})`);
               }
             }
-            markNotCommittedFailure(lease, {
+            if (!result.retry.nonRetryable) markNotCommittedFailure(lease, {
               statusCode: result.retry.statusCode,
               message: result.retry.message,
               errorCode: result.retry.code,
               reason: result.retry.code || 'upstream_stream_retry',
             });
             releaseLease();
-            if (!retryable(result.retry.statusCode, lease, result.retry.message)) {
+            if (result.retry.nonRetryable || !retryable(result.retry.statusCode, lease, result.retry.message)) {
               sendProtocolError(
                 res,
                 entryProtocol,
@@ -1171,6 +1268,7 @@ function createExplicitRoutingHandler(options = {}) {
           continue;
         }
 
+        observeUpstreamState(lease, parsedPayload);
         if (isUpstreamErrorPayload(parsedPayload)) {
           const descriptor = classifyUpstreamErrorPayload(parsedPayload);
           if (
@@ -1216,8 +1314,11 @@ function createExplicitRoutingHandler(options = {}) {
             payload: parsedPayload,
             publicModel,
           });
-          canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
+          if (!(entryProtocol === 'responses' && targetProtocol === 'responses')) canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
         } catch (err) {
+          if (err instanceof UnsupportedProtocolFeatureError || lease.policyObserved) {
+            sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || err.message); return;
+          }
           markNotCommittedFailure(lease, { statusCode: 502, message: err.message, reason: 'response_transform_failed' });
           releaseLease();
           excludeTargetIds.push(target.id);
@@ -1225,9 +1326,11 @@ function createExplicitRoutingHandler(options = {}) {
           continue;
         }
 
+        const entries = entryProtocol === 'responses' && targetProtocol === 'responses'
+          ? nativeResponsesToSse(entryPayload, publicModel) : responseToEntrySse(entryProtocol, canonical, publicModel);
         applyStreamHeaders(res);
         committed = true;
-        for (const entry of responseToEntrySse(entryProtocol, canonical, publicModel)) {
+        for (const entry of entries) {
           writeSse(res, entry);
         }
         router.markSuccess(lease);
@@ -1240,17 +1343,24 @@ function createExplicitRoutingHandler(options = {}) {
       }
 
       // Non-stream client.
-      if (targetStream && isSse) {
+      if (isSse) {
         const parser = createSseEventParser();
         const bridge = createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel });
         let streamError = null;
         let sawDone = false;
+        const nativeResponses = entryProtocol === 'responses' && targetProtocol === 'responses';
+        let nativeFinalResponse = null;
+        const acceptPayload = parsed => {
+          observeUpstreamState(lease, parsed.data);
+          if (nativeResponses && ['response.completed', 'response.incomplete'].includes(parsed.data.type || parsed.event) && parsed.data.response) nativeFinalResponse = parsed.data.response;
+          if (!nativeResponses) bridge.accept(parsed.event, parsed.data);
+        };
 
         await new Promise((resolve, reject) => {
           let settled = false;
           const cleanup = () => {
-            response.removeListener('data', onData);
-            response.removeListener('end', onEnd);
+            response.removeListener('data', safeOnData);
+            response.removeListener('end', safeOnEnd);
             response.removeListener('error', onError);
             response.removeListener('close', onClose);
           };
@@ -1276,13 +1386,14 @@ function createExplicitRoutingHandler(options = {}) {
               if (!parsed.data || typeof parsed.data !== 'object') {
                 continue;
               }
+              observeUpstreamState(lease, parsed.data);
               if (isUpstreamErrorPayload(parsed.data)) {
                 if (!streamError) {
                   streamError = classifyUpstreamErrorPayload(parsed.data);
                 }
                 continue;
               }
-              bridge.accept(parsed.event, parsed.data);
+              acceptPayload(parsed);
             }
           };
           const onEnd = () => {
@@ -1292,12 +1403,13 @@ function createExplicitRoutingHandler(options = {}) {
                 sawDone = true;
                 bridge.finish();
               } else if (parsed.data && typeof parsed.data === 'object') {
+                observeUpstreamState(lease, parsed.data);
                 if (isUpstreamErrorPayload(parsed.data)) {
                   if (!streamError) {
                     streamError = classifyUpstreamErrorPayload(parsed.data);
                   }
                 } else {
-                  bridge.accept(parsed.event, parsed.data);
+                  acceptPayload(parsed);
                 }
               }
             }
@@ -1318,8 +1430,17 @@ function createExplicitRoutingHandler(options = {}) {
             onError(response.errored || new Error('上游流式响应提前关闭'));
           };
 
-          response.on('data', onData);
-          response.on('end', onEnd);
+          const guard = callback => value => {
+            try { callback(value); } catch (conversionError) {
+              responseFinished = true;
+              finish(conversionError);
+              upstream.abort(conversionError);
+            }
+          };
+          const safeOnData = guard(onData);
+          const safeOnEnd = guard(onEnd);
+          response.on('data', safeOnData);
+          response.on('end', safeOnEnd);
           response.on('error', onError);
           response.on('close', onClose);
         });
@@ -1377,7 +1498,11 @@ function createExplicitRoutingHandler(options = {}) {
           return;
         }
 
-        if (!sawDone && !bridge.isComplete()) {
+        if (nativeResponses ? !nativeFinalResponse : (!sawDone && !bridge.isComplete())) {
+          if (lease.policyObserved) {
+            router.markFailure(lease, { statusCode: 400, errorCode: 'refusal', message: lease.policyReason || '上游已拒绝' });
+            sendProtocolError(res, entryProtocol, 502, 'upstream_refusal_incomplete', lease.policyReason || '上游已拒绝请求，但未返回完整终态'); return;
+          }
           const incomplete = {
             statusCode: 502,
             code: 'incomplete_upstream_stream',
@@ -1390,9 +1515,9 @@ function createExplicitRoutingHandler(options = {}) {
           continue;
         }
 
-        bridge.finish();
-        const canonical = bridge.getCanonicalResponse();
-        const payload = serializeCanonicalResponse(entryProtocol, canonical, publicModel);
+        const payload = nativeResponses
+          ? transformResponseForEntry({ entryProtocol, targetProtocol, payload: nativeFinalResponse, publicModel })
+          : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel); })();
         res.status(200).json(payload);
         router.markSuccess(lease);
         bindResponseContext(getContextStore(), entryProtocol, payload.id, lease, publicModel, requestAuthHash);
@@ -1421,6 +1546,7 @@ function createExplicitRoutingHandler(options = {}) {
         continue;
       }
 
+      observeUpstreamState(lease, parsedPayload);
       if (isUpstreamErrorPayload(parsedPayload)) {
         const descriptor = classifyUpstreamErrorPayload(parsedPayload);
         if (
@@ -1477,6 +1603,9 @@ function createExplicitRoutingHandler(options = {}) {
           publicModel,
         });
       } catch (err) {
+        if (err instanceof UnsupportedProtocolFeatureError || lease.policyObserved) {
+          sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || err.message); return;
+        }
         markNotCommittedFailure(lease, {
           statusCode: 502,
           message: err.message,
@@ -1502,6 +1631,12 @@ function createExplicitRoutingHandler(options = {}) {
           currentUpstream.abort(attemptError);
         }
         if (clientClosed) return;
+        if (attemptError instanceof UnsupportedProtocolFeatureError && !committed && !res.headersSent) {
+          sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || attemptError.message); return;
+        }
+        if (lease.policyObserved && !committed && !res.headersSent) {
+          sendProtocolError(res, entryProtocol, 502, 'upstream_refusal_incomplete', lease.policyReason || '上游已拒绝请求，但响应在完整结束前中断'); return;
+        }
         if (committed || res.headersSent) {
           res.destroy(attemptError);
           return;

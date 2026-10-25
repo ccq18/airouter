@@ -306,6 +306,10 @@ function createFreePoolEngine(options = {}) {
     const status = Number(details.statusCode || 502);
     const scope = String(details.metadata?.scope || details.metadata?.limit_scope || details.metadata?.rate_limit_scope || '').toLowerCase();
     const text = `${details.errorCode || ''} ${details.message || ''}`.toLowerCase();
+    if (/content[_ -]filter|content_policy|policy_violation|refusal|responsible_ai_policy|invalid_request|invalid_argument|invalid_prompt/.test(text)) {
+      state.last_request = { model: id, completed_at: now(), status: 'rejected', status_code: status, reason: 'request_rejected' };
+      persist(); return;
+    }
     const accountWide = ['account', 'api_key', 'key'].includes(scope) || /negative balance|free[-_ ]models[-_ ]per[-_ ]day|daily (?:free )?(?:request|quota|limit)|balance[^.]{0,30}negative|rate[-_ ]?limit[^.]{0,50}(?:for|per) (?:this )?(?:account|api[-_ ]?key|key)|(?:account|api[-_ ]?key|key)[-_ ](?:wide[-_ ])?(?:rate[-_ ]?limit|quota[-_ ]limit|limit exceeded)/.test(text);
     if (status === 401) health.markAuthFailure(config.id, { reason: 'auth_failed', cooldownMs: details.retryAfterMs });
     else if (accountWide) {
