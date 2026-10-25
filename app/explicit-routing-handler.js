@@ -9,6 +9,8 @@ const {
   serializeCanonicalResponse,
   createSseEventParser,
   createSameProtocolSseRewriter,
+  nativeMessagesToSse,
+  createNativeMessagesAccumulator,
   createProtocolStreamBridge,
   responseToEntrySse,
   detectRequestCapabilities,
@@ -704,7 +706,12 @@ function createExplicitRoutingHandler(options = {}) {
     }
 
     function markNotCommittedFailure(lease, details) {
-      if (previousResponseId && (details.statusCode === 404 || /previous_response.*not_found|response_not_found/.test(details.errorCode || ''))) getContextStore()?.forgetResponse?.(previousResponseId);
+      if (previousResponseId && (details.statusCode === 404 || /previous_response.*not_found|response_not_found/.test(details.errorCode || ''))) {
+        // A deleted/expired private response says nothing about model health.
+        // Continuations remain pinned and never retry another target.
+        getContextStore()?.forgetResponse?.(previousResponseId);
+        return;
+      }
       router.markFailure(lease, details);
     }
 
@@ -1174,6 +1181,7 @@ function createExplicitRoutingHandler(options = {}) {
               router.markFailure(lease, descriptor);
               releaseLease();
               if (!res.writableEnded) {
+                writeSse(res, { event: 'error', data: { type: 'error', error: { code: descriptor.code, message: descriptor.message } } });
                 res.end();
               }
               finishAttempt({ error: descriptor });
@@ -1189,8 +1197,12 @@ function createExplicitRoutingHandler(options = {}) {
               try { callback(value); } catch (conversionError) {
                 responseFinished = true;
                 releaseLease();
-                if (res.headersSent) res.destroy(conversionError);
-                else sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || conversionError.message);
+                if (res.headersSent) {
+                  if (!res.writableEnded) {
+                    writeSse(res, { event: 'error', data: { type: 'error', error: { code: 'upstream_response_not_representable', message: lease.policyReason || conversionError.message } } });
+                    res.end();
+                  }
+                } else sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || conversionError.message);
                 finishAttempt({ error: conversionError });
                 upstream.abort(conversionError);
               }
@@ -1314,7 +1326,7 @@ function createExplicitRoutingHandler(options = {}) {
             payload: parsedPayload,
             publicModel,
           });
-          if (!(entryProtocol === 'responses' && targetProtocol === 'responses')) canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
+          if (!(entryProtocol === targetProtocol && ['responses', 'messages'].includes(entryProtocol))) canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
         } catch (err) {
           if (err instanceof UnsupportedProtocolFeatureError || lease.policyObserved) {
             sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || err.message); return;
@@ -1327,7 +1339,8 @@ function createExplicitRoutingHandler(options = {}) {
         }
 
         const entries = entryProtocol === 'responses' && targetProtocol === 'responses'
-          ? nativeResponsesToSse(entryPayload, publicModel) : responseToEntrySse(entryProtocol, canonical, publicModel);
+          ? nativeResponsesToSse(entryPayload, publicModel) : entryProtocol === 'messages' && targetProtocol === 'messages'
+            ? nativeMessagesToSse(entryPayload, publicModel) : responseToEntrySse(entryProtocol, canonical, publicModel);
         applyStreamHeaders(res);
         committed = true;
         for (const entry of entries) {
@@ -1349,11 +1362,13 @@ function createExplicitRoutingHandler(options = {}) {
         let streamError = null;
         let sawDone = false;
         const nativeResponses = entryProtocol === 'responses' && targetProtocol === 'responses';
+        const nativeMessages = entryProtocol === 'messages' && targetProtocol === 'messages' ? createNativeMessagesAccumulator(publicModel) : null;
         let nativeFinalResponse = null;
         const acceptPayload = parsed => {
           observeUpstreamState(lease, parsed.data);
           if (nativeResponses && ['response.completed', 'response.incomplete'].includes(parsed.data.type || parsed.event) && parsed.data.response) nativeFinalResponse = parsed.data.response;
-          if (!nativeResponses) bridge.accept(parsed.event, parsed.data);
+          if (nativeMessages) nativeMessages.accept(parsed.event, parsed.data);
+          else if (!nativeResponses) bridge.accept(parsed.event, parsed.data);
         };
 
         await new Promise((resolve, reject) => {
@@ -1498,7 +1513,7 @@ function createExplicitRoutingHandler(options = {}) {
           return;
         }
 
-        if (nativeResponses ? !nativeFinalResponse : (!sawDone && !bridge.isComplete())) {
+        if (nativeResponses ? !nativeFinalResponse : nativeMessages ? !nativeMessages.isComplete() : (!sawDone && !bridge.isComplete())) {
           if (lease.policyObserved) {
             router.markFailure(lease, { statusCode: 400, errorCode: 'refusal', message: lease.policyReason || '上游已拒绝' });
             sendProtocolError(res, entryProtocol, 502, 'upstream_refusal_incomplete', lease.policyReason || '上游已拒绝请求，但未返回完整终态'); return;
@@ -1517,7 +1532,7 @@ function createExplicitRoutingHandler(options = {}) {
 
         const payload = nativeResponses
           ? transformResponseForEntry({ entryProtocol, targetProtocol, payload: nativeFinalResponse, publicModel })
-          : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel); })();
+          : nativeMessages ? nativeMessages.build() : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel); })();
         res.status(200).json(payload);
         router.markSuccess(lease);
         bindResponseContext(getContextStore(), entryProtocol, payload.id, lease, publicModel, requestAuthHash);

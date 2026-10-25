@@ -34,11 +34,54 @@ async function splitUnicode(res, wire, cut = false) {
     const needle = Buffer.from(text); let offset = -1;
     while ((offset = bytes.indexOf(needle, offset + 1)) >= 0) for (let i = 0; i <= needle.length; i++) cuts.add(offset + i);
   }
+  let frameEnd = -1;
+  while ((frameEnd = bytes.indexOf('\n\n', frameEnd + 1)) >= 0) cuts.add(frameEnd + 2);
   const positions = [...cuts].sort((a, b) => a - b);
   res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
   res.socket.setNoDelay(true);
   for (let i = 1; i < positions.length; i++) { if (res.destroyed) return; res.write(bytes.subarray(positions[i - 1], positions[i])); await pause(3); }
   if (cut) setTimeout(() => res.destroy(), 20); else res.end();
+}
+const MATRIX_CALLS = [
+  { id: 'call-alpha', name: 'alpha', arguments: '{"city":"中文🙂","n":1}' },
+  { id: 'call-beta', name: 'beta', arguments: '{"enabled":true,"n":2}' },
+];
+function matrixJson(protocol, model, id) {
+  // Supplier fixtures and expected client assertions are independent of the bridge.
+  if (protocol === 'chat_completions') return { id: `chatcmpl-${id}`, object: 'chat.completion', created: 12345, model,
+    choices: [{ index: 0, message: { role: 'assistant', content: TEXT, tool_calls: MATRIX_CALLS.map(call => ({ id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments } })) }, finish_reason: 'tool_calls' }], usage: usage.chat_completions };
+  if (protocol === 'responses') return { id: `resp_${id}`, object: 'response', created_at: 12345, model, status: 'completed', store: false,
+    output: [{ type: 'message', id: `msg_${id}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: TEXT, annotations: [] }] },
+      ...MATRIX_CALLS.map((call, i) => ({ type: 'function_call', id: `fc_${i}`, call_id: call.id, name: call.name, arguments: call.arguments, status: 'completed' }))], usage: usage.responses };
+  return { id: `msg_${id}`, type: 'message', role: 'assistant', model,
+    content: [{ type: 'text', text: TEXT }, ...MATRIX_CALLS.map(call => ({ type: 'tool_use', id: call.id, name: call.name, input: JSON.parse(call.arguments) }))],
+    stop_reason: 'tool_use', stop_sequence: null, usage: usage.messages };
+}
+function matrixStream(protocol, model, id) {
+  const payload = matrixJson(protocol, model, id);
+  if (protocol === 'chat_completions') return frame('', { id: payload.id, model, choices: [{ index: 0, delta: { role: 'assistant', content: TEXT }, finish_reason: null }] })
+    + frame('', { id: payload.id, model, choices: [{ index: 0, delta: { tool_calls: MATRIX_CALLS.map((call, index) => ({ index, id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments.slice(0, 4) } })) }, finish_reason: null }] })
+    + frame('', { id: payload.id, model, choices: [{ index: 0, delta: { tool_calls: [1, 0].map(index => ({ index, function: { arguments: MATRIX_CALLS[index].arguments.slice(4) } })) }, finish_reason: null }] })
+    + frame('', { id: payload.id, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: payload.usage }) + frame('', '[DONE]');
+  if (protocol === 'responses') return frame('response.created', { type: 'response.created', response: { ...payload, output: [], status: 'in_progress' } })
+    + frame('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { ...payload.output[0], content: [], status: 'in_progress' } })
+    + frame('response.content_part.added', { type: 'response.content_part.added', output_index: 0, content_index: 0, item_id: `msg_${id}`, part: { type: 'output_text', text: '', annotations: [] } })
+    + frame('response.output_text.delta', { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: `msg_${id}`, delta: TEXT })
+    + frame('response.output_text.done', { type: 'response.output_text.done', output_index: 0, content_index: 0, item_id: `msg_${id}`, text: TEXT })
+    + frame('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: payload.output[0] })
+    + MATRIX_CALLS.map((call, i) => frame('response.output_item.added', { type: 'response.output_item.added', output_index: i + 1, item: { ...payload.output[i + 1], arguments: '', status: 'in_progress' } })).join('')
+    + [1, 0].map(i => frame('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', output_index: i + 1, item_id: `fc_${i}`, delta: MATRIX_CALLS[i].arguments })).join('')
+    + MATRIX_CALLS.map((call, i) => frame('response.function_call_arguments.done', { type: 'response.function_call_arguments.done', output_index: i + 1, item_id: `fc_${i}`, arguments: call.arguments }) + frame('response.output_item.done', { type: 'response.output_item.done', output_index: i + 1, item: payload.output[i + 1] })).join('')
+    + frame('response.completed', { type: 'response.completed', response: payload });
+  return frame('message_start', { type: 'message_start', message: { ...payload, content: [], stop_reason: null, usage: { ...usage.messages, output_tokens: 0 } } })
+    + frame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+    + frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: TEXT } })
+    + frame('content_block_stop', { type: 'content_block_stop', index: 0 })
+    + MATRIX_CALLS.map((call, i) => frame('content_block_start', { type: 'content_block_start', index: i + 1, content_block: { type: 'tool_use', id: call.id, name: call.name, input: {} } })
+      + frame('content_block_delta', { type: 'content_block_delta', index: i + 1, delta: { type: 'input_json_delta', partial_json: call.arguments.slice(0, 4) } })
+      + frame('content_block_delta', { type: 'content_block_delta', index: i + 1, delta: { type: 'input_json_delta', partial_json: call.arguments.slice(4) } })
+      + frame('content_block_stop', { type: 'content_block_stop', index: i + 1 })).join('')
+    + frame('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 2 } }) + frame('message_stop', { type: 'message_stop' });
 }
 function responseJson(protocol, model, mode, id) {
   const text = mode === 'refusal' ? REFUSAL : TEXT;
@@ -77,7 +120,7 @@ function responseStream(protocol, model, mode, id) {
   const text = mode === 'refusal' ? REFUSAL : TEXT;
   if (protocol === 'chat_completions') return frame('', { id: payload.id, object: 'chat.completion.chunk', model, choices: [{ index: 0, delta: { role: 'assistant', ...(mode === 'refusal' ? { refusal: text } : { content: text }) }, finish_reason: null }] }) + (mode === 'cut' ? '' : frame('', { id: payload.id, object: 'chat.completion.chunk', model, choices: [{ index: 0, delta: {}, finish_reason: payload.choices[0].finish_reason }], usage: usage[protocol] }) + frame('', '[DONE]'));
   if (protocol === 'messages') return frame('message_start', { type: 'message_start', message: { ...payload, content: [], stop_reason: null, usage: { ...usage.messages, output_tokens: 0 } } }) + frame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }) + frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }) + frame('content_block_stop', { type: 'content_block_stop', index: 0 }) + frame('message_delta', { type: 'message_delta', delta: { stop_reason: payload.stop_reason, stop_sequence: null }, usage: { output_tokens: 2 } }) + frame('message_stop', { type: 'message_stop' });
-  return frame('response.created', { type: 'response.created', response: { id: payload.id, model, status: 'in_progress', output: [] } }) + frame('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: `msg_${id}`, type: 'message', role: 'assistant', status: 'in_progress', content: [] } }) + frame('response.content_part.added', { type: 'response.content_part.added', output_index: 0, content_index: 0, item_id: `msg_${id}`, part: { type: 'output_text', text: '', annotations: [] } }) + frame('response.output_text.delta', { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: `msg_${id}`, delta: text }) + frame('response.output_text.done', { type: 'response.output_text.done', output_index: 0, content_index: 0, item_id: `msg_${id}`, text }) + frame('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: payload.output[0] }) + frame(mode === 'truncated' ? 'response.incomplete' : 'response.completed', { type: mode === 'truncated' ? 'response.incomplete' : 'response.completed', response: payload });
+  return frame('response.created', { type: 'response.created', response: { id: payload.id, model, status: 'in_progress', output: [] } }) + frame('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { id: `msg_${id}`, type: 'message', role: 'assistant', status: 'in_progress', content: [] } }) + frame('response.content_part.added', { type: 'response.content_part.added', output_index: 0, content_index: 0, item_id: `msg_${id}`, part: mode === 'refusal' ? { type: 'refusal', refusal: '' } : { type: 'output_text', text: '', annotations: [] } }) + frame(mode === 'refusal' ? 'response.refusal.delta' : 'response.output_text.delta', { type: mode === 'refusal' ? 'response.refusal.delta' : 'response.output_text.delta', output_index: 0, content_index: 0, item_id: `msg_${id}`, delta: text }) + frame(mode === 'refusal' ? 'response.refusal.done' : 'response.output_text.done', { type: mode === 'refusal' ? 'response.refusal.done' : 'response.output_text.done', output_index: 0, content_index: 0, item_id: `msg_${id}`, ...(mode === 'refusal' ? { refusal: text } : { text }) }) + frame('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: payload.output[0] }) + frame(mode === 'truncated' ? 'response.incomplete' : 'response.completed', { type: mode === 'truncated' ? 'response.incomplete' : 'response.completed', response: payload });
 }
 async function admin(route, body) {
   const response = await fetch(`${base}/admin/api/${route}`, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -127,7 +170,7 @@ function assertToolHistory(protocol, body) {
     const assistant = body.messages.filter(x => x.role === 'assistant'); assert.equal(assistant.length, 1);
     assert.deepEqual(assistant[0].content.filter(x => x.type === 'tool_use').map(x => [x.id, x.name, x.input]), [['call_0', 'alpha', { n: 1 }], ['call_1', 'beta', { n: 2 }]]);
     assert.equal(assistant[0].content[0].text, 'plan');
-    const results = body.messages.find(x => x.content.some(part => part.type === 'tool_result'));
+    const results = body.messages.find(x => Array.isArray(x.content) && x.content.some(part => part.type === 'tool_result'));
     assert.deepEqual(results.content.filter(x => x.type === 'tool_result').map(x => [x.tool_use_id, typeof x.content === 'string' ? x.content : x.content[0].text]), [['call_1', 'result-beta'], ['call_0', 'result-alpha']]);
     assert.equal(body.tool_choice.disable_parallel_tool_use, true); assert.match(JSON.stringify(body.messages.at(-1)), /after-results/);
   }
@@ -145,6 +188,60 @@ test.before(async () => {
     if (!protocol) return json(res, 404, {});
     const mode = JSON.stringify(body).match(/MODE:(\w+)/)?.[1] || 'ok';
     calls.push({ protocol, path: req.url, body, mode }); serial++;
+    if (mode.startsWith('no_terminal_')) {
+      const wire = protocol === 'chat_completions'
+        ? frame('', { id: 'chatcmpl-cut', model: body.model, choices: [{ index: 0, delta: { role: 'assistant', content: TEXT }, finish_reason: null }] })
+        : protocol === 'responses' ? frame('response.created', { type: 'response.created', response: { id: 'resp_cut', model: body.model, status: 'in_progress', output: [] } })
+          + frame('response.output_text.delta', { type: 'response.output_text.delta', delta: TEXT })
+        : frame('message_start', { type: 'message_start', message: { id: 'msg_cut', model: body.model, content: [] } })
+          + frame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+          + frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: TEXT } });
+      return splitUnicode(res, wire, mode === 'no_terminal_abrupt');
+    }
+    if (mode === 'native_private_json' || mode === 'native_private_sse') {
+      const payload = { id: 'msg-native-private', type: 'message', role: 'assistant', model: body.model,
+        content: [{ type: 'thinking', thinking: '推理🙂', signature: 'signed-state' },
+          { type: 'redacted_thinking', data: 'redacted-state' }, { type: 'text', text: TEXT },
+          { type: 'tool_use', id: 'call-native', name: 'alpha', input: { n: 1, city: '中文🙂' } }],
+        stop_reason: 'tool_use', stop_sequence: null, usage: usage.messages, native_extension: { kept: true } };
+      if (mode === 'native_private_json') return json(res, 200, payload);
+      const wire = frame('message_start', { type: 'message_start', message: { ...payload, content: [], stop_reason: null, usage: { ...usage.messages, output_tokens: 0 } } })
+        + frame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } })
+        + frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '推理🙂' } })
+        + frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'signed-state' } })
+        + frame('content_block_stop', { type: 'content_block_stop', index: 0 })
+        + frame('content_block_start', { type: 'content_block_start', index: 1, content_block: payload.content[1] })
+        + frame('content_block_stop', { type: 'content_block_stop', index: 1 })
+        + frame('content_block_start', { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } })
+        + frame('content_block_delta', { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: TEXT } })
+        + frame('content_block_stop', { type: 'content_block_stop', index: 2 })
+        + frame('content_block_start', { type: 'content_block_start', index: 3, content_block: { type: 'tool_use', id: 'call-native', name: 'alpha', input: {} } })
+        + frame('content_block_delta', { type: 'content_block_delta', index: 3, delta: { type: 'input_json_delta', partial_json: '{"n":1,' } })
+        + frame('content_block_delta', { type: 'content_block_delta', index: 3, delta: { type: 'input_json_delta', partial_json: '"city":"中文🙂"}' } })
+        + frame('content_block_stop', { type: 'content_block_stop', index: 3 })
+        + frame('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 2 } })
+        + frame('message_stop', { type: 'message_stop' });
+      return splitUnicode(res, wire);
+    }
+    if (mode === 'private' || mode === 'private_late') {
+      const payload = responseJson(protocol, body.model, 'ok', serial);
+      const block = protocol === 'responses' ? { id: 'rs-private', type: 'reasoning', encrypted_content: 'encrypted-state', summary: [] }
+        : { type: 'thinking', thinking: 'private reasoning', signature: 'signed-state' };
+      if (protocol === 'responses') payload.output.unshift(block); else payload.content.unshift(block);
+      if (!body.stream) return json(res, 200, payload);
+      const privateEvents = protocol === 'responses'
+        ? frame('response.created', { type: 'response.created', response: { ...payload, output: [], status: 'in_progress' } })
+          + frame('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: block })
+          + frame('response.completed', { type: 'response.completed', response: payload })
+        : frame('message_start', { type: 'message_start', message: { ...payload, content: [], stop_reason: null } })
+          + (mode === 'private_late' ? frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: TEXT } }) : '')
+          + frame('content_block_start', { type: 'content_block_start', index: 1, content_block: block })
+          + frame('content_block_stop', { type: 'content_block_stop', index: 1 })
+          + frame('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: usage.messages }) + frame('message_stop', { type: 'message_stop' });
+      return splitUnicode(res, privateEvents);
+    }
+    if (mode === 'matrix_json') return json(res, 200, matrixJson(protocol, body.model, serial));
+    if (mode === 'matrix_sse') return splitUnicode(res, matrixStream(protocol, body.model, serial));
     if (mode === 'filter403') return json(res, 403, { error: { code: 'content_policy_violation', message: 'provider refused this content' } });
     if (mode === 'filter200') return json(res, 200, { error: { code: 'content_policy_violation', message: 'provider refused this content' } });
     if (mode === 'poolfail' && body.model === 'vendor/pool-a') return json(res, 429, { error: { code: 'rate_limit_exceeded', message: 'temporarily rate limited' } });
@@ -164,6 +261,11 @@ test.before(async () => {
   }
   configs.push({ id: 'pool-eof', type: 'apikey', preset: 'openrouter-free', base_url: root + '/or', credential_ref: 'or-source', pool: { max_attempts: 2 }, models: [{ id: 'free', protocols: ['chat_completions'] }] });
   eofRoutes.push({ id: 'pool-eof-route', entry_protocols: PROTOCOLS, targets: [{ id: 'eof-pool', config_id: 'pool-eof', model: 'free', protocol: 'chat_completions' }, { id: 'backup', config_id: 'backup', model: 'backup', protocol: 'chat_completions' }] });
+  for (const protocol of PROTOCOLS) for (const ending of ['clean', 'abrupt']) {
+    const id = `cut-${protocol}-${ending}`;
+    configs.push({ id, type: 'apikey', preset: 'custom', base_url: root + '/' + id, apikey: 'cut-upstream-fixture', models: [{ id, protocols: [protocol] }] });
+    eofRoutes.push({ id, entry_protocols: [protocol], targets: [{ id: 'cut', config_id: id, model: id, protocol }, { id: 'backup', config_id: 'backup', model: 'backup', protocol: 'chat_completions' }] });
+  }
   const backup = { id: 'backup', config_id: 'backup', model: 'backup', protocol: 'chat_completions' };
   const config = { auth_token: ADMIN, apikeys: [ENTRY], port, configs, routing: { max_attempts: 2, models: [...eofRoutes, ...PROTOCOLS.flatMap(protocol => [{ id: nativeRoute(protocol), entry_protocols: PROTOCOLS, targets: [{ id: 'primary', config_id: protocol, model: 'backend-' + protocol, protocol }, backup] }, { id: 'only-' + protocol, entry_protocols: PROTOCOLS, targets: [{ id: 'primary', config_id: protocol, model: 'backend-' + protocol, protocol }] }]), { id: 'pool-route', entry_protocols: PROTOCOLS, targets: [{ id: 'pool-target', config_id: 'pool', model: 'free', protocol: 'chat_completions' }, backup] }] } };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config)); base = `http://127.0.0.1:${port}`;
@@ -409,3 +511,231 @@ test('native Responses JSON synthesized as SSE preserves the incomplete final pa
   assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).body.store, true);
   await assertServiceAlive();
 });
+
+
+// Nine entry/backend pairs x four wire paths. Each case observes the real HTTP
+// body/headers, and compares client semantics to literal independent expectations.
+function assertMatrixUsage(entryProtocol, backendProtocol, value) {
+  assert.ok(value, 'usage must be present');
+  if (entryProtocol === backendProtocol) return assert.deepEqual(value, usage[backendProtocol]);
+  if (entryProtocol === 'messages') {
+    assert.equal(value.input_tokens, 3); assert.equal(value.output_tokens, 2);
+    assert.equal(value.cache_read_input_tokens, 4); assert.equal(value.cache_creation_input_tokens, 3);
+  } else {
+    const inputKey = entryProtocol === 'responses' ? 'input_tokens' : 'prompt_tokens';
+    const outputKey = entryProtocol === 'responses' ? 'output_tokens' : 'completion_tokens';
+    assert.equal(value[inputKey], 10); assert.equal(value[outputKey], 2); assert.equal(value.total_tokens, 12);
+    assert.deepEqual(value[inputKey === 'input_tokens' ? 'input_tokens_details' : 'prompt_tokens_details'], { cached_tokens: 4, cache_write_tokens: 3 });
+  }
+}
+function assertMatrixJson(protocol, value, route, backend) {
+  assert.equal(value.model, route); assert.ok(value.id);
+  if (protocol === 'chat_completions') {
+    assert.equal(value.choices.length, 1); assert.equal(value.choices[0].message.role, 'assistant');
+    assert.equal(value.choices[0].message.content, TEXT); assert.equal(value.choices[0].finish_reason, 'tool_calls');
+    assert.deepEqual(value.choices[0].message.tool_calls.map(call => [call.id, call.function.name, call.function.arguments]), [
+      ['call-alpha', 'alpha', '{"city":"中文🙂","n":1}'], ['call-beta', 'beta', '{"enabled":true,"n":2}'],
+    ]);
+  } else if (protocol === 'responses') {
+    assert.equal(value.status, 'completed'); assert.deepEqual(value.output.map(item => item.type), ['message', 'function_call', 'function_call']);
+    assert.deepEqual(value.output[0].content, [{ type: 'output_text', text: TEXT, annotations: [] }]);
+    assert.deepEqual(value.output.slice(1).map(call => [call.call_id, call.name, call.arguments]), [
+      ['call-alpha', 'alpha', '{"city":"中文🙂","n":1}'], ['call-beta', 'beta', '{"enabled":true,"n":2}'],
+    ]);
+  } else {
+    assert.equal(value.role, 'assistant'); assert.equal(value.stop_reason, 'tool_use');
+    if (backend === 'messages') assert.equal(value.stop_sequence, null);
+    else assert.equal(Object.hasOwn(value, 'stop_sequence'), false, 'OpenAI did not report a matched stop sequence');
+    assert.deepEqual(value.content, [{ type: 'text', text: TEXT },
+      { type: 'tool_use', id: 'call-alpha', name: 'alpha', input: { city: '中文🙂', n: 1 } },
+      { type: 'tool_use', id: 'call-beta', name: 'beta', input: { enabled: true, n: 2 } }]);
+  }
+  assertMatrixUsage(protocol, backend, value.usage);
+}
+function assertMatrixSse(protocol, wire, route, backend) {
+  const parsed = events(wire); assert.ok(parsed.length); assert.doesNotMatch(wire, /�/);
+  const ids = parsed.map(value => value.response?.id || value.message?.id || value.id).filter(Boolean);
+  assert.equal(new Set(ids).size, 1, 'one response ID throughout the stream');
+  assert.ok(ids.length); assert.ok(!parsed.some(value => value.error));
+  let text = '', reportedUsage;
+  if (protocol === 'chat_completions') {
+    assert.equal(parsed[0].choices[0].delta.role, 'assistant');
+    const callsByIndex = new Map();
+    for (const value of parsed) {
+      assert.equal(value.model, route);
+      for (const choice of value.choices || []) {
+        text += choice.delta?.content || '';
+        for (const call of choice.delta?.tool_calls || []) {
+          const previous = callsByIndex.get(call.index) || { id: '', name: '', arguments: '' };
+          previous.id += call.id || ''; previous.name += call.function?.name || ''; previous.arguments += call.function?.arguments || '';
+          callsByIndex.set(call.index, previous);
+        }
+      }
+      if (value.usage) reportedUsage = value.usage;
+    }
+    assert.deepEqual([...callsByIndex.values()], [
+      { id: 'call-alpha', name: 'alpha', arguments: '{"city":"中文🙂","n":1}' },
+      { id: 'call-beta', name: 'beta', arguments: '{"enabled":true,"n":2}' },
+    ]);
+    assert.deepEqual(parsed.flatMap(value => value.choices || []).map(choice => choice.finish_reason).filter(Boolean), ['tool_calls']);
+    assert.match(wire, /data: \[DONE\]\n\n$/);
+  } else if (protocol === 'responses') {
+    assert.equal(parsed[0].type, 'response.created'); assert.equal(parsed.at(-1).type, 'response.completed');
+    text = parsed.filter(value => value.type === 'response.output_text.delta').map(value => value.delta).join('');
+    for (const callId of ['call-alpha', 'call-beta']) {
+      const start = parsed.findIndex(value => value.type === 'response.output_item.added' && value.item?.call_id === callId);
+      assert.ok(start >= 0); const itemId = parsed[start].item.id;
+      const delta = parsed.findIndex(value => value.type === 'response.function_call_arguments.delta' && value.item_id === itemId);
+      const done = parsed.findIndex(value => value.type === 'response.output_item.done' && value.item?.id === itemId);
+      assert.equal(parsed.filter(value => value.type === 'response.output_item.done' && value.item?.id === itemId).length, 1, callId + ' ends exactly once');
+      assert.ok(start < delta && delta < done && done < parsed.length - 1, callId + ' event order');
+    }
+    assertMatrixJson(protocol, parsed.at(-1).response, route, backend);
+    reportedUsage = parsed.at(-1).response.usage;
+  } else {
+    assert.equal(parsed[0].type, 'message_start'); assert.equal(parsed[0].message.model, route); assert.equal(parsed.at(-1).type, 'message_stop');
+    const toolBlocks = [];
+    for (const [position, value] of parsed.entries()) {
+      if (value.type === 'content_block_delta' && value.delta.type === 'text_delta') text += value.delta.text;
+      if (value.type === 'content_block_start' && value.content_block.type === 'tool_use') {
+        const deltas = parsed.filter(x => x.type === 'content_block_delta' && x.index === value.index);
+        const stop = parsed.findIndex(x => x.type === 'content_block_stop' && x.index === value.index);
+        assert.equal(parsed.filter(x => x.type === 'content_block_stop' && x.index === value.index).length, 1, 'each tool block ends exactly once');
+        assert.ok(stop > position && stop < parsed.length - 2);
+        assert.ok(deltas.every(x => parsed.indexOf(x) > position && parsed.indexOf(x) < stop));
+        toolBlocks.push([value.content_block.id, value.content_block.name, JSON.parse(deltas.map(x => x.delta.partial_json).join(''))]);
+      }
+    }
+    assert.deepEqual(toolBlocks, [['call-alpha', 'alpha', { city: '中文🙂', n: 1 }], ['call-beta', 'beta', { enabled: true, n: 2 }]]);
+    assert.equal(parsed.at(-2).type, 'message_delta'); assert.equal(parsed.at(-2).delta.stop_reason, 'tool_use');
+    reportedUsage = { ...parsed[0].message.usage, ...parsed.at(-2).usage };
+  }
+  assert.equal(text, TEXT); assertMatrixUsage(protocol, backend, reportedUsage);
+}
+for (const entryProtocol of PROTOCOLS) for (const backendProtocol of PROTOCOLS) {
+  for (const upstreamSse of [false, true]) for (const clientSse of [false, true]) {
+    test(`wire matrix ${entryProtocol} <- ${backendProtocol}: ${upstreamSse ? 'SSE' : 'JSON'} -> ${clientSse ? 'SSE' : 'JSON'}`, async () => {
+      const route = nativeRoute(backendProtocol), mode = upstreamSse ? 'matrix_sse' : 'matrix_json';
+      const body = toolHistory(entryProtocol, route); body.stream = clientSse;
+      const messages = entryProtocol === 'responses' ? body.input : body.messages;
+      messages[0].content = `MODE:${mode}`;
+      const before = calls.length; const response = await entry(entryProtocol, body);
+      const wire = await response.text(); assert.equal(response.status, 200, wire);
+      assert.match(response.headers.get('content-type'), clientSse ? /text\/event-stream/ : /application\/json/);
+      if (clientSse) { assert.equal(response.headers.get('cache-control'), 'no-cache'); assert.equal(response.headers.get('x-accel-buffering'), 'no'); }
+      assert.equal(calls.length, before + 1, 'no hidden fallback');
+      assert.equal(calls.at(-1).protocol, backendProtocol); assert.equal(calls.at(-1).body.model, 'backend-' + backendProtocol);
+      assertToolHistory(backendProtocol, calls.at(-1).body);
+      assert.equal(calls.at(-1).body.stream, clientSse);
+      if (clientSse) assertMatrixSse(entryProtocol, wire, route, backendProtocol);
+      else assertMatrixJson(entryProtocol, JSON.parse(wire), route, backendProtocol);
+    });
+  }
+}
+
+
+for (const backend of ['messages', 'responses']) {
+  test(`opaque ${backend} state preserves native wires and rejects cross conversion without fallback or cooldown`, async () => {
+    for (const stream of [false, true]) {
+      const native = input(backend, nativeRoute(backend), 'private', stream);
+      const before = calls.length; const response = await entry(backend, native); const wire = await response.text();
+      assert.equal(response.status, 200); assert.equal(calls.length, before + 1);
+      assert.match(wire, backend === 'messages' ? /signed-state/ : /encrypted-state/);
+      for (const client of PROTOCOLS.filter(value => value !== backend)) {
+        const body = input(client, nativeRoute(backend), 'private', stream); delete body.store;
+        const before = calls.length; const rejected = await entry(client, body); const payload = await rejected.json();
+        assert.equal(rejected.status, 502, JSON.stringify(payload)); assert.equal(calls.length, before + 1, 'no retry to bypass unsupported state');
+        assert.equal(payload.error.code || payload.error.type, 'upstream_response_not_representable');
+        assert.match(payload.error.message, /reasoning|thinking|signature|推理|思考|内容块/);
+        assert.equal(calls.at(-1).protocol, backend);
+      }
+      const healthy = await entry(backend, native); assert.equal(healthy.status, 200, 'gateway conversion rejection must not cool native support'); await healthy.text();
+      assert.equal(calls.at(-1).protocol, backend);
+    }
+  });
+}
+test('unsupported private state discovered after text emits an error and never replays or completes', async () => {
+  const before = calls.length;
+  const response = await entry('chat_completions', input('chat_completions', nativeRoute('messages'), 'private_late', true));
+  assert.equal(response.status, 200); const received = await streamText(response);
+  assert.match(received.text, /中文/); assert.match(received.text, /thinking|signature|内容块/);
+  assert.ok(!events(received.text).some(value => value.choices?.some(choice => choice.finish_reason === 'stop')));
+  assert.equal(calls.length, before + 1); await assertServiceAlive();
+});
+
+test('native Messages forced SSE aggregates private blocks, raw usage and extra message fields into JSON', async () => {
+  const before = calls.length;
+  const response = await entry('messages', input('messages', nativeRoute('messages'), 'native_private_sse', false));
+  const payload = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(payload)); assert.equal(calls.length, before + 1);
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(payload, { id: 'msg-native-private', type: 'message', role: 'assistant', model: nativeRoute('messages'),
+    content: [{ type: 'thinking', thinking: '推理🙂', signature: 'signed-state' },
+      { type: 'redacted_thinking', data: 'redacted-state' }, { type: 'text', text: TEXT },
+      { type: 'tool_use', id: 'call-native', name: 'alpha', input: { n: 1, city: '中文🙂' } }],
+    stop_reason: 'tool_use', stop_sequence: null, usage: usage.messages, native_extension: { kept: true } });
+});
+
+test('native Messages forced JSON synthesizes private SSE blocks without dropping signatures or raw usage', async () => {
+  const before = calls.length;
+  const response = await entry('messages', input('messages', nativeRoute('messages'), 'native_private_json', true));
+  const wire = await response.text();
+  assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+  assert.match(response.headers.get('content-type'), /text\/event-stream/);
+  const parsed = events(wire);
+  assert.equal(parsed[0].type, 'message_start'); assert.equal(parsed[0].message.id, 'msg-native-private');
+  assert.equal(parsed[0].message.model, nativeRoute('messages')); assert.deepEqual(parsed[0].message.native_extension, { kept: true });
+  assert.deepEqual(parsed.filter(value => value.type === 'content_block_start').map(value => value.content_block.type), ['thinking', 'redacted_thinking', 'text', 'tool_use']);
+  assert.equal(parsed.filter(value => value.delta?.type === 'thinking_delta').map(value => value.delta.thinking).join(''), '推理🙂');
+  assert.equal(parsed.filter(value => value.delta?.type === 'signature_delta').map(value => value.delta.signature).join(''), 'signed-state');
+  assert.deepEqual(parsed.find(value => value.content_block?.type === 'redacted_thinking').content_block, { type: 'redacted_thinking', data: 'redacted-state' });
+  assert.equal(parsed.filter(value => value.delta?.type === 'text_delta').map(value => value.delta.text).join(''), TEXT);
+  assert.deepEqual(JSON.parse(parsed.filter(value => value.delta?.type === 'input_json_delta').map(value => value.delta.partial_json).join('')), { n: 1, city: '中文🙂' });
+  for (const index of [0, 1, 2, 3]) assert.equal(parsed.filter(value => value.type === 'content_block_stop' && value.index === index).length, 1);
+  assert.equal(parsed.at(-2).type, 'message_delta'); assert.deepEqual(parsed.at(-2).delta, { stop_reason: 'tool_use', stop_sequence: null });
+  assert.deepEqual({ ...parsed[0].message.usage, ...parsed.at(-2).usage }, usage.messages);
+  assert.equal(parsed.at(-1).type, 'message_stop'); assert.ok(!parsed.some(value => value.error));
+});
+
+for (const client of PROTOCOLS) for (const backend of PROTOCOLS) {
+  if (client === backend) continue;
+  test(`terminal matrix ${client} <- ${backend}: refusal and truncation JSON/SSE keep meaning and one attempt`, async () => {
+    for (const mode of ['refusal', 'truncated']) for (const stream of [false, true]) {
+      const body = input(client, nativeRoute(backend), mode, stream); delete body.store;
+      const before = calls.length; const response = await entry(client, body); const wire = await response.text();
+      assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+      const parsed = stream ? events(wire) : null;
+      const payload = !stream ? JSON.parse(wire) : client === 'responses' ? parsed.at(-1).response : null;
+      if (client === 'responses') {
+        assert.equal(payload.status, mode === 'refusal' ? 'completed' : 'incomplete');
+        if (mode === 'refusal') assert.ok(payload.output.some(item => item.content?.some(part => part.type === 'refusal' && part.refusal === REFUSAL)));
+        else { assert.deepEqual(payload.incomplete_details, { reason: 'max_output_tokens' }); assert.equal(payload.output[0].content[0].text, TEXT); }
+      } else if (client === 'chat_completions') {
+        const choices = stream ? parsed.flatMap(x => x.choices || []) : payload.choices;
+        assert.deepEqual(choices.map(x => x.finish_reason).filter(Boolean), [mode === 'refusal' ? 'content_filter' : 'length']);
+        const refusal = stream ? choices.map(x => x.delta?.refusal || '').join('') : choices[0].message.refusal;
+        if (mode === 'refusal') assert.equal(refusal, REFUSAL);
+        else assert.equal(stream ? choices.map(x => x.delta?.content || '').join('') : choices[0].message.content, TEXT);
+      } else {
+        const terminal = stream ? parsed.find(x => x.type === 'message_delta').delta : payload;
+        assert.equal(terminal.stop_reason, mode === 'refusal' ? 'refusal' : 'max_tokens');
+        const text = stream ? parsed.filter(x => x.type === 'content_block_delta' && x.delta.type === 'text_delta').map(x => x.delta.text).join('') : payload.content.map(x => x.text).join('');
+        assert.equal(text, mode === 'refusal' ? REFUSAL : TEXT);
+      }
+    }
+  });
+}
+
+
+for (const protocol of PROTOCOLS) for (const ending of ['clean', 'abrupt']) {
+  test(`native ${protocol} missing terminal (${ending}) preserves text and explicitly fails without replay`, async () => {
+    const before = calls.length;
+    const response = await entry(protocol, input(protocol, `cut-${protocol}-${ending}`, `no_terminal_${ending}`, true));
+    assert.equal(response.status, 200); const received = await streamText(response);
+    assert.match(received.text, /中文🙂𠮷/); assert.doesNotMatch(received.text, /�/);
+    assert.ok(received.interrupted || events(received.text).some(value => value.error?.code === 'upstream_stream_error' || value.error?.code === 'incomplete_upstream_stream'), 'must signal error or transport interruption, not a clean empty-success EOF');
+    assert.ok(!events(received.text).some(value => value.type === 'response.completed' || value.type === 'message_stop' || value.choices?.some(choice => choice.finish_reason)));
+    assert.doesNotMatch(received.text, /data: \[DONE\]/); assert.equal(calls.length, before + 1);
+    assert.equal(calls.at(-1).protocol, protocol); await assertServiceAlive();
+  });
+}

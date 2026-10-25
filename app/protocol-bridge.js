@@ -1164,6 +1164,23 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
   return result;
 }
 
+// Opaque reasoning/signature state cannot be moved into another protocol.
+// Native JSON and native SSE bypass canonical conversion and retain it verbatim.
+function assertResponseContentSupported(protocol, payload) {
+  if (protocol === 'messages') {
+    for (const block of payload?.content || []) {
+      if (block && !['text', 'tool_use'].includes(block.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Messages 内容块 ${block.type}（thinking/signature 等私有状态不能跨协议迁移）`);
+    }
+  } else if (protocol === 'responses') {
+    for (const item of payload?.output || []) {
+      if (item && !['message', 'function_call'].includes(item.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses 内容项 ${item.type}（reasoning/encrypted_content 等私有状态不能跨协议迁移）`);
+      if (item?.type === 'message') for (const block of item.content || []) {
+        if (block && !['output_text', 'refusal'].includes(block.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses 内容块 ${block.type}`);
+      }
+    }
+  }
+}
+
 function parseChatResponse(payload) {
   const choice = payload && Array.isArray(payload.choices) ? payload.choices[0] : null;
   if (!choice) {
@@ -1196,6 +1213,7 @@ function parseChatResponse(payload) {
 }
 
 function parseMessagesResponse(payload) {
+  assertResponseContentSupported('messages', payload);
   if (payload?.error) throw new UnsupportedProtocolFeatureError(payload.error.message || '上游 Messages 响应失败');
   if (payload?.stop_reason === 'pause_turn') throw new UnsupportedProtocolFeatureError('Messages pause_turn 不能转换成已完成的跨协议响应');
   const parts = [];
@@ -1221,6 +1239,7 @@ function parseMessagesResponse(payload) {
 }
 
 function parseResponsesResponse(payload) {
+  assertResponseContentSupported('responses', payload);
   if (payload?.error || ['failed', 'cancelled'].includes(payload?.status)) throw new UnsupportedProtocolFeatureError(payload.error?.message || `上游 Responses 响应 ${payload.status}`);
   if (['queued', 'in_progress'].includes(payload?.status)) throw new UnsupportedProtocolFeatureError(`上游 Responses 响应尚未完成: ${payload.status}`);
   if (payload?.status === 'incomplete' && !['max_output_tokens', 'content_filter'].includes(payload.incomplete_details?.reason)) throw new UnsupportedProtocolFeatureError(`无法准确映射 Responses incomplete 原因: ${payload.incomplete_details?.reason || 'unknown'}`);
@@ -1511,6 +1530,86 @@ function createSameProtocolSseRewriter(protocol, publicModel) {
   };
 }
 
+// Native Messages must keep signed thinking and unknown complete block fields;
+// the cross-protocol canonical representation intentionally cannot carry them.
+function nativeMessagesToSse(payload, publicModel) {
+  const message = rewriteModelInPayload('messages', cloneJson(payload), publicModel);
+  if (!message || message.type !== 'message' || !Array.isArray(message.content) || !message.stop_reason) throw new UnsupportedProtocolFeatureError('原生 Messages JSON 缺少完整终态，不能合成为成功的流');
+  const start = { ...message, content: [], stop_reason: null, stop_sequence: null };
+  if (message.usage) start.usage = { ...message.usage, ...(Number.isFinite(message.usage.output_tokens) ? { output_tokens: 0 } : {}) };
+  const events = [{ event: 'message_start', data: { type: 'message_start', message: start } }];
+  for (const [index, block] of message.content.entries()) {
+    if (!isPlainObject(block) || typeof block.type !== 'string') throw new UnsupportedProtocolFeatureError('原生 Messages 内容块无效');
+    const initial = cloneJson(block), deltas = [];
+    if (block.type === 'text') {
+      initial.text = '';
+      deltas.push({ type: 'text_delta', text: block.text });
+    } else if (block.type === 'thinking') {
+      initial.thinking = ''; delete initial.signature;
+      deltas.push({ type: 'thinking_delta', thinking: block.thinking });
+      if (Object.prototype.hasOwnProperty.call(block, 'signature')) deltas.push({ type: 'signature_delta', signature: block.signature });
+    } else if (['tool_use', 'server_tool_use'].includes(block.type)) {
+      initial.input = {};
+      deltas.push({ type: 'input_json_delta', partial_json: JSON.stringify(block.input) });
+    }
+    events.push({ event: 'content_block_start', data: { type: 'content_block_start', index, content_block: initial } });
+    for (const delta of deltas) events.push({ event: 'content_block_delta', data: { type: 'content_block_delta', index, delta } });
+    events.push({ event: 'content_block_stop', data: { type: 'content_block_stop', index } });
+  }
+  events.push({ event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: message.stop_reason, ...(Object.prototype.hasOwnProperty.call(message, 'stop_sequence') ? { stop_sequence: message.stop_sequence } : {}) }, ...(message.usage ? { usage: message.usage } : {}) } });
+  events.push({ event: 'message_stop', data: { type: 'message_stop' } });
+  return events;
+}
+
+function createNativeMessagesAccumulator(publicModel) {
+  let message = null, complete = false;
+  const blocks = new Map(), open = new Set(), argumentsByIndex = new Map();
+  return {
+    accept(eventName, payload) {
+      const type = payload.type || eventName;
+      if (complete) throw new UnsupportedProtocolFeatureError('原生 Messages 终态后仍有内容事件');
+      if (type === 'ping') return;
+      if (type === 'message_start') {
+        if (message || !isPlainObject(payload.message) || !Array.isArray(payload.message.content) || payload.message.content.length) throw new UnsupportedProtocolFeatureError('原生 Messages message_start 结构或顺序无效');
+        message = cloneJson(payload.message); return;
+      }
+      if (!message) throw new UnsupportedProtocolFeatureError('原生 Messages 流缺少 message_start');
+      if (type === 'content_block_start') {
+        if (!Number.isInteger(payload.index) || payload.index < 0 || blocks.has(payload.index) || !isPlainObject(payload.content_block)) throw new UnsupportedProtocolFeatureError('原生 Messages 内容块索引或起始结构无效');
+        blocks.set(payload.index, cloneJson(payload.content_block)); open.add(payload.index); return;
+      }
+      if (type === 'content_block_delta') {
+        const block = blocks.get(payload.index), delta = payload.delta || {};
+        if (!block || !open.has(payload.index)) throw new UnsupportedProtocolFeatureError('原生 Messages delta 没有对应的活动内容块');
+        const key = { text_delta: 'text', thinking_delta: 'thinking', signature_delta: 'signature' }[delta.type];
+        if (key && typeof delta[key] === 'string') block[key] = (block[key] || '') + delta[key];
+        else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') argumentsByIndex.set(payload.index, (argumentsByIndex.get(payload.index) || '') + delta.partial_json);
+        else if (delta.type === 'citations_delta' && isPlainObject(delta.citation)) (block.citations || (block.citations = [])).push(cloneJson(delta.citation));
+        else throw new UnsupportedProtocolFeatureError(`无法保真聚合原生 Messages delta ${delta.type}`);
+        return;
+      }
+      if (type === 'content_block_stop') {
+        if (!open.delete(payload.index)) throw new UnsupportedProtocolFeatureError('原生 Messages 内容块重复或无对应结束事件');
+        if (argumentsByIndex.has(payload.index)) blocks.get(payload.index).input = responseToolInput({ arguments: argumentsByIndex.get(payload.index) });
+        return;
+      }
+      if (type === 'message_delta') {
+        Object.assign(message, cloneJson(payload.delta || {}));
+        if (payload.usage) message.usage = { ...(message.usage || {}), ...cloneJson(payload.usage) };
+        return;
+      }
+      if (type === 'message_stop') {
+        if (open.size || !message.stop_reason) throw new UnsupportedProtocolFeatureError('原生 Messages 流缺少内容块结束或有效 stop_reason');
+        message.content = [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => block);
+        complete = true; return;
+      }
+      throw new UnsupportedProtocolFeatureError(`无法保真聚合原生 Messages 事件 ${type}`);
+    },
+    isComplete() { return complete; },
+    build() { return rewriteModelInPayload('messages', cloneJson(message), publicModel); },
+  };
+}
+
 function canonicalEventStart(accumulator, payload, fallbackModel = '') {
   if (accumulator.id) {
     return [];
@@ -1723,6 +1822,9 @@ function createTargetEventParser(targetProtocol, publicModel) {
     if (targetProtocol === 'responses') {
       const events = [];
       const type = payload.type || eventName;
+      if (payload.response) assertResponseContentSupported('responses', payload.response);
+      if (payload.item) assertResponseContentSupported('responses', { output: [payload.item] });
+      if (/^response\.reasoning/.test(type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses reasoning 事件 ${type}`);
       if (type === 'response.created' || type === 'response.in_progress') {
         events.push(...canonicalEventStart(accumulator.accumulator, payload.response || payload));
       } else if (type === 'response.output_item.added') {
@@ -1826,6 +1928,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
         events.push(...canonicalEventStart(accumulator.accumulator, {}));
       }
       const block = payload.content_block || {};
+      assertResponseContentSupported('messages', { content: [block] });
       if (block.type === 'tool_use') {
         events.push({
           type: 'tool_start',
@@ -1838,6 +1941,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
       }
     } else if (type === 'content_block_delta') {
       const delta = payload.delta || {};
+      if (['thinking_delta', 'signature_delta'].includes(delta.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Messages thinking/signature 事件 ${delta.type}`);
       if (delta.type === 'text_delta') {
         events.push({ type: 'text_delta', text: delta.text || '' });
       } else if (delta.type === 'input_json_delta') {
@@ -2222,9 +2326,10 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
 
   function handleToolEnd(event) {
     const tool = state.tools.get(event.index);
-    if (!tool) {
+    if (!tool || tool.ended) {
       return [];
     }
+    tool.ended = true;
     const events = [];
     if (entryProtocol === 'messages') {
       const blockIndex = state.toolBlockIndexes.get(event.index);
@@ -2274,6 +2379,9 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
     if (Object.prototype.hasOwnProperty.call(event, 'stopSequence')) state.stopSequence = event.stopSequence;
     state.stopReason = event.stopReason === 'content_filter' ? 'content_filter' : state.refusal ? 'refusal' : event.stopReason || state.stopReason;
     const events = [...terminalRefusal, ...ensureStarted()];
+    // Chat has no per-call end event; close each still-open tool exactly once
+    // before the response terminal (also covers Responses completion-only tools).
+    for (const index of state.toolOrder) events.push(...handleToolEnd({ index }));
     const text = state.text;
 
     if (entryProtocol === 'chat_completions') {
@@ -2548,6 +2656,8 @@ module.exports = {
   rewriteModelInPayload,
   createSseEventParser,
   createSameProtocolSseRewriter,
+  nativeMessagesToSse,
+  createNativeMessagesAccumulator,
   createProtocolStreamBridge,
   responseToEntrySse,
   collectCanonicalEvents,

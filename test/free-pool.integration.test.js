@@ -59,6 +59,7 @@ test.before(async () => {
     { id: 'or-pool', type: 'apikey', preset: 'openrouter-free', base_url: upstream + '/or', credential_ref: 'or-source', models: [{ id: 'free', protocols: ['chat_completions'] }] },
   ], routing: { max_attempts: 3, models: [
     { id: 'any-client-id', entry_protocols: ['chat_completions', 'responses', 'messages'], targets: [paidRoute, goRoute, orRoute] },
+    { id: 'auto', entry_protocols: ['chat_completions', 'responses', 'messages'], targets: [paidRoute, goRoute, orRoute] },
     { id: 'go-only', max_attempts: 1, entry_protocols: ['chat_completions'], targets: [goRoute] },
     { id: 'or-only', entry_protocols: ['chat_completions'], targets: [orRoute] },
   ] } };
@@ -107,10 +108,17 @@ test('automatic catalog changes preserve fixed routing and failed sync retains l
 test('paid exhaustion and source Go exhaustion allow free pool; recovery returns to higher priority', async () => {
   quota = 100;
   for (const id of ['paid', 'go-source']) await admin(`upstreams/${id}/quota-refresh`, {});
-  let response = await call(); assert.equal(response.status, 200); assert.equal((await response.json()).choices[0].message.content, 'from-beam');
-  assert.equal(calls.at(-1).auth, 'Bearer go-key-fixture');
+  for (const model of ['any-client-id', 'auto']) {
+    const before = calls.length; const response = await call({ model });
+    assert.equal(response.status, 200); assert.equal((await response.json()).choices[0].message.content, 'from-beam');
+    assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).auth, 'Bearer go-key-fixture');
+  }
   quota = 10; await admin('upstreams/paid/quota-refresh', {});
-  response = await call(); assert.equal((await response.json()).choices[0].message.content, 'from-paid');
+  for (const model of ['any-client-id', 'auto']) {
+    const before = calls.length; const response = await call({ model });
+    assert.equal(response.status, 200); assert.equal((await response.json()).choices[0].message.content, 'from-paid');
+    assert.equal(calls.length, before + 1);
+  }
 });
 
 test('capability matching skips text-only pool for images and enforces concrete zero-price requests', async () => {

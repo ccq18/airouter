@@ -245,3 +245,77 @@ test('native Messages aggregation retains the actual matched stop sequence witho
   const openai = transform('chat_completions', 'messages', chat('chatcmpl-stopped'));
   assert.equal(openai.stop_sequence, undefined);
 });
+
+
+test('multi-event CRLF SSE is invariant at every byte boundary and seeded random partitions', () => {
+  const bytes = Buffer.from(': heartbeat\r\nevent: delta\r\ndata: {"model":"backend","text":"中文🙂𠮷é"}\r\n\r\n'
+    + 'data: {"type":"trailer",\r\ndata: "text":"第二段😀"}\r\n\r\n'
+    + 'event: end\r\ndata: {"text":"结束🚀"}');
+  const expected = [
+    { event: 'delta', data: { model: 'backend', text: '中文🙂𠮷é' } },
+    { event: '', data: { type: 'trailer', text: '第二段😀' } },
+    { event: 'end', data: { text: '结束🚀' } },
+  ];
+  const partitions = [];
+  for (let position = 1; position < bytes.length; position++) partitions.push([position, bytes.length]);
+  let seed = 0x5eed1234;
+  for (let sample = 0; sample < 64; sample++) {
+    const cuts = []; let offset = 0;
+    while (offset < bytes.length) {
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      offset = Math.min(bytes.length, offset + 1 + (seed >>> 0) % 17); cuts.push(offset);
+    }
+    partitions.push(cuts);
+  }
+  for (const [sample, cuts] of partitions.entries()) {
+    const parser = createSseEventParser(), received = []; let offset = 0;
+    for (const cut of cuts) { received.push(...parser.push(bytes.subarray(offset, cut))); offset = cut; }
+    received.push(...parser.finish());
+    assert.deepEqual(received.map(({ event, data }) => ({ event, data })), expected, 'partition ' + sample);
+    assert.deepEqual(parser.finish(), [], 'finish idempotency');
+    for (const protocol of ['chat_completions', 'responses', 'messages']) {
+      const rewrite = createSameProtocolSseRewriter(protocol, 'public');
+      const rewritten = received.flatMap(({ event, data }) => rewrite.accept(event, data));
+      assert.deepEqual(rewritten.map(value => value.data.text), ['中文🙂𠮷é', '第二段😀', '结束🚀']);
+      assert.equal(rewritten[0].data.model, 'public');
+    }
+  }
+});
+
+test('parallel tool endings are emitted exactly once, including repeated source item-done events', () => {
+  for (const entry of ['responses', 'messages']) {
+    const bridge = createProtocolStreamBridge({ entryProtocol: entry, targetProtocol: 'responses', publicModel: 'public' });
+    const output = [];
+    output.push(...bridge.accept('response.created', { type: 'response.created', response: { id: 'resp-duplicate-end', status: 'in_progress', output: [] } }));
+    const calls = [{ type: 'function_call', id: 'fc-a', call_id: 'call-a', name: 'alpha', arguments: '{"n":1}' }, { type: 'function_call', id: 'fc-b', call_id: 'call-b', name: 'beta', arguments: '{"n":2}' }];
+    calls.forEach((item, output_index) => output.push(...bridge.accept('response.output_item.added', { type: 'response.output_item.added', output_index, item: { ...item, arguments: '' } })));
+    for (const [output_index, item] of calls.entries()) {
+      output.push(...bridge.accept('response.function_call_arguments.delta', { type: 'response.function_call_arguments.delta', output_index, item_id: item.id, delta: item.arguments }));
+      for (let duplicate = 0; duplicate < 2; duplicate++) output.push(...bridge.accept('response.output_item.done', { type: 'response.output_item.done', output_index, item }));
+    }
+    output.push(...bridge.accept('response.completed', { type: 'response.completed', response: { id: 'resp-duplicate-end', status: 'completed', output: calls } }), ...bridge.finish());
+    if (entry === 'responses') {
+      for (const call_id of ['call-a', 'call-b']) assert.equal(output.filter(value => value.event === 'response.output_item.done' && value.data.item?.call_id === call_id).length, 1);
+      assert.equal(output.filter(value => value.event === 'response.completed').length, 1);
+    } else {
+      assert.deepEqual(output.filter(value => value.event === 'content_block_start').map(value => value.data.content_block.id), ['call-a', 'call-b']);
+      for (const index of [0, 1]) assert.equal(output.filter(value => value.event === 'content_block_stop' && value.data.index === index).length, 1);
+      assert.equal(output.filter(value => value.event === 'message_stop').length, 1);
+    }
+  }
+});
+
+test('all six response-ID mappings distinguish complete UTF8 IDs, punctuation and destination prefixes', () => {
+  const sources = {
+    chat_completions: id => chat(id),
+    responses: id => ({ id, status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '中文😀', annotations: [] }] }] }),
+    messages: id => ({ id, type: 'message', role: 'assistant', content: [{ type: 'text', text: '中文😀' }], stop_reason: 'end_turn' }),
+  };
+  const ids = ['chatcmpl-abc', 'chatcmpl-def', 'a/b', 'a?b', 'resp_612f62', 'msg_612f62', 'chatcmpl-612f62', '中文🙂'];
+  for (const source of Object.keys(sources)) for (const entry of Object.keys(sources)) {
+    if (source === entry) continue;
+    const mapped = ids.map(id => transform(source, entry, sources[source](id)).id);
+    assert.equal(new Set(mapped).size, ids.length, `${source} -> ${entry}`);
+    assert.equal(new Set([...mapped, ...mapped.map(id => transform(source, entry, sources[source](id)).id)]).size, ids.length * 2, 'destination-looking source IDs must not share a namespace');
+  }
+});

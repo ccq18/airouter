@@ -58,3 +58,68 @@
 7. `conversation` 合法字符串或 `{id}` 会做语法检查，但当前没有 Conversations 创建/归属机制，统一 409；不合法形式或与 previous_response_id 同用为 400。加密 reasoning、item_reference 等无可核实归属时也拒绝，需重发完整显式历史。
 8. Token HTTP 仍按现有适配要求 store:false，不建立持久续接绑定。普通 APIKey 原生请求不改写未设置 store；即使请求 store:true，上游也可能按数据策略关闭，因此只有响应明确 store:true 才建立绑定。未知存储确认、Chat桥接、跨账号/模型/协议均不能续接。
 9. 本地绑定默认 TTL 为 24 小时，重启丢弃；它不是供应商 30 天保存承诺。上游删除响应、密钥/账号身份变化、目标变化或代际失效后，可能需要重放完整历史。没有 WebSocket/Conversation 状态恢复能力。
+
+## 6. 本次追加的协议交付门禁
+
+基线为 `d918de1`。先核对上述既有测试和先失败记录，再补实际缺口；保留免费池实现、用户文件与现有统一配置。沿用 Node 内置测试、临时配置、随机端口和既有可控 HTTP 上游，没有引入第二套测试框架。
+
+执行入口：`npm run test:protocol`。该入口包括桥接、请求/响应回归、HTTP、Responses 状态、模型路由和免费池测试；完整 `npm test` 包含这些测试，是提交与部署前的最终门禁。`.github/workflows/test.yml` 在 main 推送与 PR 上使用 Node 22 执行完整测试，失败会使检查失败；没有配置自动部署或变更分支保护权限。
+
+### 6.1 覆盖矩阵
+
+箭头表示客户端入口 → 后端协议。下列每格对应 `protocol-http-regressions.integration.test.js` 中独立的 `wire matrix <entry> <- <backend>: <upstream> -> <client>` 用例；每个用例检查实际请求体、模型映射、并行工具历史、结果配对、响应头、文本、工具参数、终态、缓存 usage、尝试次数和流内 ID。预期为字面客户端结构与数值，未调用转换器生成预期，也未用往返相等作为验收标准。
+
+| 入口 → 后端 | 请求转换/原样保留 | JSON → JSON | SSE → SSE | SSE → JSON 聚合 | JSON → SSE 合成 |
+| --- | --- | --- | --- | --- | --- |
+| Chat → Responses | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Chat → Messages | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Responses → Chat | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Responses → Messages | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Messages → Chat | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Messages → Responses | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Chat → Chat | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Responses → Responses | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+| Messages → Messages | 覆盖 | 覆盖 | 覆盖 | 覆盖 | 覆盖 |
+
+矩阵的基础语义为文本和两个并行工具调用。专门的边界用例另验能力限制，不能把基础矩阵解释为支持所有上游扩展字段：
+
+| 主题 | 测试与独立预期 |
+| --- | --- |
+| UTF-8/帧 | `protocol-stream-regressions` 的逐字节边界和 `multi-event CRLF SSE...`：中文、emoji、四字节汉字、é；同一多事件 CRLF 字节流在每个字节位置切分，固定种子 `0x5eed1234` 的 64 组随机分片；包含注释、多行 data、无尾部分隔符、重复 finish；三种同协议 rewriter 逐字段断言。异常尾字节单独断言 U+FFFD，不把损坏输入伪装有效 JSON |
+| 输入/角色/内容顺序 | `protocol-request-regressions`：简写和显式 message、instructions/system/developer/user/assistant、内容块和消息位置；Messages 不能表达的 developer/中途 system 明确拒绝 |
+| ID | 六向不同完整源 ID、标点、UTF-8、目标前缀和二次编码命名空间不碰撞；HTTP 流每帧 ID 一致 |
+| 工具 | 六向两轮并行请求历史；六向 forced/required/none/auto、函数名、strict 和 parallel 开关（none 无并行语义）；HTTP 六向实际请求体和逆序结果配对；参数原字符串、无损数值、非法对象/大数/小数、is_error 不可表达时拒绝；每项工具结束恰好一次，重复源 end 事件也只结束一次 |
+| 缓存 | 同协议原始请求控制、JSON/SSE usage/TTL 明细；跨协议公共控制及读写换算；缺统计省略、计数基数不同时具名来源扩展；不等价的 Claude/OpenAI 控制、Responses 独有预热等明确拒绝，HTTP 断言不会联系上游 |
+| 停止/终态 | 六向 `terminal matrix` JSON/SSE 拒绝及截断、明确文字/原因；Chat content_filter、403/200 policy error、工具错误、未知 incomplete、pause_turn、上下文耗尽；stop 双向映射，Responses 不可表达时拒绝；三种原生流分别覆盖 clean EOF 与 socket 异常断开，不得输出成功终态 |
+| 状态 | `responses-state*`、`model-router`：普通默认不注入 store:false、Token 强制限制、上游明确保存才绑定；previous/conversation 语法和互斥、调用者隔离、账号/目标 A→B→A、迟到结果、TTL、重启；上游删除状态只删除绑定，不冷却模型、不换上游 |
+| 故障切换/免费池 | 复用 `unified-routing.integration` 的 200 JSON/SSE 错误前置重试、402、已输出中断和取消；`free-pool.integration` 的真实 HTTP 池内故障、下一个池、付费和来源 Go 套餐耗尽后免费池接替、额度恢复切回。`auto` 和 `any-client-id` 使用相同配置、相同预期，无 auto 专有逻辑 |
+| 私有思考状态 | `protocol-response-boundaries` 和 HTTP private fixture：Messages thinking/signature、redacted_thinking、Responses reasoning/encrypted_content 原生保留；跨协议没有等价字段，明确错误，不静默降级成普通答案、不重放或冷却原生模型 |
+
+### 6.2 先失败证据与最小修复
+
+原八类问题的基线复现和修复见第 2～3 节，其首批失败日志仍保留为 `/tmp/airouter-protocol-requests-red.log`、`/tmp/airouter-protocol-streams-red.log`、`/tmp/airouter-responses-state-red.log`。本次在 `d918de1` 补充测试，区分发现的新缺陷和本来已通过的覆盖补充：
+
+| 本次确认的问题 | 修复前实际失败 | 修复位置与修复后断言 |
+| --- | --- | --- |
+| Chat 并行工具流漏工具结束事件 | `/tmp/airouter-gate-matrix-red.log`：37 项中 35 通过、2 失败；Responses 缺 item.done、Messages 缺 block.stop。多事件 UTF-8 原本通过 | `protocol-bridge.js/createEntryEventSerializer` 在最终完成前结束未关闭工具，重复结束幂等；逐工具事件顺序和恰好一次 |
+| 上游删除响应误伤模型健康 | `/tmp/airouter-gate-state404-red.log`：1 项失败，绑定已删除但 fresh 请求实际 503、预期 200 | `explicit-routing-handler.js/markNotCommittedFailure` 只失效私有绑定；第一次续接只打原生一次，第二次本地 409 零调用，全新请求原生 200 |
+| 私有思考/签名静默丢失 | `/tmp/airouter-gate-response-boundaries-red.log`：15 项中原生 3 通过、跨协议 12 失败 | `protocol-bridge.js/assertResponseContentSupported` 与流 parser 检查无等价内容；原生旁路保留，跨协议明确 unsupported，不能产生普通成功终态 |
+| 内容已发出后的转换错误缺少具体原因 | `/tmp/airouter-gate-late-error-red.log`：文字已收到，但断流没有 thinking/signature 错误原因 | `explicit-routing-handler.js` 流回调 guard 发送明确 SSE error 后结束；保留已发送文字、只调用一次、没有成功终态 |
+| 三种原生流异常断开被正常结束连接 | `/tmp/airouter-gate-native-cut-red.log`：6 项中 clean EOF 3 通过、异常 socket 3 失败，缺错误或传输中断标记 | 同 handler 的 onError 发 `upstream_stream_error`；三种协议都保留文字、明确失败、不补 DONE/message_stop/completed、不重放 |
+| 原生 Messages 私有内容格式互转失败 | `/tmp/airouter-gate-native-messages-red.log`：强制 SSE→JSON 与 JSON→SSE 两项均因实际 502、预期 200 失败 | `protocol-bridge.js/nativeMessagesToSse/createNativeMessagesAccumulator` 与 handler 同协议旁路保留 thinking/signature/redacted、文本、工具、usage 与消息扩展；未知 delta 明确拒绝，缺有效终态不能成功 |
+
+测试开发中修正了两处假上游/预期问题，不将它们算作产品缺陷：Responses 拒绝流原先错误使用 output_text 事件，改用 refusal 事件与最终 payload 一致；工具选择 none 没有 parallel 语义，不能向 Claude none 强加不合法的并行选项。OpenAI 未报告匹配停止串时仍保持既有“未知省略”断言，未改成假设值。未跳过、降低或删除既有业务断言。
+
+### 6.3 真实供应商与线上边界
+
+本次新增本地隔离配置的真实探测：Go 原生 `gpt-6-luna` Responses 携带 store:true 返回 200、文本 17、usage input=14/output=31/total=45，但响应未提供 store 字段。因此不建立可续接绑定，随后 previous_response_id 本地返回 409 `upstream_context_unavailable`。这证明协议调用与保守存储判定，不能证明供应商已保存响应。Sub2API `gpt-5.6-luna` 的 store:true 请求在 55 秒超时，没有验证服务端保存与续接闭环。完整脱敏结果为 `/tmp/airouter-protocol-gate-live/storage-results.json`。
+
+缓存命中沿用第 4 节本次主修复的真实 usage 证据：Chat 缓存读 4352/总输入 4368，Claude 首次写 9039、重复读 9039。本次门禁追加未修改缓存计数映射，不把这些值改称新的命中测试，也不以新的普通请求成功替代缓存证据。没有真实供应商故障注入、账号切换缓存继承或完整六向真实模型验收；这些规则的证明来自可控 HTTP 自动化。
+
+原生 Messages 同协议格式互转按完整块及 text/thinking/signature/input_json/citations 标准 delta 聚合；未知 delta 没有通用重建依据时明确拒绝。跨协议私有思考内容仍不迁移。
+
+### 6.4 最终本地门禁结果
+
+Node 22.19.0：`npm run test:protocol` 为 **247/247**，完整 `npm test` 为 **499/499**，均为零失败、零跳过；相关新代码收敛后执行，完整日志分别在 `/tmp/airouter-gate-protocol-final.log`、`/tmp/airouter-gate-full-final.log`。`git diff --check` 通过。完整测试已包含专项用例，CI 仅跑完整测试，避免在同一次 CI 重复执行。
+
+本次新增的先失败用例在对应修复后全部通过；已正确工作的分片、角色、缓存、状态与免费池能力只补覆盖，不虚构修复前失败。提交与部署使用通过门禁的同一源码；部署验收核对运行版本、服务健康、三种入口和免费池，并比较持久 `config.json` 部署前后 SHA256，保留账号、路由、凭证与用户文件。

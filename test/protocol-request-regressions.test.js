@@ -187,3 +187,63 @@ test('two rounds of parallel calls retain turn boundaries and each round result 
   assert.deepEqual(result.messages.filter(item => item.role === 'tool').map(item => [item.tool_call_id, item.content]), [['b', 'B1'], ['a', 'A1'], ['c', 'C2'], ['d', 'D2']]);
   assert.deepEqual(result.messages.filter(item => item.role === 'user').map(item => item.content), ['round one', 'round two']);
 });
+
+const PROTOCOLS = ['chat_completions', 'responses', 'messages'];
+for (const from of PROTOCOLS) for (const to of PROTOCOLS) {
+  if (from === to) continue;
+  test(`six-direction forced/required/none/auto tool choices preserve mode, name and parallel flag: ${from} -> ${to}`, () => {
+    const functions = [{ name: 'lookup', description: 'lookup a record', parameters: { type: 'object' }, strict: true }];
+    for (const mode of ['forced', 'required', 'none', 'auto']) for (const parallel of mode === 'none' ? [undefined] : [false, true]) {
+      const base = from === 'responses' ? { input: 'hello' } : { messages: [{ role: 'user', content: 'hello' }] };
+      base.tools = from === 'messages' ? [{ name: 'lookup', description: 'lookup a record', input_schema: { type: 'object' }, strict: true }]
+        : from === 'responses' ? [{ type: 'function', ...functions[0] }] : [{ type: 'function', function: functions[0] }];
+      base.tool_choice = from === 'messages' ? { type: mode === 'forced' ? 'tool' : mode === 'required' ? 'any' : mode, ...(mode === 'forced' ? { name: 'lookup' } : {}), ...(mode === 'none' ? {} : { disable_parallel_tool_use: !parallel }) }
+        : mode === 'forced' ? from === 'responses' ? { type: 'function', name: 'lookup' } : { type: 'function', function: { name: 'lookup' } } : mode;
+      if (from !== 'messages' && parallel !== undefined) base.parallel_tool_calls = parallel;
+      const result = bridge(from, to, base);
+      const expectedChoice = to === 'messages' ? { type: mode === 'forced' ? 'tool' : mode === 'required' ? 'any' : mode, ...(mode === 'forced' ? { name: 'lookup' } : {}), ...(mode === 'none' ? {} : { disable_parallel_tool_use: !parallel }) }
+        : mode === 'forced' ? to === 'responses' ? { type: 'function', name: 'lookup' } : { type: 'function', function: { name: 'lookup' } } : mode;
+      assert.deepEqual(result.tool_choice, expectedChoice, `${mode}, parallel=${parallel}`);
+      if (to !== 'messages') assert.equal(result.parallel_tool_calls, parallel);
+      assert.deepEqual(result.tools, to === 'messages' ? [{ name: 'lookup', description: 'lookup a record', input_schema: { type: 'object' }, strict: true }]
+        : to === 'responses' ? [{ type: 'function', name: 'lookup', description: 'lookup a record', parameters: { type: 'object' }, strict: true }] : [{ type: 'function', function: { name: 'lookup', description: 'lookup a record', parameters: { type: 'object' }, strict: true } }]);
+    }
+  });
+  test(`six-direction two parallel rounds preserve turn/result order: ${from} -> ${to}`, () => {
+    const history = [];
+    for (const round of [1, 2]) {
+      const ids = [`a${round}`, `b${round}`];
+      if (from === 'responses') history.push({ role: 'user', content: 'round' + round },
+        ...ids.map((id, i) => ({ type: 'function_call', call_id: id, name: 'lookup', arguments: JSON.stringify({ n: round * 10 + i }) })),
+        { type: 'function_call_output', call_id: ids[1], output: 'B' + round }, { type: 'function_call_output', call_id: ids[0], output: 'A' + round });
+      else if (from === 'chat_completions') history.push({ role: 'user', content: 'round' + round },
+        { role: 'assistant', content: null, tool_calls: ids.map((id, i) => ({ id, type: 'function', function: { name: 'lookup', arguments: JSON.stringify({ n: round * 10 + i }) } })) },
+        { role: 'tool', tool_call_id: ids[1], content: 'B' + round }, { role: 'tool', tool_call_id: ids[0], content: 'A' + round });
+      else history.push({ role: 'user', content: 'round' + round },
+        { role: 'assistant', content: ids.map((id, i) => ({ type: 'tool_use', id, name: 'lookup', input: { n: round * 10 + i } })) },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: ids[1], content: 'B' + round }, { type: 'tool_result', tool_use_id: ids[0], content: 'A' + round }] });
+    }
+    const result = bridge(from, to, from === 'responses' ? { input: history } : { messages: history });
+    // Literal expected turns and ID/value pairs; no reverse conversion as oracle.
+    if (to === 'chat_completions') {
+      assert.deepEqual(result.messages.map(item => item.role), ['user', 'assistant', 'tool', 'tool', 'user', 'assistant', 'tool', 'tool']);
+      assert.deepEqual(result.messages.filter(x => x.tool_calls).map(x => x.tool_calls.map(c => [c.id, c.function.name, c.function.arguments])), [
+        [['a1', 'lookup', '{"n":10}'], ['b1', 'lookup', '{"n":11}']], [['a2', 'lookup', '{"n":20}'], ['b2', 'lookup', '{"n":21}']],
+      ]);
+      assert.deepEqual(result.messages.filter(x => x.role === 'tool').map(x => [x.tool_call_id, x.content]), [['b1', 'B1'], ['a1', 'A1'], ['b2', 'B2'], ['a2', 'A2']]);
+      assert.deepEqual(result.messages.filter(x => x.role === 'user').map(x => x.content), ['round1', 'round2']);
+    } else if (to === 'responses') {
+      assert.deepEqual(result.input.map(x => x.type), ['message', 'function_call', 'function_call', 'function_call_output', 'function_call_output', 'message', 'function_call', 'function_call', 'function_call_output', 'function_call_output']);
+      assert.deepEqual(result.input.filter(x => x.type === 'function_call').map(x => [x.call_id, x.name, x.arguments]), [['a1', 'lookup', '{"n":10}'], ['b1', 'lookup', '{"n":11}'], ['a2', 'lookup', '{"n":20}'], ['b2', 'lookup', '{"n":21}']]);
+      assert.deepEqual(result.input.filter(x => x.type === 'function_call_output').map(x => [x.call_id, typeof x.output === 'string' ? x.output : x.output[0].text]), [['b1', 'B1'], ['a1', 'A1'], ['b2', 'B2'], ['a2', 'A2']]);
+      assert.deepEqual(result.input.filter(x => x.type === 'message').map(x => x.content[0].text), ['round1', 'round2']);
+    } else {
+      assert.deepEqual(result.messages.map(x => x.role), ['user', 'assistant', 'user', 'assistant', 'user']);
+      assert.deepEqual(result.messages.filter(x => x.role === 'assistant').map(x => x.content.map(c => [c.id, c.name, c.input])), [
+        [['a1', 'lookup', { n: 10 }], ['b1', 'lookup', { n: 11 }]], [['a2', 'lookup', { n: 20 }], ['b2', 'lookup', { n: 21 }]],
+      ]);
+      assert.deepEqual(result.messages.flatMap(x => x.content).filter(x => x.type === 'tool_result').map(x => [x.tool_use_id, typeof x.content === 'string' ? x.content : x.content[0].text]), [['b1', 'B1'], ['a1', 'A1'], ['b2', 'B2'], ['a2', 'A2']]);
+      assert.deepEqual(result.messages.flatMap(x => x.content).filter(x => x.type === 'text').map(x => x.text), ['round1', 'round2']);
+    }
+  });
+}

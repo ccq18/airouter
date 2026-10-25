@@ -37,4 +37,20 @@ test('caller mismatch and late A-B-A account responses cannot obtain private sta
  assert.equal(late.status,200);assert.equal((await entry({previous_response_id:late.body.id})).status,409);
 });
 
+test('deleted upstream response invalidates only its binding without replay or native model cooldown',async()=>{
+ const first=await entry({});assert.equal(first.status,200);assert.equal(stored.delete(first.body.id),true);
+ const before=requests.length;
+ const missing=await entry({previous_response_id:first.body.id});
+ assert.equal(missing.status,409);assert.equal(missing.body.error.code,'upstream_context_unavailable');
+ assert.equal(requests.length,before+1,'continuation must contact only the original native upstream once');
+ assert.equal(requests.at(-1).path,'/api/responses');assert.equal(requests.at(-1).body.previous_response_id,first.body.id);
+ const retry=await entry({previous_response_id:first.body.id});
+ assert.equal(retry.status,409);assert.equal(retry.body.error.code,'upstream_context_unavailable');
+ assert.equal(requests.length,before+1,'deleted response binding must not survive for another upstream attempt');
+ const fresh=await entry({input:'fresh request after deleted context'});
+ assert.equal(fresh.status,200,'response_not_found does not imply the native model is unavailable');
+ assert.equal(requests.length,before+2);assert.equal(requests.at(-1).path,'/api/responses');
+ assert.equal(requests.at(-1).body.previous_response_id,undefined);assert.equal(fresh.body.store,true);
+});
+
 test('restart forgets private bindings while upstream response may remain stored',async()=>{const first=await entry({});assert.equal(first.status,200);await stop();await launch();assert.equal((await entry({previous_response_id:first.body.id})).status,409);});

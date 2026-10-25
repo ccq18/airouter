@@ -24,7 +24,7 @@ npm run logs
 npm test
 ```
 
-共享逻辑、HTTP、配置或管理交互发生变化时运行 `npm test`。针对性检查使用 `node --test test/<名称>.test.js`；启动器重点检查 `test/run.test.js`，桌面入口重点检查 `test/desktop-boot.test.js`，路由行为重点检查 `test/unified-routing.integration.test.js`。
+共享逻辑、HTTP、配置或管理交互发生变化时运行 `npm test`。协议变更先用 `npm run test:protocol` 检查桥接、状态、路由和免费池相关回归；完整 `npm test` 包含这些测试，是提交与部署的交付门禁。覆盖矩阵和真实供应商边界见 [协议验证记录](docs/protocol-compatibility-verification.md)。针对性检查使用 `node --test test/<名称>.test.js`；启动器重点检查 `test/run.test.js`，桌面入口重点检查 `test/desktop-boot.test.js`，路由行为重点检查 `test/unified-routing.integration.test.js`。
 
 HTTP 集成测试使用临时配置和随机端口的假上游，不访问真实供应商。真实网络、账号额度和协议调用应另行记录结果。桌面构建会写入 `desktop/dist`、资源目录和 Rust `target`；先确认构建环境，不能把静态测试当作桌面编译成功。
 
