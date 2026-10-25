@@ -69,6 +69,7 @@ function createQuotaEngine(options = {}) {
   const inFlight = new Map();
   const probeLocks = new Map();
   const configVersions = new Map();
+  let managedConfigs = false;
   let monitorTimer = null;
 
   function getConfigId(config) {
@@ -83,7 +84,7 @@ function createQuotaEngine(options = {}) {
     return createHash('sha256').update(JSON.stringify([
       config.preset || '', config.type || 'token', config.subtype || '',
       config.base_url || '', config.quota_url || '', config.apikey || '',
-      config.access_token || '', config.account_id || '',
+      config.access_token || '', config.account_id || '', config.credentials || null,
     ])).digest('hex');
   }
 
@@ -100,10 +101,11 @@ function createQuotaEngine(options = {}) {
   }
 
   function isCurrentConfig(config) {
-    return configVersions.get(config.id) === configVersion(config);
+    return configVersions.has(config.id) ? configVersions.get(config.id) === configVersion(config) : !managedConfigs;
   }
 
   function syncConfigs(configs) {
+    managedConfigs = true;
     const ids = new Set(configs.map(config => config.id));
     const changed = [];
     for (const config of configs) {
@@ -120,8 +122,8 @@ function createQuotaEngine(options = {}) {
   }
 
   function getSnapshot(configOrId) {
-    ensureVersion(configOrId);
     const configId = getConfigId(configOrId);
+    if (typeof configOrId === 'object' && !isCurrentConfig(configOrId)) return null;
     return snapshots.get(configId) || null;
   }
 
@@ -329,6 +331,7 @@ function createQuotaEngine(options = {}) {
   }
 
   async function refresh(config, options = {}) {
+    if (managedConfigs && !isCurrentConfig(config)) return getSnapshot(config.id) || createQuotaSnapshot(config.id);
     ensureVersion(config);
     const configId = getConfigId(config);
     if (!configId) {
@@ -353,6 +356,7 @@ function createQuotaEngine(options = {}) {
   }
 
   async function ensureFresh(config, options = {}) {
+    if (managedConfigs && !isCurrentConfig(config)) return getSnapshot(config.id) || createQuotaSnapshot(config.id);
     ensureVersion(config);
     const configId = getConfigId(config);
     if (!configId) {

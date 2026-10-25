@@ -1,118 +1,52 @@
-# 配置项字段说明
+# config.json 配置契约
 
-顶层 `type` 已废弃，即使存在也会被忽略；配置类型写在 `configs[]` 的每个配置项里。未写 `type` 的配置项默认是 `token`。
+## 1. 文件与加载
 
-## 基础结构
+默认配置为项目目录下的 `config.json`，不读取或迁移 `openai.json`。直接运行服务时可用 `CONFIG` 指定绝对路径。管理接口保存会原子写入并热加载；手工编辑文件或登录脚本写入后需要重启。
 
-```
-{
-  "apikeys": [],
-  "auth_token": "",
-  "port":3009,
-  "claude_code": {
-    "model": "gpt-5.5",
-    "reasoning_effort": "high"
-  },
-  "responses": {
-    "model_aliases": {
-      "gpt-5.2": "gpt-5.5"
-    }
-  },
-  "configs":[
-      {
-        "access_token": "",
-        "account_id": "",
-        "description": ""
-      },
-      {
-        "type": "apikey",
-        "base_url": "https://api.example.com/v1",
-        "apikey": "sk-xxx",
-        "support": ["gpt"],
-        "health": {
-          "model": "gpt-5.4-mini"
-        },
-        "description": "third-party provider"
-      },
-      {
-        "type": "claude_token",
-        "access_token": "claude-oauth-access-token",
-        "refresh_token": "claude-oauth-refresh-token",
-        "expires_at": 1893456000000,
-        "account_uuid": "account-uuid",
-        "organization_uuid": "organization-uuid",
-        "local_auth_token": "airouter-oauth-local-token",
-        "description": "Claude OAuth account"
-      },
-      {
-        "type": "token",
-        "subtype": "sub2api",
-        "description": "Sub2API Agent Identity account",
-        "credentials": {
-          "auth_mode": "agentIdentity",
-          "agent_runtime_id": "agent-example",
-          "agent_private_key": "<Base64 PKCS#8 Ed25519 private key>",
-          "task_id": "task-example",
-          "chatgpt_account_id": "account-example",
-          "chatgpt_user_id": "user-example",
-          "chatgpt_account_is_fedramp": false,
-          "email": "user@example.com",
-          "plan_type": "team"
-        }
-      }
-    ],
-  "disabled_configs": []
-}
+账号容器仍命名为 `configs`，它保存本设计的统一上游账号，不代表旧管理接口。只有统一路由，没有模式开关。顶层 `type`、`disabled_configs`、`responses`、`claude_code`，以及 `routing.mode` 均被拒绝；账号的 `support`、`health` 和旧字段别名也不接受。
 
-```
+## 2. 完整示例
 
-## 统一上游与显式路由
-
-`configs[]` 新增以下字段：
+以下 JSON 可被程序加载，但凭证是占位值，实际调用前必须替换。客户端 ID `my-model` 优先访问 GLM，之后才尝试 Go；名称可自行修改。
 
 ```json
 {
-  "id": "cfg_example",
-  "preset": "glm-cn",
-  "enabled": true,
-  "models": [
+  "port": 3009,
+  "auth_token": "admin-example-replace-me",
+  "apikeys": ["sk-airouter-example-replace-me"],
+  "configs": [
     {
-      "id": "glm-5.3",
-      "protocols": ["chat_completions"],
-      "capabilities": {"tools": true, "images": true},
-      "context_window": 200000,
-      "max_output_tokens": 8192
+      "id": "glm-primary",
+      "type": "apikey",
+      "preset": "glm-cn",
+      "description": "GLM 主账号",
+      "enabled": true,
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "apikey": "sk-example-glm-replace-me",
+      "models": [{ "id": "glm-5.3", "protocols": ["chat_completions"] }]
+    },
+    {
+      "id": "go-backup",
+      "type": "apikey",
+      "preset": "opencode-go",
+      "description": "Go 备用账号",
+      "enabled": true,
+      "base_url": "https://opencode.ai/inference/go",
+      "apikey": "sk-example-go-replace-me",
+      "models": [{ "id": "deepseek-v4.1-flash", "protocols": ["chat_completions"] }]
     }
   ],
-  "protocol_paths": {
-    "chat_completions": "/chat/completions"
-  },
-  "quota_url": "https://example.com/optional-quota"
-}
-```
-
-- `id` 是稳定账号 ID；新建账号会自动生成，显式路由只用它引用账号，不用数组下标。
-- `preset` 支持 `chatgpt`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`claude`、`custom`。preset 只提供默认地址、模型发现和额度解释，不决定优先级。
-- `models[]` 是账号允许使用的后端模型；`protocols` 支持 `chat_completions`、`responses`、`messages`。没有协议的旧模型会按 preset 默认值规范化。
-- 只有 `custom` 需要 `models_endpoint`；内置平台由系统内置模型列表地址、鉴权和解析。
-- `quota_url` 是可选高级覆盖，普通管理页不展示，也不提供额度模板或额度凭证选择。
-- OpenCode Go/Zen 实时模型列表只有 id 等基础字段；没有协议元数据时按模型家族推导：Claude -> `messages`，OpenAI/GPT -> `responses`，GLM/DeepSeek 等 -> `chat_completions`。界面允许手动调整。
-
-显式路由：
-
-```json
-{
   "routing": {
-    "mode": "explicit",
     "max_attempts": 3,
     "models": [
       {
-        "id": "deepseek",
+        "id": "my-model",
         "enabled": true,
         "entry_protocols": ["chat_completions", "responses", "messages"],
         "targets": [
-          {"id": "route-a", "config_id": "cfg_glm", "model": "glm-5.3", "protocol": "chat_completions"},
-          {"id": "route-b", "config_id": "cfg_openrouter", "model": "deepseek/deepseek-chat", "protocol": "chat_completions"}
+          { "id": "primary", "config_id": "glm-primary", "model": "glm-5.3", "protocol": "chat_completions" },
+          { "id": "backup", "config_id": "go-backup", "model": "deepseek-v4.1-flash", "protocol": "chat_completions" }
         ]
       }
     ]
@@ -120,242 +54,65 @@
 }
 ```
 
-- `targets[]` 顺序就是严格优先级；每项同时指定上游账号、后端模型和协议。
-- `routing.models[].id` 精确且区分大小写，最长 200 字符，不允许首尾空格或重复。
-- 未配置的客户端模型返回 `model_not_found`；不会使用 `responses.model_aliases` 或 `claude_code.model` 兜底。
-- `max_attempts` 包含首次尝试，实际不会超过候选数量。
-- 额度耗尽、未知和读取失败语义见 [统一模型路由与额度配置设计](unified-model-routing-design.md)。
+空白模板 `config.json.example` 的账号和路由数组均为空；没有路由时，业务请求返回模型未配置，不自动选择账号。
 
-## token 配置项
+## 3. 顶层字段
 
-未写 `type` 或 `type` 为 `token` 时，配置项格式如下：
+| 字段 | 类型与默认值 | 规则 |
+| --- | --- | --- |
+| `configs` | 必填数组 | 统一上游账号；可以为空 |
+| `routing` | 对象，缺省为空路由 | 包含 `models`、可选 `max_attempts` |
+| `port` | 端口，默认 3009 | 1–65535；支持整数或数字字符串 |
+| `proxy_port` | 可选端口 | 本机 HTTP 代理端口，未配置时沿用进程代理环境 |
+| `auth_token` | 字符串 | 管理凭证；缺少或为空时生成并写回 |
+| `apikeys` | 字符串数组 | 入口密钥；缺少时生成一枚，明确写 `[]` 则关闭入口校验 |
 
-```json
-{
-  "access_token": "",
-  "account_id": "",
-  "description": ""
-}
-```
+## 4. 上游账号
 
-- access_token 和 account_id 获取  
-  登录gpt plus后打开：https://chatgpt.com/api/auth/session
-  取以下值配置上去，有效时间是3个月
-  ![session_json.png](docs/img/session_json.png)
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 稳定且唯一的账号 ID；缺少时服务生成并持久化 |
+| `type` | 必须为 `apikey`、`token` 或 `claude_token`，不再默认当作 Token |
+| `preset` | 平台：`chatgpt`、`claude`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`custom` |
+| `description` | 管理页名称 |
+| `enabled` | 布尔值，缺省为 true；停用使用此字段，不另设停用账号数组 |
+| `base_url` | 上游地址；管理台新增时按平台填入默认值 |
+| `models` | 支持的后端模型数组；空数组不能作为路由候选 |
+| `models_endpoint` | 仅自定义平台填写的目录路径或 HTTP(S) 地址 |
+| `protocol_paths` | 可选协议路径覆盖，键为协议名，值为路径或 null |
+| `quota_url` | 可选额度地址覆盖，仍使用该平台的额度解析器；日常表单不显示 |
 
-!注意不要退出登录,退出登录token就失效了
-- `proxy_port` 为可选项；只有在需要通过本地代理访问上游时才填写本地代理端口，例如 `7890`
-- `port` 填服务监听端口，不填时默认 `3009`
-- `apikeys` 为入口请求校验密钥数组，支持 `Authorization: Bearer <apikey>` 或 `x-api-key`
-- `apikeys` 为空时，不校验入口请求；只要数组非空，请求就必须命中其中一个 key
-- `auth_token` 为管理后台访问令牌；配置页必须通过 `.../admin/configs?auth_token=<token>` 访问
-- `auth_token` 为空或缺失时，服务启动后会自动生成并写回配置文件
-- `configs` 是启用配置列表，只有这里的配置会进入运行时请求调度、额度刷新和 fallback
-- `disabled_configs` 是停用配置列表。管理页点“停用”会把配置从 `configs` 移到这里；停用配置对服务不可见，后续请求不会读取它。管理页点“启用”会把它移回 `configs`
-- `disabled_configs[]` 中的配置项会额外记录 `disabled_status` 文本字段，用来保存停用瞬间的运行态摘要，例如 `可用=否 | 额度=99% | ...`；启用回 `configs[]` 时会移除该字段
-- 管理页“删除”仍是永久删除；停用不是删除，只是从服务可见列表中移出。现在管理页支持对启用配置批量停用、对停用配置批量启用，并支持对启用配置、停用配置和入口 apikey 勾选多项后批量删除，语义与单项操作一致
-- `/v1/messages` Responses 兼容转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 会保留在配置中但不再影响该链路
-- `claude_code.reasoning_effort` 用来强制覆盖 Claude Code 走 `/v1/messages` Responses 兼容转换链路时的推理强度，默认 `high`，支持枚举：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`
-- `claude_code.reasoning_effort` 只作用于 `/v1/messages` 的 Responses 兼容转换链路，不会影响普通 `/v1/*` OpenAI 兼容接口，也不会影响 `support` 包含 `claude` 的 `apikey` 原样转发链路
-- `responses.model_aliases` 用来给 `/v1/responses` 请求里的 `model` 做别名替换，键和值都必须是非空字符串
-- `responses.model_aliases` 的键比较时忽略大小写，例如配置 `GPT-5.2` 也会匹配请求里的 `gpt-5.2`
-- 默认示例配置里包含 `gpt-5.2 -> gpt-5.5`
-- 原因：当前 Codex API 的配置形式暂不直接支持 `gpt-5.5`，所以默认把 `gpt-5.2` 映射成 `gpt-5.5`，方便继续沿用现有配置写法
-- `/v1/messages` 优先使用 `claude_token` 或 `support` 包含 `claude` 的 `apikey` 原样转发；如果请求里的本地 fake auth token 匹配某个 `claude_token.local_auth_token`，会严格绑定到该配置，不会透明切到其它 Claude 登录态。交互式 Claude Code 主请求如果改用本机 Keychain 中同一登录态的真实 Claude OAuth access token，Airouter 也会识别为这条 `claude_token` 配置。`airouter-oauth-` 前缀的本地 fake token 如果没有绑定到可用 `claude_token`，也不会 fallback 到 OpenAI/GPT 上游。没有命中 Claude fake token 绑定且没有可用 Claude 直转配置时，优先使用 `token` 配置项走 responses 兼容转换，token 不可用时可使用 `support` 包含 `gpt` 的 `apikey` 配置项请求 `${base_url}/responses`
-- `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路；普通 `/v1/messages` 转换会把 Claude `system` 放入 Responses `instructions`，只有 `/cpa/v1/messages` 会把 Claude `system` 转成 `developer` input 并保留空字符串 `instructions`
-- 每分钟额度轮询只检查当前活动配置（当前活动配置为 `token` 时）；每 3 分钟全量校正会检查所有 `token` 配置项
-- 业务接口 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；管理接口、健康检查、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑
-- `apikey` 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，会在本次请求内排除当前配置并切到错误率最低的可用 apikey；错误率按最近 100 个已完成真实请求计算，无样本按 0%，同率保持配置顺序。没有下一候选时继续使用当前配置，且不会摘除 apikey 或把 `runtime.available` 改为 `false`
-- 每 3 分钟全量校正会额外尝试恢复已被标记为不可用的 `support` 包含 `gpt` 的 `apikey` 配置项；恢复探测默认使用 `gpt-5.4-mini`，可通过该配置项的 `health.model` 覆盖
-- token 请求调度：OpenAI token 和 Claude token 不再依赖手动“切换”焦点，只按运行态可用/不可用参与对应链路选择。OpenAI token 有会话 key 时使用 HRW/Rendezvous 一致性哈希，尽量把相同会话固定到同一 token 账号；token 账号不可用或本次 failover 排除后会在剩余账号中按同一会话 key 重新选择。Claude token 按配置顺序选择当前可用账号，绑定本地 fake token 的请求只会使用绑定且可用的 Claude token
-- 会话 key 来源包括 `x-airouter-session-id`、`session-id`、`session_id`、`x-client-request-id`，以及 URL/JSON body 顶层的 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`
-- 没有会话 key 时，token 请求按当前内存 `inFlight` 数做轻量分摊
-- `apikey` 配置项不参与 token 并发调度、一致性哈希或 `inFlight` 计数
-- `apikey` fallback 焦点按能力拆分：`support` 包含 `gpt` 的 OpenAI 兼容 fallback 与 `support` 包含 `claude` 的 Claude Messages 原样转发 fallback 各自维护焦点和 failover，不会互相抢占。手动切换到同时支持两种能力的 `apikey` 会同时更新两个 fallback 焦点；token 主链路可用时仍优先走 token
-- 管理页“调度模式”和 token 行会显示当前/最近命中的会话短 hash，用于观察实际调度账号；原始会话 ID 不会持久化或返回页面
-- 管理页账号行会显示最近一次响应模型观测，包括请求模型和上游响应模型
-- 手动切换到 `apikey` 配置项时，会把该 `apikey` 的运行态恢复为可用
+API Key 账号使用 `apikey`。ChatGPT 登录态使用 `access_token`、`account_id` 和可选 `refresh_token`；Sub2API 使用 `type: "token"`、`subtype: "sub2api"` 与其导出的 `credentials`，推荐通过导入入口生成。Claude OAuth 使用 `access_token`、可选 `refresh_token`、到期时间及账号信息，由登录脚本写入。
 
+每个模型需要非空 `id`，并可配置 `protocols`。协议仅支持 `chat_completions`、`responses`、`messages`；缺少时按平台默认值规范化。可选 `capabilities` 为布尔值映射，`context_window`、`max_output_tokens` 为正整数。模型清单只约束候选，不自动对客户端公开。
 
-- 原始配置项字段说明
-![session_json.png](docs/img/session_json.png)
-字段说明：
+## 5. 模型路由
 
-- `access_token`
-  - 实际发给上游 ChatGPT 的 Bearer Token
-  - 来源：AuthSession JSON 里的 `accessToken`
-- `account_id`
-  - 当前 ChatGPT 账号 / workspace 的账号 ID
-  - 来源：AuthSession JSON 里的 `account.id`
-- `description`
-  - 本地展示用的描述文本，用于日志、管理页表格、账号切换提示
-  - 推荐直接使用邮箱，方便区分账号
-  - 默认来源：AuthSession JSON 里的 `user.email`
+| 字段 | 规则 |
+| --- | --- |
+| `routing.models[].id` | 客户端模型 ID，非空、区分大小写、无首尾空格、最长 200 字符，不能重复 |
+| `enabled` | 缺省 true；停用路由不公开、不接受调用 |
+| `entry_protocols` | 允许的入口协议，缺省为三种对话协议；不能是空数组 |
+| `targets` | 至少一个候选，数组顺序就是优先级 |
+| `targets[].id` | 路由内唯一、稳定；缺省时生成，排序保留原 ID |
+| `targets[].config_id` | 引用已存在账号 ID |
+| `targets[].model` | 必须存在于该账号模型列表 |
+| `targets[].protocol` | 必须在该模型支持协议中 |
+| `routing.max_attempts` | 正整数，默认 3；实际尝试不超过候选数量 |
+| 路由 `max_attempts` | 可覆盖顶层尝试次数，仍受候选数量限制 |
 
-## 管理页导入规则
+同一账号、模型和协议组合不能在一条路由中重复。删除账号或修改被引用的模型/协议前，先调整关联路由。具体失败切换、额度恢复、上下文归属和不支持的能力见[统一设计](unified-model-routing-design.md)。
 
-管理页支持直接粘贴完整 AuthSession JSON。导入时会自动提取并转换为上面的最小配置项：
+## 6. 运行环境变量
 
-- `description <- user.email`
-- `account_id <- account.id`
-- `access_token <- accessToken`
+| 变量 | 当前行为 |
+| --- | --- |
+| `CONFIG` | 服务配置路径，默认 `config.json`；部署时建议绝对路径 |
+| `AIROUTER_BIND_HOST` | 监听地址，部署反向代理时可设为 `127.0.0.1` |
+| `PORT` | 未配置 `port` 时的端口候选 |
+| `QUOTA_CHECK_TIMEOUT_MS` | 额度请求超时，默认 10000 ms |
+| `UPSTREAM_TOTAL_TIMEOUT_MS` | 单次上游请求超时，默认 600000 ms |
+| `JSON_REQUEST_BODY_LIMIT_BYTES` | 对话 JSON 请求体上限，默认 16 MiB |
+| `REQUEST_BODY_IDLE_TIMEOUT_MS` | 接收客户端请求体的空闲超时，默认 30000 ms |
 
-也支持直接粘贴已经整理好的最小配置项 JSON。
-
-## Sub2API Agent Identity 配置项
-
-Sub2API 新版 OpenAI OAuth 导出使用 Agent Identity 时，Airouter 会将其保存为 `type=token`、`subtype=sub2api`。它仍属于 OpenAI token 主链路，会参与额度轮询、会话粘性调度、匿名请求并发分配、Responses/Messages/Images failover；`sub2api` 不是新的顶层配置类型。
-
-可直接在管理页粘贴 Sub2API 导出的单个对象或对象数组。服务端只接受 `platform=openai`、`type=oauth`、`credentials.auth_mode=agentIdentity` 的 Agent Identity 导出，并规范化为：
-
-```json
-{
-  "type": "token",
-  "subtype": "sub2api",
-  "description": "user@example.com",
-  "credentials": {
-    "auth_mode": "agentIdentity",
-    "agent_runtime_id": "agent-example",
-    "agent_private_key": "<Base64 PKCS#8 Ed25519 private key>",
-    "task_id": "task-example",
-    "chatgpt_account_id": "account-example",
-    "chatgpt_user_id": "user-example",
-    "chatgpt_account_is_fedramp": false,
-    "email": "user@example.com",
-    "plan_type": "team"
-  }
-}
-```
-
-字段说明：
-
-- `subtype` 固定为 `sub2api`；没有 `subtype` 的历史 token 继续使用 Bearer token
-- `credentials.auth_mode` 固定为 `agentIdentity`
-- `agent_runtime_id` 是签名和 task 注册使用的 Agent runtime 标识
-- `agent_private_key` 必须是 Base64 编码的 PKCS#8 Ed25519 私钥，仅在本地用于签名
-- `task_id` 用于生成请求断言，导入时可以缺失；首次额度或业务请求前会自动注册并原子写回配置文件
-- `chatgpt_account_id` 会写入 `ChatGPT-Account-Id` 请求头
-- `chatgpt_user_id` 是 Agent Identity 的用户标识，导入校验必填
-- `chatgpt_account_is_fedramp=true` 时额外写入 `X-OpenAI-FedRAMP: true`
-- `email`、`plan_type` 只用于本地描述和保留导出元数据，不参与签名
-- 导出对象顶层的 `concurrency`、`priority`、`rate_multiplier`、`auto_pause_on_expired` 会被保留；当前 Airouter 调度仍以既有 token 池顺序、会话粘性和 `inFlight` 分配为准
-
-每次请求都会用当前 UTC 时间重新签名，不复用旧断言。Responses 路径的核心请求头为：
-
-```text
-Authorization: AgentAssertion <base64url-envelope>
-ChatGPT-Account-Id: <account-id>
-OpenAI-Beta: responses=experimental
-Originator: codex_cli_rs
-User-Agent: codex_cli_rs/0.144.1 ...
-Version: 0.144.1
-```
-
-额度查询仍请求 `GET https://chatgpt.com/backend-api/wham/usage`，并使用 `OpenAI-Beta: codex-1`、`OAI-Language: zh-CN`、`Originator: Codex Desktop`、`Sec-Fetch-*` 和 `Priority: u=4, i` 等 Sub2API 兼容头。
-
-如果 Responses、Messages 转换、Images 或额度接口返回 HTTP 401 且错误明确为 `invalid_task_id`、`task_not_found`、`task_expired` 等 task 失效类型，Airouter 会按 runtime 注册新 task。并发恢复会按账号合并；新 task 必须先写入配置文件，原请求才会在同一账号上重试一次。网络超时、普通 401 或 token 错误不会触发 task 注册，也不会进入传统 refresh token 流程。
-
-## apikey 配置项
-
-`type` 为 `apikey` 时，配置项格式如下：
-
-```json
-{
-  "type": "apikey",
-  "base_url": "https://api.openai.com/v1",
-  "apikey": "sk-xxx",
-  "support": ["gpt"],
-  "health": {
-    "model": "gpt-5.4-mini"
-  },
-  "description": "primary key"
-}
-```
-
-字段说明：
-
-- `type`
-  - 固定为 `apikey`
-- `apikey`
-  - 上游兼容接口使用的 API Key
-- `base_url`
-  - 上游兼容接口根地址
-  - 不要求是 Codex 或 ChatGPT 地址；任意提供 OpenAI 兼容 `/v1/*` 接口的第三方服务都可以配置在这里
-  - 例如 `https://api.openai.com/v1` 或 `https://api.example.com/v1`
-- `support`
-  - 可选，字符串数组，只支持 `gpt` 和 `claude`
-  - 不填写时默认是 `["gpt"]`
-  - 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，包括 `/v1/responses`，也可作为 `/v1/messages` 的 Responses 转换上游
-  - 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路
-- `health`
-  - 可选对象，目前只支持 `model`
-  - 只影响已不可用 GPT apikey 的 3 分钟恢复探测请求
-  - 未配置时恢复探测默认发送 `model: "gpt-5.4-mini"`、`input: "hello"`、`stream: false`
-  - 管理页新增 fallback apikey 时可选择 `gpt-5.4-mini` 或 `gpt-5.4`，默认 `gpt-5.4-mini`
-- `description`
-  - 本地展示用的描述文本
-- `apikey` 配置项不参与 Codex quota 轮询
-- `apikey` 配置项在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，会在本次请求内排除当前配置并选择错误率最低的下一候选。如果没有可切换配置，则继续使用当前配置并透传当前上游错误。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。错误率只统计最近 100 个已完成真实请求，不会临时标记 apikey 为不可用
-- 已被标记为不可用且 `support` 包含 `gpt` 的 `apikey` 配置项，会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测；上游返回 HTTP 200 时恢复为可用；探测默认超时 `30000ms`（30 秒），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖
-- 只支持 `claude` 的 `apikey` 不参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路
-- 同时支持两条链路时可以配置 `"support": ["gpt", "claude"]`
-
-## claude_token 配置项
-
-`type` 为 `claude_token` 时，配置项格式如下：
-
-```json
-{
-  "type": "claude_token",
-  "access_token": "claude-oauth-access-token",
-  "refresh_token": "claude-oauth-refresh-token",
-  "expires_at": 1893456000000,
-  "account_uuid": "account-uuid",
-  "organization_uuid": "organization-uuid",
-  "local_auth_token": "airouter-oauth-local-token",
-  "request_auth_token_sha256s": [
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  ],
-  "description": "Claude OAuth account"
-}
-```
-
-字段说明：
-
-- 推荐通过 `npm run claude:login` 生成，不要手工复制真实 Claude OAuth token
-- 如果在远程服务器运行登录脚本、本地浏览器授权，浏览器跳到 `localhost` 回调失败时，可以把地址栏里的完整回调 URL 或 `/callback?...` 路径粘贴回脚本终端并回车
-- `access_token` 是 Airouter 转发到 Anthropic 时使用的真实 OAuth Bearer token
-- `refresh_token` 和 `expires_at` 由登录脚本保存，供后续 token 刷新能力复用
-- `local_auth_token` 是 Airouter 分配给 Claude Code 使用的本地 fake auth token；脚本会同步写入顶层 `apikeys`
-- 推荐共享登录态路径：服务端运行 `npm run claude:login` 生成 `local_auth_token` 后，在每台客户端运行 `npm run claude:install-login -- --token <local_auth_token> --base-url http://localhost:<port>`，把这枚本地 token 写入 Claude Code 本地凭证，并同步补齐 Claude 交互模式依赖的全局 onboarding 状态；安装前会自动备份原登录态，可用 `npm run claude:install-login -- --restore <backup-file>` 恢复
-- 也可以临时使用环境变量：`CLAUDE_CODE_OAUTH_TOKEN=<local_auth_token>`，并设置 `ANTHROPIC_BASE_URL=http://localhost:<port>`；但部分 Claude Code 交互式主请求可能优先读取本机登录态，因此共享登录态建议使用 `claude:install-login`
-- `request_auth_token_sha256s` 是可选入站鉴权哈希列表，仅用于兼容 Claude Code 交互式主请求从本机 Keychain 读取另一枚同登录态 OAuth token 的情况；共享登录态主路径不依赖它
-- 使用该模式时不要同时设置 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，否则 Claude Code 可能切回外部 API key/auth token 分支，或让旧的 OAuth 环境变量覆盖已安装的共享登录态
-- 请求中的 `local_auth_token` 命中该配置时，Airouter 只会替换为这一条配置里的真实 `access_token`
-- 顶层 `apikeys` 开启本地入口校验时，`/v1/messages` 还会接受已配置 `claude_token.access_token` 或命中 `request_auth_token_sha256s` 的入站 token，用于兼容 Claude Code 交互式主请求从 Keychain 读取真实 OAuth token 的情况；普通 `/v1/*` OpenAI 兼容入口不接受该扩展鉴权
-- `airouter-oauth-` 前缀的本地 fake token 专用于 Claude OAuth；如果配置中没有对应可用 `claude_token`，请求会失败，不会进入 OpenAI/GPT 兼容转换链路
-- `claude_token` 只参与 `/v1/messages` 原样转发，不参与 `/v1/responses`、Images 或 Codex backend-api 转换链路
-
-## Claude Messages apikey 示例
-
-需要把 `/v1/messages` 原样转发到第三方 Claude Messages API 时，仍然使用 `type: "apikey"`，并配置 `support: ["claude"]`：
-
-```json
-{
-  "type": "apikey",
-  "base_url": "https://claude.example.com/v1",
-  "apikey": "sk-xxx",
-  "support": ["claude"],
-  "description": "claude messages provider"
-}
-```
-
-`/v1/messages` 请求会转发到 `${base_url}/messages`，不做模型转换。示例中 `support` 只有 `claude`，所以它不会参与 `/v1/responses` 或普通 `/v1/*` OpenAI 兼容链路。
-
-## 安全说明
-
-- `access_token`、`refresh_token`、`apikey`、`agent_private_key` 和动态 `AgentAssertion` 都属于敏感信息
-- 顶层 `apikeys`、`auth_token` 也属于敏感信息
-- 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
-- 管理页只有通过 `auth_token` 后才能查看运行态；凭证字段在管理 API 中以掩码返回，不再回显完整 `access_token`、`apikey`、`refresh_token`、账号 ID 或 Agent Identity 私钥
-- 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效
+不在配置或日志里记录真实凭证示例。HTTP 操作的请求字段与状态码见 [API 参考](api-reference.md)。

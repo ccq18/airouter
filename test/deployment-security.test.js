@@ -39,7 +39,7 @@ test('deployed admin authentication never discloses the configured secret', { ti
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.equal(ready, true, 'service must start using the isolated config');
-    const unauthorized = await fetch(`${base}/admin/api/configs?auth_token=incorrect`);
+    const unauthorized = await fetch(`${base}/admin/api/upstreams?auth_token=incorrect`);
     assert.equal(unauthorized.status, 401);
     const denialBody = await unauthorized.text();
     assert.equal(denialBody.includes(adminSecret), false, '401 response must not reveal admin secret');

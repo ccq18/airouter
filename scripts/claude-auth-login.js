@@ -23,8 +23,8 @@ const {
 } = require('../app/config-editor');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const DEFAULT_CONFIG_FILE = 'openai.json';
-const DEFAULT_CONFIG_TEMPLATE_FILE = 'openai.json.example';
+const DEFAULT_CONFIG_FILE = 'config.json';
+const DEFAULT_CONFIG_TEMPLATE_FILE = 'config.json.example';
 
 function parseArgs(argv) {
   const args = {
@@ -82,15 +82,15 @@ function readConfigForAppend(configFile) {
     auth_token: '',
     port: 3009,
     configs: [],
-    disabled_configs: [],
+    routing: { models: [], max_attempts: 3 },
   };
 }
 
 function printUsage() {
   console.log([
-    '用法: npm run claude:login -- [--config openai.json] [--open]',
+    '用法: npm run claude:login -- [--config config.json] [--open]',
     '',
-    '完成 Claude OAuth 授权后，脚本会把 claude_token 配置追加到 openai.json，',
+    '完成 Claude OAuth 授权后，脚本会把 claude_token 配置追加到 config.json，',
     '并生成一个本地 fake auth token 写入 apikeys。',
     '共享 Claude Code 登录态时，在客户端运行 npm run claude:install-login 安装这枚 token。',
   ].join('\n'));

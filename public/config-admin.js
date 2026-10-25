@@ -1,1415 +1,187 @@
 (function attachConfigAdmin(globalScope) {
-  const DEFAULT_APIKEY_HEALTH_MODEL = 'gpt-5.4-mini';
-  const APIKEY_HEALTH_MODELS = new Set([
-    DEFAULT_APIKEY_HEALTH_MODEL,
-    'gpt-5.4',
-  ]);
-
-  function parseSseChunk(rawEvent) {
-    const lines = String(rawEvent || '').split('\n');
-    let eventName = '';
-    const dataLines = [];
-
-    for (const line of lines) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice('event:'.length).trim();
-        continue;
-      }
-
-      if (line.startsWith('data:')) {
-        dataLines.push(line.slice('data:'.length).trimStart());
-      }
+  function buildRequestUrl(path, options = {}) {
+    const url = new URL(path, options.origin || 'http://localhost');
+    if (options.adminAuthToken && url.pathname.startsWith('/admin/')) {
+      url.searchParams.set('auth_token', options.adminAuthToken);
     }
-
-    return {
-      eventName,
-      dataText: dataLines.join('\n'),
-    };
+    return `${url.pathname}${url.search}`;
   }
 
-  function parseResponsesEventStream(text) {
-    const rawEvents = String(text || '')
-      .replace(/\r\n/g, '\n')
-      .split('\n\n');
-
-    let completedResponse = null;
-    let outputText = '';
-
-    for (const rawEvent of rawEvents) {
-      if (!rawEvent.trim()) {
-        continue;
-      }
-
-      const parsed = parseSseChunk(rawEvent);
-      if (!parsed.dataText || parsed.dataText === '[DONE]') {
-        continue;
-      }
-
-      const payload = JSON.parse(parsed.dataText);
-      const eventName = payload.type || parsed.eventName;
-
-      if (eventName === 'response.output_text.delta' && typeof payload.delta === 'string') {
-        outputText = `${outputText}${payload.delta}`;
-      }
-
-      if (!outputText && eventName === 'response.output_text.done' && typeof payload.text === 'string') {
-        outputText = payload.text;
-      }
-
-      if (eventName === 'response.completed' && payload.response && typeof payload.response === 'object') {
-        completedResponse = payload.response;
-      }
-    }
-
-    if (completedResponse) {
-      const hasStructuredOutput = Array.isArray(completedResponse.output) && completedResponse.output.length > 0;
-
-      if (outputText && !hasStructuredOutput) {
-        return {
-          ...completedResponse,
-          output_text: outputText,
-        };
-      }
-
-      return completedResponse;
-    }
-
-    if (outputText) {
-      return {
-        output_text: outputText,
-      };
-    }
-
-    return {};
-  }
-
-  function parseResponsesApiResponse(text, contentType) {
-    const normalizedContentType = String(contentType || '').toLowerCase();
-    const responseText = String(text || '');
-    const looksLikeEventStream = responseText.startsWith('event: ') || responseText.includes('\nevent: ');
-
-    if (!responseText) {
-      return null;
-    }
-
-    if (normalizedContentType.includes('text/event-stream') || looksLikeEventStream) {
-      return parseResponsesEventStream(responseText);
-    }
-
-    if (normalizedContentType.includes('application/json')) {
-      return JSON.parse(responseText);
-    }
-
-    try {
-      return JSON.parse(responseText);
-    } catch (error) {
-      return {
-        message: responseText,
-      };
-    }
-  }
-
-  function extractErrorMessage(payload, fallbackMessage) {
-    if (payload && typeof payload === 'object') {
-      if (typeof payload.details === 'string' && payload.details) {
-        return payload.details;
-      }
-
-      if (typeof payload.message === 'string' && payload.message) {
-        return payload.message;
-      }
-
-      if (payload.error && typeof payload.error === 'object' && typeof payload.error.message === 'string' && payload.error.message) {
-        return payload.error.message;
-      }
-
-      if (typeof payload.error === 'string' && payload.error) {
-        return payload.error;
-      }
-    }
-
-    return fallbackMessage;
-  }
-
-  function buildJsonRequestOptions(options) {
-    const normalizedOptions = options && typeof options === 'object' ? options : {};
-
-    return {
-      ...normalizedOptions,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(normalizedOptions.headers || {}),
-      },
-    };
-  }
-
-  function buildConfigSnapshotRequest(forceRefresh = false) {
-    if (forceRefresh) {
-      return {
-        url: '/admin/api/configs/refresh',
-        options: {
-          method: 'POST',
-        },
-      };
-    }
-
-    return {
-      url: '/admin/api/configs',
-      options: {},
-    };
-  }
-
-  function buildRequestUrl(url, options = {}) {
-    const origin = options.origin || 'http://localhost';
-    const adminAuthToken = typeof options.adminAuthToken === 'string' ? options.adminAuthToken : '';
-    const resolved = new URL(url, origin);
-
-    if (adminAuthToken && resolved.pathname.startsWith('/admin/')) {
-      resolved.searchParams.set('auth_token', adminAuthToken);
-    }
-
-    return `${resolved.pathname}${resolved.search}`;
-  }
-
-  function getPreferredApiKey(snapshot) {
-    const apikeys = Array.isArray(snapshot && snapshot.apikeys) ? snapshot.apikeys : [];
-    return typeof apikeys[0] === 'string' ? apikeys[0] : '';
-  }
-
-  function maskSecret(value) {
-    const text = String(value || '').trim();
-    if (!text) {
-      return '-';
-    }
-
-    if (text.length <= 8) {
-      return '***';
-    }
-
-    const prefix = text.slice(0, 3);
-    return `${prefix}${prefix.endsWith('-') ? '...' : '-...'}${text.slice(-4)}`;
-  }
-
-  function normalizeText(value) {
-    return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
-  }
-
-  function normalizeBaseUrl(value) {
-    return normalizeText(value).replace(/\/+$/, '');
-  }
-
-  function normalizeSupport(values) {
-    const list = Array.isArray(values) ? values : [];
-    const normalized = [];
-
-    for (const value of list) {
-      const item = normalizeText(value).toLowerCase();
-      if ((item === 'gpt' || item === 'claude') && !normalized.includes(item)) {
-        normalized.push(item);
-      }
-    }
-
-    return normalized.length ? normalized : ['gpt'];
-  }
-
-  function normalizeApiKeyHealthModel(value) {
-    const model = normalizeText(value) || DEFAULT_APIKEY_HEALTH_MODEL;
-    if (!APIKEY_HEALTH_MODELS.has(model)) {
-      throw new Error('apikey 可用性测试模型仅支持 gpt-5.4-mini 或 gpt-5.4');
-    }
-
-    return model;
-  }
-
-  function parseJsonObject(rawText, label) {
-    const parsed = parseJsonValue(rawText, label);
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(`${label} 必须是 JSON 对象`);
-    }
-
-    return parsed;
-  }
-
-  function parseJsonValue(rawText, label) {
-    try {
-      return JSON.parse(String(rawText || '').trim());
-    } catch (error) {
-      throw new Error(`${label} 解析失败: ${error.message}`);
-    }
-  }
-
-  function parseLooseJsonValue(rawText, label) {
-    const text = String(rawText || '').trim();
-    const candidates = [
-      text,
-      text.replace(/,\s*([}\]])/g, '$1'),
-    ];
-
-    if (text.startsWith('[') && /},\s*$/.test(text)) {
-      candidates.push(`${text.replace(/,\s*$/, '')}]`);
-    }
-
-    for (const candidate of candidates) {
-      if (!candidate) {
-        continue;
-      }
-
-      try {
-        return JSON.parse(candidate);
-      } catch (error) {
-        // Try the next tolerated paste shape before reporting a parse error.
-      }
-    }
-
-    return parseJsonValue(rawText, label);
-  }
-
-  function isOAuthExportItem(value) {
-    const credentials = value && value.credentials && typeof value.credentials === 'object' &&
-      !Array.isArray(value.credentials)
-      ? value.credentials
-      : null;
-    return Boolean(
-      value &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      credentials &&
-      (
-        normalizeText(credentials.access_token) ||
-        (
-          normalizeText(value.platform).toLowerCase() === 'openai' &&
-          normalizeText(value.type).toLowerCase() === 'oauth' &&
-          normalizeText(credentials.auth_mode).toLowerCase() === 'agentidentity'
-        )
-      )
-    );
-  }
-
-  function normalizeOAuthExportItem(item) {
-    const credentials = item.credentials || {};
-    const extra = item.extra && typeof item.extra === 'object' && !Array.isArray(item.extra)
-      ? item.extra
-      : {};
-    const isAgentIdentity = normalizeText(item.platform).toLowerCase() === 'openai' &&
-      normalizeText(item.type).toLowerCase() === 'oauth' &&
-      normalizeText(credentials.auth_mode).toLowerCase() === 'agentidentity';
-    if (isAgentIdentity) {
-      const normalizedCredentials = {
-        auth_mode: 'agentIdentity',
-        agent_runtime_id: normalizeText(credentials.agent_runtime_id),
-        agent_private_key: normalizeText(credentials.agent_private_key),
-        task_id: normalizeText(credentials.task_id),
-        chatgpt_account_id: normalizeText(credentials.chatgpt_account_id || credentials.account_id ||
-          extra.chatgpt_account_id || extra.account_id),
-        chatgpt_user_id: normalizeText(credentials.chatgpt_user_id),
-        chatgpt_account_is_fedramp: credentials.chatgpt_account_is_fedramp === true,
-        email: normalizeText(credentials.email || extra.email),
-        plan_type: normalizeText(credentials.plan_type),
-      };
-      const requiredFields = [
-        'agent_runtime_id',
-        'agent_private_key',
-        'chatgpt_account_id',
-        'chatgpt_user_id',
-      ];
-      const missingFields = requiredFields.filter(field => !normalizedCredentials[field]);
-      if (missingFields.length > 0) {
-        throw new Error(`Sub2API Agent Identity 缺少必填字段: ${missingFields.join(', ')}`);
-      }
-      for (const field of ['task_id', 'email', 'plan_type']) {
-        if (!normalizedCredentials[field]) {
-          delete normalizedCredentials[field];
-        }
-      }
-
-      const imported = {
-        type: 'token',
-        subtype: 'sub2api',
-        description: normalizeText(item.description) || normalizedCredentials.email ||
-          normalizeText(item.name) || normalizedCredentials.chatgpt_account_id,
-        credentials: normalizedCredentials,
-      };
-      for (const field of ['concurrency', 'priority', 'rate_multiplier', 'auto_pause_on_expired']) {
-        if (Object.prototype.hasOwnProperty.call(item, field)) {
-          imported[field] = item[field];
-        }
-      }
-      return imported;
-    }
-
-    const accessToken = normalizeText(credentials.access_token);
-    const accountId = normalizeText(credentials.chatgpt_account_id) ||
-      normalizeText(credentials.account_id) ||
-      normalizeText(extra.chatgpt_account_id) ||
-      normalizeText(extra.account_id);
-
-    if (!accessToken || !accountId) {
-      throw new Error('OAuth 导出项必须包含 credentials.access_token 和 chatgpt_account_id');
-    }
-
-    const imported = {
-      description: normalizeText(credentials.email) || normalizeText(extra.email) || normalizeText(item.name) || accountId,
-      account_id: accountId,
-      access_token: accessToken,
-    };
-    const refreshToken = normalizeText(credentials.refresh_token);
-    const clientId = normalizeText(credentials.client_id);
-
-    if (refreshToken) {
-      imported.refresh_token = refreshToken;
-    }
-
-    if (clientId) {
-      imported.client_id = clientId;
-    }
-
-    return imported;
-  }
-
-  function normalizeOAuthExportInput(rawText) {
-    const parsed = parseLooseJsonValue(rawText, 'OAuth 导出 JSON');
-    const items = Array.isArray(parsed) ? parsed : [parsed];
-
-    if (!items.every(isOAuthExportItem)) {
-      throw new Error('OAuth 导出 JSON 必须是传统 access token 或 Sub2API Agent Identity 对象/数组');
-    }
-
-    return items.map(normalizeOAuthExportItem);
-  }
-
-  function buildConfigItemFromForm(values) {
-    const formValues = values && typeof values === 'object' ? values : {};
-    const mode = normalizeText(formValues.mode || 'token').toLowerCase();
-
-    if (mode === 'token') {
-      const rawTokenJson = formValues.tokenRawJson;
-      let parsed;
-      try {
-        parsed = parseJsonValue(rawTokenJson, 'AuthSession JSON');
-      } catch (error) {
-        return normalizeOAuthExportInput(rawTokenJson);
-      }
-      const parsedItems = Array.isArray(parsed) ? parsed : [parsed];
-      if (parsedItems.length > 0 && parsedItems.every(isOAuthExportItem)) {
-        return normalizeOAuthExportInput(rawTokenJson);
-      }
-
-      if (Array.isArray(parsed)) {
-        if (parsed.length === 0) {
-          throw new Error('AuthSession JSON 数组不能为空');
-        }
-        parsed.forEach((item, index) => {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) {
-            throw new Error(`AuthSession JSON 数组第 ${index + 1} 项必须是 JSON 对象`);
-          }
-        });
-        return parsed;
-      }
-      if (!parsed || typeof parsed !== 'object') {
-        throw new Error('AuthSession JSON 必须是 JSON 对象或对象数组');
-      }
-      return parsed;
-    }
-
-    if (mode !== 'apikey') {
-      throw new Error('请选择 token 或 apikey 模式');
-    }
-
-    const apikey = normalizeText(formValues.apiKey);
-    const baseUrl = normalizeBaseUrl(formValues.baseUrl);
-
-    if (!apikey) {
-      throw new Error('apikey 模式下请填写 API Key');
-    }
-
-    if (!baseUrl) {
-      throw new Error('apikey 模式下请填写 Base URL');
-    }
-
-    return {
-      type: 'apikey',
-      apikey,
-      base_url: baseUrl,
-      description: normalizeText(formValues.description),
-      support: normalizeSupport(formValues.support),
-      health: {
-        model: normalizeApiKeyHealthModel(formValues.healthModel),
-      },
-    };
-  }
-
-  function getConfigGuideContent(snapshot) {
-    return {
-      steps: [
-        {
-          title: '选择模式',
-          description: 'OpenAI token 是 Responses 主链路，Claude token 是 Messages 主链路，apikey 只作为对应链路的兜底上游。',
-          actionText: '打开 ChatGPT',
-          actionHref: 'https://chatgpt.com/',
-        },
-        {
-          title: 'OpenAI token',
-          description: '建议使用浏览器隐私模式登录 ChatGPT 后打开 AuthSession 页面，把返回的 AuthSession JSON 粘贴到文本框里。粘贴后不要退出该登录态，否则 token 会失效。',
-          example: JSON.stringify({
-            user: {
-              email: 'user@example.com',
-            },
-            account: {
-              id: 'account-id',
-            },
-            accessToken: '...',
-            refresh_token: '...',
-          }, null, 2),
-          actionText: '复制 AuthSession 页面',
-          actionCopyText: 'https://chatgpt.com/api/auth/session',
-        },
-        {
-          title: 'Fallback apikey',
-          description: '直接用输入框填写 Base URL、API Key 和备注，再选择这个兜底上游支持 GPT、Claude 或两者。普通 OpenAI 兼容服务选 GPT；Claude Messages 原样转发选 Claude。',
-        },
-      ],
-      rawJsonPlaceholder: JSON.stringify({
-        user: {
-          email: 'user@example.com',
-        },
-        account: {
-          id: 'account-id',
-        },
-        accessToken: '...',
-        refresh_token: '...',
-      }, null, 2),
-    };
-  }
-
-  function hasApiKeyConfig(snapshot) {
-    const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
-    const disabledConfigs = Array.isArray(snapshot && snapshot.disabled_configs) ? snapshot.disabled_configs : [];
-    return [...configs, ...disabledConfigs].some(item => {
-      const configItem = item && item.item ? item.item : item;
-      return configItem && (configItem.type === 'apikey' || configItem.type === 'claude_token');
-    });
-  }
-
-  function getConfigItem(item) {
-    return item && item.item ? item.item : item;
-  }
-
-  function getConfigType(item) {
-    const configItem = getConfigItem(item);
-    const type = normalizeText(configItem && configItem.type).toLowerCase();
-    return type || 'token';
-  }
-
-  function getConfigSubtype(item) {
-    const configItem = getConfigItem(item);
-    return normalizeText(configItem && configItem.subtype).toLowerCase();
-  }
-
-  function getApiKeySupport(item) {
-    const configItem = getConfigItem(item);
-    return normalizeSupport(configItem && configItem.support);
-  }
-
-  function configSupports(item, capability) {
-    return getApiKeySupport(item).includes(capability);
-  }
-
-  function getDispatchRoles(item) {
-    if (Array.isArray(item && item.dispatch_roles)) {
-      return item.dispatch_roles.filter(role => typeof role === 'string' && role);
-    }
-
-    return typeof item?.dispatch_role === 'string' && item.dispatch_role
-      ? [item.dispatch_role]
-      : [];
-  }
-
-  function hasDispatchRole(item, role) {
-    return getDispatchRoles(item).includes(role);
-  }
-
-  function getConfigRole(item) {
-    const type = getConfigType(item);
-    if (type === 'claude_token') {
-      return {
-        key: 'claude-token',
-        label: 'Claude token',
-        lane: 'Claude Messages',
-        priority: '主链路',
-        tone: 'active',
-      };
-    }
-
-    if (type === 'apikey') {
-      const support = getApiKeySupport(item);
-      const isOpenAiFocus = hasDispatchRole(item, 'openai_apikey_fallback_focus') ||
-        hasDispatchRole(item, 'apikey_fallback_focus');
-      const isClaudeFocus = hasDispatchRole(item, 'claude_apikey_fallback_focus') ||
-        hasDispatchRole(item, 'apikey_fallback_focus');
-      const focusPriority = isOpenAiFocus && isClaudeFocus
-        ? '双链路兜底焦点'
-        : isOpenAiFocus
-          ? 'OpenAI 兜底焦点'
-          : isClaudeFocus
-            ? 'Claude 兜底焦点'
-            : '兜底';
-      const tone = isOpenAiFocus || isClaudeFocus ? 'active' : 'muted';
-
-      if (support.includes('gpt') && support.includes('claude')) {
-        return {
-          key: 'fallback-both',
-          label: 'API key',
-          lane: '双链路 fallback',
-          priority: focusPriority,
-          tone,
-        };
-      }
-
-      if (support.includes('claude')) {
-        return {
-          key: 'fallback-claude',
-          label: 'API key',
-          lane: 'Claude fallback',
-          priority: focusPriority,
-          tone,
-        };
-      }
-
-      return {
-        key: 'fallback-gpt',
-        label: 'API key',
-        lane: 'Responses fallback',
-        priority: focusPriority,
-        tone,
-      };
-    }
-
-    const subtype = getConfigSubtype(item);
-    return {
-      key: 'openai-token',
-      label: subtype === 'sub2api' ? 'Sub2API Agent Identity' : 'OpenAI token',
-      lane: 'Responses',
-      priority: '主链路',
-      tone: 'ok',
-    };
-  }
-
-  function getConfigCollection(snapshot, key) {
-    return Array.isArray(snapshot && snapshot[key]) ? snapshot[key] : [];
-  }
-
-  function getEnabledConfigsByRole(snapshot, predicate) {
-    return getConfigCollection(snapshot, 'configs').filter(item => predicate(item && item.item ? item.item : item));
-  }
-
-  function getFallbackConfigs(snapshot, capability) {
-    return getEnabledConfigsByRole(snapshot, item => getConfigType(item) === 'apikey' && configSupports(item, capability));
-  }
-
-  function getPrimaryConfigs(snapshot, type) {
-    return getEnabledConfigsByRole(snapshot, item => getConfigType(item) === type);
-  }
-
-  function getRouteLanes(snapshot) {
-    const openAiTokens = getPrimaryConfigs(snapshot, 'token');
-    const claudeTokens = getPrimaryConfigs(snapshot, 'claude_token');
-    const gptFallbacks = getFallbackConfigs(snapshot, 'gpt');
-    const claudeFallbacks = getFallbackConfigs(snapshot, 'claude');
-
-    return [
-      {
-        key: 'responses',
-        title: 'Responses 链路',
-        endpoint: '/v1/responses',
-        primaryLabel: 'OpenAI token',
-        fallbackLabel: 'GPT apikey',
-        primary: openAiTokens,
-        fallback: gptFallbacks,
-        description: 'OpenAI token 负责主请求；全部不可用时才使用 GPT apikey。',
-      },
-      {
-        key: 'messages',
-        title: 'Claude Messages 链路',
-        endpoint: '/v1/messages',
-        primaryLabel: 'Claude token',
-        fallbackLabel: 'Claude apikey',
-        primary: claudeTokens,
-        fallback: claudeFallbacks,
-        description: 'Claude token 负责原样转发；全部不可用时才使用 Claude apikey。',
-      },
-      {
-        key: 'converted-messages',
-        title: 'Messages 转换兜底',
-        endpoint: '/v1/messages -> /v1/responses',
-        primaryLabel: 'OpenAI token',
-        fallbackLabel: 'GPT apikey',
-        primary: openAiTokens,
-        fallback: gptFallbacks,
-        description: 'Claude 直转链路不可用时，才把 Messages 转成 Responses。',
-      },
-    ];
-  }
-
-  function getConfigIdentityColumnLabel(snapshot) {
-    return hasApiKeyConfig(snapshot) ? '上游配置' : 'account_id';
-  }
-
-  function getConfigIdentityValue(snapshot, item) {
-    const configItem = item && item.item ? item.item : item;
-
-    if (configItem && configItem.type === 'apikey') {
-      const baseUrl = typeof configItem.base_url === 'string' && configItem.base_url.trim()
-        ? configItem.base_url.trim()
-        : typeof configItem.baseUrl === 'string' && configItem.baseUrl.trim()
-          ? configItem.baseUrl.trim()
-        : '-';
-      const apikey = configItem && (configItem.apikey || configItem.apiKey || configItem.api_key);
-
-      return `${baseUrl} (${maskSecret(apikey)})`;
-    }
-
-    if (configItem && configItem.type === 'claude_token') {
-      const baseUrl = typeof configItem.base_url === 'string' && configItem.base_url.trim()
-        ? configItem.base_url.trim()
-        : typeof configItem.baseUrl === 'string' && configItem.baseUrl.trim()
-          ? configItem.baseUrl.trim()
-        : 'https://api.anthropic.com';
-      const identity = configItem.local_auth_token || configItem.account_uuid || configItem.access_token;
-
-      return `${baseUrl} (${maskSecret(identity)})`;
-    }
-
-    if (getConfigSubtype(configItem) === 'sub2api') {
-      const credentials = configItem.credentials && typeof configItem.credentials === 'object'
-        ? configItem.credentials
-        : {};
-      const accountId = normalizeText(credentials.chatgpt_account_id);
-      return accountId ? `Sub2API (${accountId})` : 'Sub2API Agent Identity';
-    }
-
-    const value = configItem && configItem.account_id;
-
-    return typeof value === 'string' && value.trim() ? value.trim() : '-';
-  }
-
-  function formatConfigItemCopyText(item) {
-    const configItem = item && item.item ? item.item : item;
-
-    return JSON.stringify(configItem || {}, null, 2);
-  }
-
-  function hasRefreshTokenConfig(item) {
-    const configItem = item && item.item ? item.item : item;
-
-    return Boolean(configItem && configItem.type !== 'apikey' && typeof configItem.refresh_token === 'string' && configItem.refresh_token.trim());
-  }
-
-  function getRuntimeSummaryText(runtime) {
-    return typeof runtime?.runtime_summary === 'string' ? runtime.runtime_summary : '';
-  }
-
-  function hasRuntimeProblem(runtime) {
-    return extractRuntimeStatusTags(runtime)
-      .some(tag => tag.label === '异常');
-  }
-
-  function getActiveConfigLabel(snapshot) {
-    const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
-    const active = configs.find(item => item && item.is_active);
-
-    return active && Number.isInteger(active.index) ? `配置 #${active.index + 1}` : '自动调度';
-  }
-
-  function formatObservedDispatchSession(observedSession) {
-    if (!observedSession || typeof observedSession !== 'object') {
-      return '';
-    }
-
-    const sessionStatus = formatDispatchSessionStatus({
-      in_flight: observedSession.in_flight,
-      dispatch_session: observedSession,
-    });
-    if (!sessionStatus) {
-      return '';
-    }
-
-    const configIndex = Number(observedSession.config_index);
-    const configLabel = Number.isInteger(configIndex)
-      ? `配置 #${configIndex + 1}`
-      : typeof observedSession.config_label === 'string' && observedSession.config_label.trim()
-        ? observedSession.config_label.trim()
-        : '未知配置';
-
-    return `${sessionStatus.title} ${sessionStatus.label} -> ${configLabel}`;
-  }
-
-  function getDispatchModeSummary(snapshot) {
-    const dispatch = snapshot && snapshot.dispatch && typeof snapshot.dispatch === 'object'
-      ? snapshot.dispatch
-      : null;
-    if (dispatch && dispatch.mode === 'apikey_fallback_focus') {
-      return {
-        value: dispatch.label || 'Fallback apikey 焦点',
-        tone: 'active',
-        detail: dispatch.detail || 'apikey 只在对应 token 链路不可用时兜底',
-      };
-    }
-
-    if (dispatch && dispatch.mode === 'claude_token_focus') {
-      return {
-        value: dispatch.label || 'Claude token 焦点',
-        tone: 'active',
-        detail: dispatch.detail || 'Claude token 负责 /v1/messages 主链路',
-      };
-    }
-
-    if (dispatch && dispatch.mode === 'token_pool') {
-      const observedDetail = formatObservedDispatchSession(dispatch.observed_session);
-      return {
-        value: dispatch.label || 'OpenAI token 池',
-        tone: 'active',
-        detail: observedDetail || dispatch.detail || 'OpenAI token 负责 Responses 主链路',
-      };
-    }
-
-    const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
-    const active = configs.find(item => item && item.is_active);
-    if (active && active.item && active.item.type === 'apikey') {
-      return {
-        value: `Fallback apikey 焦点: 配置 #${active.index + 1}`,
-        tone: 'active',
-        detail: 'apikey 只在对应 token 链路不可用时兜底',
-      };
-    }
-
-    if (active && active.item && active.item.type === 'claude_token') {
-      return {
-        value: `Claude token 焦点: 配置 #${active.index + 1}`,
-        tone: 'active',
-        detail: 'Claude token 负责 /v1/messages 主链路',
-      };
-    }
-
-    if (active) {
-      return {
-        value: `OpenAI token 池: 焦点配置 #${active.index + 1}`,
-        tone: 'active',
-        detail: 'OpenAI token 负责 Responses 主链路，apikey 仅作 fallback',
-      };
-    }
-
-    return {
-      value: '无可用配置',
-      tone: 'muted',
-      detail: '请先添加 OpenAI token、Claude token 或 fallback apikey',
-    };
-  }
-
-  function formatDispatchSessionStatus(runtime) {
-    const session = runtime && typeof runtime === 'object'
-      ? runtime.dispatch_session || runtime.dispatchSession
-      : null;
-    if (!session || typeof session !== 'object') {
-      return null;
-    }
-
-    const sessionHash = typeof session.session_hash === 'string' && session.session_hash
-      ? session.session_hash
-      : typeof session.sessionHash === 'string' && session.sessionHash
-        ? session.sessionHash
-        : '';
-    const label = typeof session.label === 'string' && session.label.trim()
-      ? session.label.trim()
-      : sessionHash
-        ? `#${sessionHash}`
-        : '匿名请求';
-    const active = Boolean(session.active);
-    const sticky = Boolean(session.sticky);
-    const fallback = Boolean(session.fallback);
-    const hasSessionKey = Boolean(session.has_session_key || session.hasSessionKey || sessionHash);
-    const inFlight = Number(runtime.in_flight ?? runtime.inFlight);
-    const detailParts = [];
-
-    if (active) {
-      detailParts.push(Number.isFinite(inFlight) && inFlight > 1
-        ? `进行中 ${Math.floor(inFlight)}`
-        : '进行中');
-    } else {
-      detailParts.push('已释放');
-    }
-
-    if (fallback) {
-      detailParts.push('fallback');
-    }
-
-    if (!sticky && !hasSessionKey) {
-      detailParts.push('匿名');
-    }
-
-    return {
-      title: active ? '当前会话' : '最近会话',
-      label,
-      detail: detailParts.join(' · '),
-      active,
-      tone: active ? 'active' : 'muted',
-    };
-  }
-
-  function normalizeModelName(value) {
-    return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : '';
-  }
-
-  function modelNameHasVersionPrefix(model, prefix) {
-    const normalizedModel = normalizeModelName(model);
-    const normalizedPrefix = normalizeModelName(prefix);
-    if (!normalizedModel || !normalizedPrefix) {
-      return false;
-    }
-
-    if (normalizedModel === normalizedPrefix) {
-      return true;
-    }
-
-    if (!normalizedModel.startsWith(normalizedPrefix)) {
-      return false;
-    }
-
-    const suffix = normalizedModel.slice(normalizedPrefix.length);
-    return /^-\d{4}-\d{2}-\d{2}(?:$|[-._])/.test(suffix);
-  }
-
-  function areResponseModelsConsistent(requestModel, responseModel) {
-    return modelNameHasVersionPrefix(responseModel, requestModel) ||
-      modelNameHasVersionPrefix(requestModel, responseModel);
-  }
-
-  function formatResponseModelStatus(runtime) {
-    const model = runtime && typeof runtime === 'object'
-      ? runtime.response_model || runtime.responseModel
-      : null;
-    if (!model || typeof model !== 'object') {
-      return null;
-    }
-
-    const requestModel = typeof model.request_model === 'string' && model.request_model.trim()
-      ? model.request_model.trim()
-      : typeof model.requestModel === 'string' && model.requestModel.trim()
-        ? model.requestModel.trim()
-        : '';
-    const responseModel = typeof model.response_model === 'string' && model.response_model.trim()
-      ? model.response_model.trim()
-      : typeof model.responseModel === 'string' && model.responseModel.trim()
-        ? model.responseModel.trim()
-        : '';
-    const statusCode = Number(model.status_code ?? model.statusCode);
-    const active = Boolean(model.active);
-    const downgraded = Boolean(model.downgraded);
-    const detailParts = [];
-
-    if (active) {
-      detailParts.push('进行中');
-    }
-
-    if (downgraded) {
-      detailParts.push('已降级');
-    }
-
-    const modelsDiffer = Boolean(
-      requestModel &&
-      responseModel &&
-      !areResponseModelsConsistent(requestModel, responseModel)
-    );
-
-    if (modelsDiffer) {
-      detailParts.push(`请求 ${requestModel}`);
-    }
-
-    if (Number.isInteger(statusCode) && statusCode > 0) {
-      detailParts.push(`HTTP ${statusCode}`);
-    }
-
-    return {
-      title: responseModel ? '响应模型' : '请求模型',
-      label: responseModel || requestModel || '等待响应',
-      detail: detailParts.join(' · '),
-      active,
-      tone: modelsDiffer ? 'warn' : active ? 'active' : 'muted',
-    };
-  }
-
-  function moveConfigSnapshotItem(snapshot, fromIndex, toIndex = 0) {
-    const data = snapshot && typeof snapshot === 'object' ? snapshot : {};
-    const configs = Array.isArray(data.configs) ? data.configs.slice() : [];
-    const normalizedFromIndex = Number(fromIndex);
-    const normalizedToIndex = Number(toIndex);
-
-    if (
-      !Number.isInteger(normalizedFromIndex) ||
-      !Number.isInteger(normalizedToIndex) ||
-      normalizedFromIndex < 0 ||
-      normalizedToIndex < 0 ||
-      normalizedToIndex >= configs.length
-    ) {
-      return data;
-    }
-
-    const sourcePosition = configs.findIndex(item => Number(item && item.index) === normalizedFromIndex);
-    if (sourcePosition < 0) {
-      return data;
-    }
-
-    const [movedItem] = configs.splice(sourcePosition, 1);
-    configs.splice(Math.min(normalizedToIndex, configs.length), 0, movedItem);
-
-    const reindexedConfigs = configs.map((item, index) => {
-      const nextItem = {
-        ...item,
-        index,
-      };
-
-      if (item && item.runtime && typeof item.runtime === 'object') {
-        nextItem.runtime = {
-          ...item.runtime,
-          index,
-        };
-      }
-
-      return nextItem;
-    });
-    const activeConfig = reindexedConfigs.find(item => item && item.is_active);
-
-    return {
-      ...data,
-      active_config_index: activeConfig ? activeConfig.index : data.active_config_index,
-      configs: reindexedConfigs,
-    };
-  }
-
-  function formatProbeTime(value, options = {}) {
-    const timestamp = Number(value);
-    if (!Number.isFinite(timestamp) || timestamp <= 0) {
-      return '';
-    }
-
-    const checkedAt = new Date(timestamp);
-    if (Number.isNaN(checkedAt.getTime())) {
-      return '';
-    }
-
-    const formatOptions = {
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    };
-    if (options.timeZone) {
-      formatOptions.timeZone = options.timeZone;
-    }
-
-    return checkedAt.toLocaleTimeString(options.locale || 'zh-CN', formatOptions);
-  }
-
-  function formatProbeInterval(value) {
-    const intervalMs = Number(value);
-    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
-      return '';
-    }
-
-    const minutes = Math.max(1, Math.round(intervalMs / 60000));
-    return `每 ${minutes} 分钟`;
-  }
-
-  function formatApiKeyRecoveryStatus(runtime, options = {}) {
-    const recovery = runtime && typeof runtime === 'object'
-      ? runtime.api_key_recovery || runtime.apiKeyRecovery
-      : null;
-    if (!recovery || typeof recovery !== 'object' || recovery.enabled === false) {
-      return null;
-    }
-
-    const result = normalizeText(recovery.result || 'never').toLowerCase();
-    const pending = Boolean(recovery.pending);
-    const checkedAt = formatProbeTime(recovery.last_checked_at ?? recovery.lastCheckedAt, options);
-    const model = normalizeText(recovery.model);
-    const statusCode = Number(recovery.status_code ?? recovery.statusCode);
-    const lastError = normalizeText(recovery.last_error ?? recovery.lastError);
-    const intervalText = formatProbeInterval(recovery.interval_ms ?? recovery.intervalMs);
-    const detailParts = [];
-
-    if (checkedAt) {
-      detailParts.push(`上次 ${checkedAt}`);
-    }
-
-    if (model) {
-      detailParts.push(`模型 ${model}`);
-    }
-
-    if (Number.isInteger(statusCode) && statusCode > 0) {
-      detailParts.push(`HTTP ${statusCode}`);
-    }
-
-    if (lastError) {
-      detailParts.push(lastError);
-    }
-
-    if (intervalText) {
-      detailParts.push(`仅不可用时${intervalText}恢复探测`);
-    }
-
-    if (result === 'success') {
-      return {
-        title: 'API Key 探测',
-        label: '恢复成功',
-        detail: detailParts.join(' · '),
-        active: false,
-        tone: 'ok',
-      };
-    }
-
-    if (result === 'failed' || result === 'error') {
-      return {
-        title: 'API Key 探测',
-        label: '仍不可用',
-        detail: detailParts.join(' · '),
-        active: false,
-        tone: 'danger',
-      };
-    }
-
-    return {
-      title: 'API Key 探测',
-      label: pending ? '等待探测' : '未触发',
-      detail: detailParts.join(' · '),
-      active: false,
-      tone: pending ? 'warn' : 'muted',
-    };
-  }
-
-  function extractRuntimeStatusTags(runtime) {
-    const text = getRuntimeSummaryText(runtime);
-
-    if (!text) {
-      return [
-        { label: '暂无运行态', tone: 'muted' },
-      ];
-    }
-
-    const tags = [];
-    const lower = text.toLowerCase();
-
-    if (text.includes('可用=是')) {
-      tags.push({ label: '可用', tone: 'ok' });
-    } else if (text.includes('可用=否')) {
-      tags.push({ label: '不可用', tone: 'danger' });
-    }
-
-    const quotaMatch = text.match(/额度=([^|]+)/);
-    if (quotaMatch && quotaMatch[1]) {
-      const value = quotaMatch[1].trim();
-      tags.push({
-        label: `额度 ${value}`,
-        tone: value === 'unknown' ? 'warn' : 'ok',
-      });
-    }
-
-    const refreshMatch = text.match(/刷新时间=([^|]+)/);
-    if (refreshMatch && refreshMatch[1]) {
-      const value = refreshMatch[1].trim();
-      tags.push({
-        label: `刷新 ${value}`,
-        tone: value === 'unknown' ? 'warn' : 'muted',
-      });
-    }
-
-    if (lower.includes('timeout')) {
-      tags.push({ label: 'timeout', tone: 'danger' });
-    } else if (lower.includes('401')) {
-      tags.push({ label: '401', tone: 'danger' });
-    } else if (text.includes('失败') || text.includes('错误=')) {
-      tags.push({ label: '异常', tone: 'danger' });
-    }
-
-    return tags.length ? tags.slice(0, 4) : [
-      { label: '已读取', tone: 'muted' },
-    ];
-  }
-
-  function buildAdminStatusSummary(snapshot) {
-    const apikeys = Array.isArray(snapshot && snapshot.apikeys) ? snapshot.apikeys : [];
-    const configs = Array.isArray(snapshot && snapshot.configs) ? snapshot.configs : [];
-    const problemCount = configs.filter(item => hasRuntimeProblem(item && item.runtime)).length;
-    const problemTags = [];
-    const runtimeText = configs
-      .map(item => getRuntimeSummaryText(item && item.runtime).toLowerCase())
-      .join(' ');
-
-    if (runtimeText.includes('timeout')) {
-      problemTags.push('timeout');
-    }
-
-    if (runtimeText.includes('401')) {
-      problemTags.push('401');
-    }
-
-    if (runtimeText.includes('quota') || runtimeText.includes('额度')) {
-      problemTags.push('额度');
-    }
-
-    return [
-      {
-        label: '入口 apikey',
-        value: apikeys.length ? `${apikeys.length} 个` : '未配置',
-        tone: apikeys.length ? 'ok' : 'warn',
-        detail: apikeys.length ? '请求会校验入口 apikey' : '请求不会校验入口 apikey',
-      },
-      {
-        label: '上游配置',
-        value: `${configs.length} 个`,
-        tone: configs.length ? 'ok' : 'warn',
-        detail: 'Token 与 API Key 配置总数',
-      },
-      {
-        label: '调度模式',
-        value: getDispatchModeSummary(snapshot).value,
-        tone: getDispatchModeSummary(snapshot).tone,
-        detail: getDispatchModeSummary(snapshot).detail,
-      },
-      {
-        label: '健康状态',
-        value: problemCount ? `${problemCount} 个异常` : '未发现异常',
-        tone: problemCount ? 'warn' : 'ok',
-        detail: problemCount ? `发现 ${problemTags[0] || '运行态异常'}` : '基于当前运行态摘要',
-      },
-    ];
-  }
-
-  function buildHelloTestRequest(snapshot) {
-    return {
-      model: 'gpt-5.4-mini',
-      instructions: '',
-      input: [
-        {
-          type: 'message',
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: 'hello',
-            },
-          ],
-        },
-      ],
-      tools: [],
-      tool_choice: 'auto',
-      parallel_tool_calls: false,
-      store: false,
-      stream: true,
-      include: [],
-    };
-  }
-
-  function buildHelloTestHeaders(sessionId) {
-    const normalizedSessionId = typeof sessionId === 'string' && sessionId.trim()
-      ? sessionId.trim()
-      : 'airouter-test-request';
-
-    return {
-      originator: 'codex_cli_rs',
-      version: '1.0.1',
-      session_id: normalizedSessionId,
-      'x-client-request-id': normalizedSessionId,
-    };
-  }
-
-  function getResponsesModelAliases(snapshot) {
-    const aliases = snapshot && snapshot.responses && snapshot.responses.model_aliases;
-    return aliases && typeof aliases === 'object' && !Array.isArray(aliases) ? aliases : {};
+  function extractErrorMessage(payload, fallback = '请求失败') {
+    return payload?.error?.message || payload?.message || fallback;
   }
 
   function normalizePortValue(value) {
-    if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535) {
-      return value;
-    }
-
-    const text = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
-    if (!/^\d+$/.test(text)) {
-      return null;
-    }
-
-    const port = Number.parseInt(text, 10);
-    return port >= 1 && port <= 65535 ? port : null;
+    const text = String(value ?? '').trim();
+    if (!/^\d+$/.test(text)) return null;
+    const port = Number(text);
+    return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
   }
 
-  function getConfiguredServicePort(snapshot) {
-    return normalizePortValue(snapshot && snapshot.file_port)
-      || normalizePortValue(snapshot && snapshot.runtime_port)
-      || 3009;
+  function parsePortSettings(portValue, proxyValue) {
+    const port = normalizePortValue(portValue);
+    if (!port) throw new Error('服务端口必须是 1-65535 之间的整数');
+    const proxyText = String(proxyValue ?? '').trim();
+    const proxyPort = proxyText ? normalizePortValue(proxyText) : null;
+    if (proxyText && !proxyPort) throw new Error('代理端口必须是 1-65535 之间的整数，或留空');
+    return { port, proxy_port: proxyPort };
   }
 
-  function getRuntimeServicePort(snapshot) {
-    return normalizePortValue(snapshot && snapshot.runtime_port)
-      || getConfiguredServicePort(snapshot);
-  }
-
-  function getConfiguredProxyPort(snapshot) {
-    return normalizePortValue(snapshot && snapshot.proxy_port);
-  }
-
-  function buildProxyAccessInfo(snapshot) {
-    const configuredPort = getConfiguredServicePort(snapshot);
-    const runtimePort = getRuntimeServicePort(snapshot);
-    const baseUrl = `http://localhost:${runtimePort}`;
-    const configuredBaseUrl = `http://localhost:${configuredPort}`;
-
-    return {
-      configuredPort,
-      runtimePort,
-      proxyPort: getConfiguredProxyPort(snapshot),
-      baseUrl,
-      responsesUrl: `${baseUrl}/v1/responses`,
-      v1Url: `${baseUrl}/v1`,
-      configuredV1Url: `${configuredBaseUrl}/v1`,
-      portPendingRestart: configuredPort !== runtimePort,
-    };
-  }
-
-  function buildRuntimeSyncText(options = {}) {
-    const state = normalizeText(options.state || 'idle');
-
-    if (state === 'refreshing') {
-      return '正在刷新额度...';
-    }
-
-    if (state === 'error') {
-      const errorText = normalizeText(options.error);
-      return errorText ? `运行态同步失败: ${errorText}` : '运行态同步失败';
-    }
-
-    if (state === 'synced' && options.syncedAt) {
-      const syncedAt = options.syncedAt instanceof Date ? options.syncedAt : new Date(options.syncedAt);
-      if (!Number.isNaN(syncedAt.getTime())) {
-        const formatOptions = {
-          hour12: false,
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        };
-        if (options.timeZone) {
-          formatOptions.timeZone = options.timeZone;
-        }
-
-        return `运行态已同步: ${syncedAt.toLocaleTimeString(options.locale || 'zh-CN', formatOptions)}`;
-      }
-    }
-
-    return '运行态尚未同步';
-  }
-
-  function formatResponsesModelAliasesInput(snapshot) {
-    return JSON.stringify(getResponsesModelAliases(snapshot), null, 2);
-  }
-
-  function parseResponsesModelAliasesInput(rawText) {
-    const normalizedText = String(rawText || '').trim();
-
-    if (!normalizedText) {
-      return {};
-    }
-
+  function parseImportJson(rawText) {
     let parsed;
     try {
-      parsed = JSON.parse(normalizedText);
-    } catch (error) {
-      throw new Error(`模型映射配置解析失败: ${error.message}`);
+      parsed = JSON.parse(String(rawText || '').trim());
+    } catch {
+      throw new Error('请粘贴完整、合法的 AuthSession 或 Sub2API JSON');
     }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('模型映射配置必须是 JSON 对象');
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    if (!items.length || items.some(item => !item || typeof item !== 'object' || Array.isArray(item))) {
+      throw new Error('登录态必须是 JSON 对象或非空对象数组');
     }
-
-    const normalized = {};
-    for (const [sourceModel, targetModel] of Object.entries(parsed)) {
-      const normalizedSource = String(sourceModel || '').trim();
-      const normalizedTarget = typeof targetModel === 'string'
-        ? targetModel.trim()
-        : String(targetModel ?? '').trim();
-
-      if (!normalizedSource) {
-        throw new Error('模型映射配置的键必须是非空字符串');
-      }
-
-      if (!normalizedTarget) {
-        throw new Error('模型映射配置的值必须是非空字符串');
-      }
-
-      normalized[normalizedSource] = normalizedTarget;
-    }
-
-    return normalized;
+    return JSON.stringify(parsed);
   }
 
-  function extractResponseSummary(payload) {
-    if (payload && typeof payload.output_text === 'string' && payload.output_text.trim()) {
-      return payload.output_text.trim();
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[character]));
+  }
+
+  function createSettingsAdmin(options = {}) {
+    const doc = options.document || globalScope.document;
+    const win = options.window || globalScope;
+    if (!doc) return null;
+    const el = id => doc.getElementById(id);
+    if (!el('settingsDrawer')) return null;
+    const state = { settings: null, loading: false };
+    const token = new URLSearchParams(win.location.search).get('auth_token') || '';
+
+    function message(kind, text) {
+      const target = el('message');
+      target.className = `message show ${kind}`;
+      target.textContent = text;
     }
 
-    const output = Array.isArray(payload && payload.output) ? payload.output : [];
-    const textParts = [];
+    async function request(path, init = {}) {
+      const response = await win.fetch(buildRequestUrl(path, { adminAuthToken: token, origin: win.location.origin }), {
+        ...init, headers: { 'content-type': 'application/json', ...init.headers },
+      });
+      const text = await response.text();
+      let payload;
+      try { payload = text ? JSON.parse(text) : {}; }
+      catch { throw new Error(`服务返回无法识别的响应（HTTP ${response.status}）`); }
+      if (!response.ok) throw new Error(extractErrorMessage(payload, `HTTP ${response.status}`));
+      return payload;
+    }
 
-    for (const item of output) {
-      const content = Array.isArray(item && item.content) ? item.content : [];
-      for (const entry of content) {
-        if (entry && typeof entry.text === 'string' && entry.text.trim()) {
-          textParts.push(entry.text);
+    function renderSettings(settings) {
+      state.settings = settings;
+      const keys = Array.isArray(settings.apikeys) ? settings.apikeys : [];
+      el('apiKeyStatusBadge').textContent = keys.length ? `${keys.length} 个入口密钥` : '入口鉴权未启用';
+      el('apiKeysList').innerHTML = keys.length ? keys.map((key, index) => `
+        <div class="key-item">
+          <div><div class="key-meta">入口密钥 ${index + 1}</div><input class="mono" type="password" readonly value="${escapeHtml(key)}" aria-label="入口密钥 ${index + 1}"></div>
+          <div class="actions"><button class="secondary" type="button" data-reveal-key="${index}">显示</button><button class="secondary" type="button" data-copy-key="${index}">复制</button><button class="danger" type="button" data-delete-key="${index}">删除</button></div>
+        </div>`).join('') : '<div class="empty">没有入口密钥，请求将不校验入口鉴权。</div>';
+      el('servicePortInput').value = String(settings.port || 3009);
+      el('proxyPortInput').value = settings.proxy_port ? String(settings.proxy_port) : '';
+      // Reverse-proxy deployments use the page origin, not the internal Node port.
+      el('proxyV1Url').textContent = `${win.location.origin}/v1`;
+      el('proxyEndpointMeta').textContent = settings.proxy_port ? `上游代理端口：${settings.proxy_port}` : '未配置上游代理';
+    }
+
+    async function loadSettings() {
+      const settings = await request('/admin/api/settings');
+      renderSettings(settings);
+      return settings;
+    }
+
+    async function addApiKey() {
+      renderSettings(await request('/admin/api/apikeys', { method: 'POST' }));
+      message('info', '入口密钥已新增，可使用复制按钮。');
+    }
+
+    async function deleteApiKey(index) {
+      renderSettings(await request(`/admin/api/apikeys/${index}`, { method: 'DELETE' }));
+      message('info', '入口密钥已删除。');
+    }
+
+    async function savePorts() {
+      const settings = parsePortSettings(el('servicePortInput').value, el('proxyPortInput').value);
+      const result = await request('/admin/api/settings', { method: 'POST', body: JSON.stringify(settings) });
+      renderSettings(result);
+      message('info', '端口配置已保存。反向代理部署请同步检查代理目标端口。');
+      const change = result.network_settings;
+      const page = new URL(win.location.href);
+      const direct = page.hostname === 'localhost' || page.hostname === '127.0.0.1' || page.hostname === '[::1]';
+      if (direct && change?.port_changed && change.next_port) {
+        page.port = String(change.next_port);
+        win.location.href = page.toString();
+      }
+    }
+
+    async function importAccounts() {
+      const rawJson = parseImportJson(el('rawJsonInput').value);
+      const result = await request('/admin/api/upstreams/import', { method: 'POST', body: JSON.stringify({ raw_json: rawJson }) });
+      el('rawJsonInput').value = '';
+      win.dispatchEvent(new win.CustomEvent('airouter:configs-changed', {
+        detail: { source: 'token-import', added_ids: result.added_ids || [] },
+      }));
+      message('info', '登录态已导入，请为账号配置支持的模型。');
+      return result;
+    }
+
+    async function run(button, action) {
+      button.disabled = true;
+      try { await action(); }
+      catch (error) { message('error', error.message); }
+      finally { button.disabled = false; }
+    }
+
+    function init() {
+      el('addApiKeyButton').addEventListener('click', event => void run(event.currentTarget, addApiKey));
+      el('saveProxySettingsButton').addEventListener('click', event => void run(event.currentTarget, savePorts));
+      el('addButton').addEventListener('click', event => void run(event.currentTarget, importAccounts));
+      doc.addEventListener('click', event => {
+        const reveal = event.target.closest('[data-reveal-key]');
+        if (reveal) {
+          const input = reveal.closest('.key-item').querySelector('input');
+          input.type = input.type === 'password' ? 'text' : 'password';
+          reveal.textContent = input.type === 'password' ? '显示' : '隐藏';
+          return;
         }
-      }
+        const copy = event.target.closest('[data-copy-key]');
+        if (copy) {
+          void run(copy, async () => {
+            await win.navigator.clipboard.writeText(state.settings.apikeys[Number(copy.dataset.copyKey)]);
+            message('info', '入口密钥已复制。');
+          });
+          return;
+        }
+        const remove = event.target.closest('[data-delete-key]');
+        if (remove) {
+          if (remove.dataset.confirm !== 'true') {
+            remove.dataset.confirm = 'true'; remove.textContent = '确认删除';
+            win.setTimeout(() => { remove.dataset.confirm = ''; remove.textContent = '删除'; }, 4000);
+          } else void run(remove, () => deleteApiKey(Number(remove.dataset.deleteKey)));
+          return;
+        }
+        if (event.target.closest('[data-open-settings], #openSettingsButton')) {
+          void loadSettings().catch(error => message('error', error.message));
+        }
+      });
+      return loadSettings().catch(error => message('error', error.message));
     }
 
-    return textParts.join('').trim();
+    return { state, init, loadSettings, addApiKey, deleteApiKey, savePorts, importAccounts };
   }
 
-  const exported = {
-    buildConfigSnapshotRequest,
-    buildRequestUrl,
-    buildJsonRequestOptions,
-    parseResponsesApiResponse,
-    extractErrorMessage,
-    getPreferredApiKey,
-    buildHelloTestHeaders,
-    getConfigGuideContent,
-    getConfigRole,
-    getRouteLanes,
-    getConfigType,
-    getConfigSubtype,
-    configSupports,
-    getConfigIdentityColumnLabel,
-    getConfigIdentityValue,
-    formatConfigItemCopyText,
-    buildConfigItemFromForm,
-    normalizeOAuthExportInput,
-    buildAdminStatusSummary,
-    getDispatchModeSummary,
-    formatDispatchSessionStatus,
-    formatResponseModelStatus,
-    moveConfigSnapshotItem,
-    formatApiKeyRecoveryStatus,
-    extractRuntimeStatusTags,
-    getActiveConfigLabel,
-    hasRuntimeProblem,
-    hasRefreshTokenConfig,
-    buildHelloTestRequest,
-    formatResponsesModelAliasesInput,
-    parseResponsesModelAliasesInput,
-    extractResponseSummary,
-    normalizePortValue,
-    buildProxyAccessInfo,
-    buildRuntimeSyncText,
-  };
-
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = exported;
-  }
-
+  const exported = { buildRequestUrl, extractErrorMessage, normalizePortValue, parsePortSettings, parseImportJson, createSettingsAdmin };
+  if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   globalScope.AirouterConfigAdmin = exported;
+  if (typeof document !== 'undefined') {
+    const start = () => createSettingsAdmin()?.init();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+    else start();
+  }
 }(typeof globalThis !== 'undefined' ? globalThis : this));

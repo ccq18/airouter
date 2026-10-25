@@ -10,7 +10,7 @@ const { generateRandomSecret } = require('./app/request-auth');
 
 const PID_FILE = 'openai.pid';
 const LOG_FILE = 'openai.log';
-const CONFIG_FILE = 'openai.json';
+const CONFIG_FILE = 'config.json';
 const CONFIG_TEMPLATE_FILE = `${CONFIG_FILE}.example`;
 const CONTROL_FILE = 'openai.control.json';
 const CONTROL_REQUEST_FILE = 'openai.control.request.json';
@@ -221,7 +221,6 @@ async function runConfigWizard() {
       ...templateConfig,
       apikeys: enableApiKey ? [generateRandomSecret('sk-airouter-')] : [],
     };
-    delete nextConfig.type;
 
     if (proxyPort === null) {
       delete nextConfig.proxy_port;

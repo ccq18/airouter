@@ -6,7 +6,7 @@
     messages: 'Claude Messages',
   };
   const TOKEN_PRESETS = new Set(['chatgpt', 'claude']);
-  const FALLBACK_PRESETS = [
+  const DEFAULT_PRESETS = [
     { id: 'chatgpt', label: 'ChatGPT / Codex', credential: 'token', default_base_url: 'https://chatgpt.com', protocols: ['responses'] },
     { id: 'opencode-go', label: 'OpenCode Go', credential: 'apikey', default_base_url: 'https://opencode.ai/inference/go', protocols: [...PROTOCOLS] },
     { id: 'opencode-zen', label: 'OpenCode Zen', credential: 'apikey', default_base_url: 'https://opencode.ai/inference', protocols: [...PROTOCOLS] },
@@ -52,7 +52,7 @@
   }
 
   function findPreset(presets, presetId) {
-    return (Array.isArray(presets) && presets.length ? presets : FALLBACK_PRESETS)
+    return (Array.isArray(presets) && presets.length ? presets : DEFAULT_PRESETS)
       .find(preset => preset.id === presetId) || null;
   }
 
@@ -163,7 +163,6 @@
       settingsDrawer: el('settingsDrawer'),
       tokenImportDialog: el('tokenImportDialog'),
       claudeDialog: el('claudeDialog'),
-      legacyConfigsDialog: el('legacyConfigsDialog'),
     };
 
     if (!dom.preset || !dom.upstreamTable || !dom.targetsEditor) {
@@ -243,7 +242,7 @@
 
     function getPresets() {
       const presets = state.upstreams?.presets;
-      return Array.isArray(presets) && presets.length ? presets : FALLBACK_PRESETS;
+      return Array.isArray(presets) && presets.length ? presets : DEFAULT_PRESETS;
     }
 
     function getUpstreamConfigs() {
@@ -316,18 +315,7 @@
       syncBodyLock();
     }
 
-    function setSettingsTab(tab) {
-      const target = tab === 'compat' ? 'compat' : 'general';
-      doc.querySelectorAll('[data-settings-tab]').forEach(button => {
-        button.setAttribute('aria-selected', String(button.dataset.settingsTab === target));
-      });
-      doc.querySelectorAll('[data-settings-panel]').forEach(panel => {
-        panel.hidden = panel.dataset.settingsPanel !== target;
-      });
-    }
-
-    function openSettings(tab = 'general') {
-      setSettingsTab(tab);
+    function openSettings() {
       openLayer('settingsDrawer');
     }
 
@@ -431,7 +419,7 @@
     }
 
     function updatePresetFields() {
-      const preset = getPreset(dom.preset.value) || FALLBACK_PRESETS[FALLBACK_PRESETS.length - 1];
+      const preset = getPreset(dom.preset.value) || DEFAULT_PRESETS[DEFAULT_PRESETS.length - 1];
       if (!state.editingUpstreamId && preset.default_base_url) {
         dom.baseUrl.value = preset.default_base_url;
       }
@@ -1324,19 +1312,13 @@
         }
 
         if (event.target.closest('[data-open-settings]') || event.target.closest('#openSettingsButton')) {
-          openSettings('general');
+          openSettings();
           return;
         }
         if (event.target.closest('[data-close-settings]')) {
           closeSettings();
           return;
         }
-        const settingsTab = event.target.closest('[data-settings-tab]');
-        if (settingsTab) {
-          setSettingsTab(settingsTab.dataset.settingsTab);
-          return;
-        }
-
         const closeDialogButton = event.target.closest('[data-close-dialog]');
         if (closeDialogButton) {
           closeLayer(closeDialogButton.dataset.closeDialog);
@@ -1368,11 +1350,6 @@
           closeSettings();
           state.pendingTokenImportFromAccount = fromAccount;
           openLayer('claudeDialog');
-          return;
-        }
-        if (action === 'open-legacy-configs') {
-          closeSettings();
-          openLayer('legacyConfigsDialog');
           return;
         }
         if (action === 'add-model') {
@@ -1612,7 +1589,12 @@
           }
           setView('accounts', { push: false });
         }
-        void loadAll().catch(handleError);
+        void loadAll().then(() => {
+          const addedIds = event.detail?.added_ids;
+          if (source === 'token-import' && Array.isArray(addedIds) && addedIds.length === 1) {
+            openAccount(addedIds[0]);
+          }
+        }).catch(handleError);
       });
 
       windowScope.addEventListener('popstate', () => {
@@ -1633,6 +1615,9 @@
     }
 
     async function init() {
+      doc.querySelectorAll("[data-page-link]").forEach(link => {
+        link.href = requestUrl(`/admin/configs/${link.dataset.pageLink}`);
+      });
       wireEvents();
       fillPresetOptions();
       setView(viewFromLocation(), { push: false });

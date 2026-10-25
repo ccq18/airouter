@@ -239,7 +239,7 @@
     panel.dataset.state = 'setup';
     eyebrow.textContent = '首次配置';
     headline.textContent = '先完成初始配置';
-    message.textContent = status?.message || '检测到运行目录中还没有 openai.json，保存配置后会继续启动并进入管理页面。';
+    message.textContent = status?.message || '检测到运行目录中还没有 config.json，保存配置后会继续启动并进入管理页面。';
     actions.hidden = true;
     setupForm.hidden = false;
     logOutput.hidden = true;

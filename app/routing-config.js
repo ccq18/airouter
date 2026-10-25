@@ -152,30 +152,9 @@ function normalizeTarget(target, index, routeId) {
 }
 
 function parseRoutingConfig(parsed) {
-  const routing = parsed && parsed.routing;
-  if (routing === undefined || routing === null) {
-    return {
-      mode: 'legacy',
-      models: [],
-    };
-  }
-
-  if (!isPlainObject(routing)) {
-    throw new Error('routing 必须是对象');
-  }
-
-  const mode = normalizeString(routing.mode) || 'legacy';
-  if (mode !== 'legacy' && mode !== 'explicit') {
-    throw new Error('routing.mode 仅支持 legacy 或 explicit');
-  }
-
-  if (mode === 'legacy') {
-    return {
-      ...routing,
-      mode,
-      models: [],
-    };
-  }
+  const routing = parsed && parsed.routing !== undefined ? parsed.routing : { models: [] };
+  if (!isPlainObject(routing)) throw new Error('routing 必须是对象');
+  if (Object.hasOwn(routing, 'mode')) throw new Error('routing.mode 已移除；只支持统一模型路由');
 
   const rawModels = routing.models === undefined ? [] : routing.models;
   if (!Array.isArray(rawModels)) {
@@ -274,19 +253,14 @@ function parseRoutingConfig(parsed) {
 
   return {
     ...routing,
-    mode,
     max_attempts: maxAttempts,
     models,
   };
 }
 
-function isExplicitRouting(parsed) {
-  return Boolean(parsed && isPlainObject(parsed.routing) && normalizeString(parsed.routing.mode) === 'explicit');
-}
-
 function getPublicModelIds(parsed, options = {}) {
   const routing = parsed && parsed.routing;
-  if (!isPlainObject(routing) || normalizeString(routing.mode) !== 'explicit' || !Array.isArray(routing.models)) {
+  if (!isPlainObject(routing) || !Array.isArray(routing.models)) {
     return [];
   }
 
@@ -303,7 +277,7 @@ function resolveRoute(parsed, publicModel) {
   }
 
   const routing = parsed && parsed.routing;
-  if (!isPlainObject(routing) || normalizeString(routing.mode) !== 'explicit' || !Array.isArray(routing.models)) {
+  if (!isPlainObject(routing) || !Array.isArray(routing.models)) {
     return null;
   }
 
@@ -336,7 +310,6 @@ function getRoutingRevision(parsed) {
   const configs = Array.isArray(parsed && parsed.configs) ? parsed.configs : [];
   const relevant = {
     routing: parsed && parsed.routing ? {
-      mode: parsed.routing.mode || 'legacy',
       max_attempts: parsed.routing.max_attempts ?? null,
       models: Array.isArray(parsed.routing.models) ? parsed.routing.models : [],
     } : null,
@@ -409,16 +382,12 @@ function ensureConfigIds(parsed, options = {}) {
   }
 
   const nextConfigs = processItems(parsed.configs);
-  const nextDisabledConfigs = Array.isArray(parsed.disabled_configs)
-    ? processItems(parsed.disabled_configs)
-    : null;
 
   return {
     parsed: changed
       ? {
         ...parsed,
         configs: nextConfigs,
-        ...(nextDisabledConfigs ? { disabled_configs: nextDisabledConfigs } : {}),
       }
       : parsed,
     changed,
@@ -437,7 +406,6 @@ module.exports = {
   normalizeProtocols,
   validateConfigModels,
   parseRoutingConfig,
-  isExplicitRouting,
   getPublicModelIds,
   resolveRoute,
   findRoutesReferencingModel,

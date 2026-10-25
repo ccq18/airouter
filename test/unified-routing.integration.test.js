@@ -549,7 +549,6 @@ function buildConfig(upstreams, tokenBaseUrl) {
     port: 0,
     configs,
     routing: {
-      mode: 'explicit',
       max_attempts: 2,
       models: [
         {
@@ -777,7 +776,7 @@ async function updateRoute(routeId, updater) {
 
 test.before(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-routing-'));
-  configPath = path.join(tempDir, 'openai.test.json');
+  configPath = path.join(tempDir, 'config.json');
 
   fakeA = createGlmFake('A');
   fakeB = createGlmFake('B');
@@ -889,7 +888,7 @@ test('service exposes public model IDs and protects entry/admin APIs', async () 
   assert.match(await routingScript.text(), /createRoutingAdmin/);
 
   const routeStatus = await getRoutes();
-  assert.equal(routeStatus.mode, 'explicit');
+  assert.equal(Object.hasOwn(routeStatus, 'mode'), false);
   assert.equal(routeStatus.models[0].id, 'DeepSeek-Custom');
   assert.equal(routeStatus.route_status['DeepSeek-Custom'].chat_completions.targets[0].selected, true);
 });
@@ -1535,8 +1534,7 @@ test('bounded retries stop after max attempts and do not try lower candidates', 
 test('admin responses never echo upstream credentials', async () => {
   const upstreams = await adminFetch('/admin/api/upstreams');
   const routes = await adminFetch('/admin/api/model-routes');
-  const configs = await adminFetch('/admin/api/configs');
-  const combined = `${upstreams.text}\n${routes.text}\n${configs.text}`;
+  const combined = `${upstreams.text}\n${routes.text}`;
   assert.doesNotMatch(combined, /sk-fake-a/);
   assert.doesNotMatch(combined, /token-fake-c/);
   assert.doesNotMatch(combined, /account-fake-c/);
@@ -1554,4 +1552,44 @@ test('unsaved upstream can discover models without persisting credentials or dra
   assert.ok(payload.discovered.some(model => model.id === 'glm-5.3'));
   assert.equal(fs.readFileSync(configPath, 'utf8'), before);
   assert.equal(JSON.stringify(payload).includes('sk-draft-fixture'), false);
+});
+
+
+test('empty routes never fall back to token accounts or unlisted models', async () => {
+  const original = await getRoutes();
+  const before = [fakeA.stats.chatRequests.length, fakeB.stats.chatRequests.length, tokenFake.stats.responseRequests.length];
+  try {
+    await saveRoutes([]);
+    const listing = await fetch(`${baseUrl}/v1/models`, { headers: { authorization: `Bearer ${ENTRY_KEY}` } });
+    assert.deepEqual((await listing.json()).data, []);
+    const response = await entryFetch('/v1/chat/completions', { model: 'gpt-backend', messages: [{ role: 'user', content: 'must not dispatch' }] });
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).error.code, 'model_not_found');
+    assert.deepEqual([fakeA.stats.chatRequests.length, fakeB.stats.chatRequests.length, tokenFake.stats.responseRequests.length], before);
+  } finally { await saveRoutes(original.models, original.max_attempts); }
+});
+
+test('removed legacy endpoints cannot reach an upstream', async () => {
+  for (const route of ['/cpa/v1/messages', '/wham/usage', '/v1/arbitrary', '/v1/images/generations']) {
+    const response = await entryFetch(route, { model: 'DeepSeek-Custom', messages: [] });
+    assert.equal(response.status, 404, route);
+  }
+  for (const route of ['/admin/api/configs', '/admin/api/disabled-configs', '/admin/configs/fallbacks']) {
+    const response = await adminFetch(route);
+    assert.equal(response.status, 404, route);
+  }
+});
+
+test('settings and credential import use dedicated APIs without exposing upstream secrets', async () => {
+  const settings = await adminFetch('/admin/api/settings');
+  assert.equal(settings.status, 200);
+  assert.deepEqual(settings.payload.apikeys, [ENTRY_KEY, ENTRY_KEY_2]);
+  const before = (await adminFetch('/admin/api/upstreams')).payload.configs.length;
+  const imported = await adminFetch('/admin/api/upstreams/import', { method: 'POST', body: JSON.stringify({ raw_json: JSON.stringify({ accessToken: 'import-token-fixture', account: { id: 'import-account-fixture' } }) }) });
+  assert.equal(imported.status, 201, imported.text);
+  assert.equal(imported.payload.added_ids.length, 1);
+  assert.equal(imported.payload.configs.length, before + 1);
+  assert.equal(imported.text.includes('import-token-fixture'), false);
+  const removed = await adminFetch('/admin/api/upstreams/'+imported.payload.added_ids[0], { method: 'DELETE' });
+  assert.equal(removed.status, 200);
 });

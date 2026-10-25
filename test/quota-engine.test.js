@@ -290,3 +290,21 @@ test('unsupported quota cannot clear exhaustion and allows one delayed recovery 
   release();
   assert.equal(engine.getDecision(config).state, 'available');
 });
+
+
+test('stale readers and queued monitor work never roll a replaced credential back', async () => {
+  const oldConfig = createGlmConfig();
+  const current = { ...oldConfig, apikey: 'new-fixture-key' };
+  let calls = 0;
+  const engine = createEngine({ requestBufferedFn: async () => { calls++; return { statusCode: 200, body: glmPayload(5) }; } });
+  engine.syncConfigs([oldConfig]);
+  await engine.refresh(oldConfig);
+  engine.syncConfigs([current]);
+  await engine.refresh(current);
+  engine.serialize(oldConfig);
+  await engine.refresh(oldConfig, { force: true });
+  await engine.ensureFresh(oldConfig, { force: true });
+  assert.equal(calls, 2);
+  assert.equal(engine.getSnapshot(current).state, 'available');
+  assert.equal(engine.getSnapshot(current).metrics[0].remainingPercent, 95);
+});

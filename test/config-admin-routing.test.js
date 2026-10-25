@@ -37,7 +37,7 @@ test('accounts and routes start as list-only views with editors and settings clo
   assert.match(html, /<div class="drawer-layer" id="settingsDrawer" hidden>/);
   assert.match(html, /<div class="dialog-layer" id="tokenImportDialog" hidden>/);
   assert.match(html, /<div class="dialog-layer" id="claudeDialog" hidden>/);
-  assert.match(html, /<div class="dialog-layer" id="legacyConfigsDialog" hidden>/);
+  assert.doesNotMatch(html, /legacyConfigsDialog/);
 
   const accountsView = between(html, 'data-view="accounts"', 'data-view="routes"');
   assert.match(accountsView, /id="routingUpstreamsTable"/);
@@ -57,24 +57,14 @@ test('accounts and routes start as list-only views with editors and settings clo
   assert.match(accountDialog, /id="customModelsEndpointField"[^>]*hidden/);
 });
 
-test('old imports, entry settings, and legacy controls live behind closed entry points', () => {
+test('settings contain only entry credentials, ports, and unified login imports', () => {
   const settingsDrawer = between(html, 'id="settingsDrawer"', 'id="tokenImportDialog"');
-  assert.match(settingsDrawer, /data-settings-tab="general"/);
-  assert.match(settingsDrawer, /data-settings-tab="compat"/);
   assert.match(settingsDrawer, /id="servicePortInput"/);
   assert.match(settingsDrawer, /id="apiKeysList"/);
-  assert.match(settingsDrawer, /id="responsesModelAliasesInput"/);
   assert.match(settingsDrawer, /data-action="open-token-import"/);
   assert.match(settingsDrawer, /data-action="open-claude-manager"/);
-  assert.match(settingsDrawer, /data-action="open-legacy-configs"/);
-  assert.match(settingsDrawer, /legacy/);
-
-  const legacyDialog = between(html, 'id="legacyConfigsDialog"', 'id="responsesSettingsSection"');
-  assert.match(legacyDialog, /id="cards"/);
-  assert.match(legacyDialog, /id="batchToolbar"/);
-  assert.match(legacyDialog, /id="addFallbackButton"/);
-  assert.ok(legacyDialog.indexOf('id="cards"') > legacyDialog.indexOf('id="legacyConfigsDialog"'));
-  assert.match(html, /id="responsesSettingsSection" class="hidden-settings" hidden><\/div>/);
+  assert.doesNotMatch(html, /legacy|旧模式|Fallback|responsesModelAliases|batchToolbar/);
+  assert.doesNotMatch(routingJs, /open-legacy-configs|legacyConfigsDialog|routing_mode/);
 });
 
 test('account editing uses platform, credential, editable models, sync preview, and save-close flow', () => {
@@ -172,7 +162,7 @@ test('account cards keep platforms equal and quota unknown is never exhausted', 
   assert.doesNotMatch(routingJs, /额度模板|demoCatalog|演示数据/);
 });
 
-test('existing config admin helpers still build authenticated URLs and parse errors', () => {
+test('shared admin helpers build authenticated URLs and parse errors', () => {
   assert.equal(
     adminJs.buildRequestUrl('/admin/api/upstreams', {
       adminAuthToken: 'admin-example',

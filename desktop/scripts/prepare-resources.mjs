@@ -15,8 +15,7 @@ const entries = [
   'openai.js',
   'package.json',
   'package-lock.json',
-  'openai.json.example',
-  'openai-api-key.json.example',
+  'config.json.example',
   'app',
   'public'
 ];

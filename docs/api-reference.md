@@ -1,433 +1,74 @@
-# API 接口文档
+# HTTP API
 
-本文档只描述客户端可以直接调用的 Airouter 对外接口。管理页、管理 API、上游后台接口不在本文档范围内。
+## 1. 鉴权与约定
 
-默认服务地址：
+业务接口包括 `/health`、`/v1/models` 和三个对话入口，使用 `Authorization: Bearer <入口密钥>` 或 `x-api-key`，匹配 `config.json.apikeys`。明确配置空数组时不校验入口密钥。
 
-```text
-http://localhost:3009
-```
+`/admin/*` 使用独立管理凭证：查询参数 `auth_token`，或 `Authorization: Bearer <管理凭证>` / `x-api-key`。管理认证失败返回 401，不回显正确凭证。账号读取只返回 `has_credentials`、`has_refresh_token` 等标记；入口密钥仅在受保护的设置响应中展示。
 
-如果配置了入口 `apikeys`，所有接口都需要携带其中一个入口密钥：
+对话请求必须使用 `Content-Type: application/json`，JSON 体默认上限 16 MiB；管理 API 使用 JSON，体积上限 1 MiB。管理修改串行化执行，校验通过后原子保存并热加载。
 
-```http
-Authorization: Bearer sk-airouter-xxxx
-```
+## 2. 业务接口
 
-也可以使用：
-
-```http
-x-api-key: sk-airouter-xxxx
-```
-
-如果没有配置入口 `apikeys`，本机请求不会校验入口密钥。
-
-## 接口列表
-
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| `GET` | `/health` | 查看本地服务和当前账号状态 |
-| `GET` | `/v1/models` | 显式路由下返回配置的客户端模型 ID |
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions 兼容接口 |
-| `POST` | `/v1/responses` | OpenAI Responses 兼容接口 |
-| `POST` | `/v1/messages` | Claude Messages 兼容接口 |
-| `POST` | `/cpa/v1/responses` | CLIProxyAPI 风格前缀下的 Responses 兼容入口 |
-| `POST` | `/cpa/v1/messages` | CLIProxyAPI 风格前缀下的 Claude Messages 兼容入口 |
-| `POST` | `/v1/images/generations` | OpenAI Images 图片生成兼容接口 |
-| `POST` | `/v1/images/edits` | OpenAI Images 图片编辑兼容接口 |
-| 任意 | `/v1/*` | 其它 OpenAI `/v1` 兼容接口透传 |
-| 任意 | `/cpa/v1/*` | 剥离 `/cpa` 前缀后复用 `/v1/*` 兼容链路 |
-
-## 通用转发规则
-
-未启用 `routing.mode: "explicit"` 时，Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配置优先级越高；当前活动配置可用时会继续沿用。
-
-`token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和运行态可用性选择；OpenAI token 和 Claude token 不依赖手动切换焦点，只区分可用/不可用。
-
-`apikey` 配置项用于第三方上游。`support` 包含 `gpt` 时参与 `/v1/*` OpenAI 兼容链路，也可作为 `/v1/messages` 的 Responses 转换上游；`support` 包含 `claude` 时参与 `/v1/messages` Claude Messages 原样转发链路。OpenAI/GPT apikey fallback 与 Claude apikey fallback 分别维护活动焦点和 failover，不会互相覆盖。
-
-`/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度和模型别名逻辑；仅该前缀会启用 CLIProxyAPI 风格的额外请求体规范化。
-
-业务接口的 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；`/admin/*`、`/health`、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑。上游 `apikey` 在响应提交给客户端前出现非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，Airouter 会在本次请求内排除当前配置并尝试切到下一个可用配置；切换候选按各 apikey 最近 100 个已完成真实请求的错误率从低到高选择，无历史样本按 0% 处理，同错误率保持配置顺序。如果没有可切换配置，则保留并继续使用当前 apikey，按当前上游错误返回给客户端，避免整个能力池不可用。token 或 apikey-backed `/v1/responses` 即使收到 HTTP 200，只要 JSON 错误对象表明账号额度、凭证或模型容量不可用，也会在响应提交前切换账号；例如 `Selected model is at capacity` 会临时摘除当前 token 并重放到下一个可用配置。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。apikey 业务错误不会修改其 `runtime.available`。
-
-启用 `routing.mode: "explicit"` 后，`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 都按 `routing.models[].targets` 的显式顺序选择账号和后端模型，不再使用 Token 优先、API Key 覆盖、全局模型别名或会话哈希。客户端 `model` 是管理台配置的客户端模型 ID，区分大小写；未配置的 ID 返回 `model_not_found`，不会透传到随机账号。下游响应里的模型字段保持客户端该 ID，真实后端模型只在管理台可见。
-
-显式路由的失败处理：
-
-- 严格使用第一个可用候选；额度耗尽才使用下一项，额度恢复后下一次无状态请求自动回到更高优先级。
-- 额度未知/读取失败不等于耗尽；已确认耗尽后读取失败不会自动恢复。
-- 每个候选每次请求最多尝试一次；默认最多 3 次上游尝试，且不超过候选数量。
-- 下游流式响应已经提交后不再切换上游；客户端取消会取消当前上游。
-- `previous_response_id` 固定在原 Responses 候选；跨账号、跨协议或服务重启导致归属丢失时返回 HTTP 409 `upstream_context_unavailable`。
-- 跨协议支持文本、图片、工具调用/结果和 SSE；结构化输出、内置服务端工具、thinking/加密 reasoning、文件和音频无法保真时明确返回错误或跳过候选。
-
-## GET /v1/models
-
-仅在显式路由下返回已启用的客户端模型 ID；legacy 模式继续由通用 `/v1/*` 透传处理。该接口受入口 `apikeys` 保护。
-
-```bash
-curl -sS http://localhost:3009/v1/models \
-  -H "Authorization: Bearer sk-airouter-xxxx"
-```
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "deepseek",
-      "object": "model",
-      "created": 1779778600,
-      "owned_by": "airouter"
-    }
-  ]
-}
-```
-
-额度耗尽不会删除模型 ID。
-
-## GET /health
-
-用于检查本地服务是否存活，以及当前活动账号摘要。
-
-示例：
-
-```bash
-curl -sS http://localhost:3009/health \
-  -H "Authorization: Bearer sk-airouter-xxxx"
-```
-
-响应示例：
-
-```json
-{
-  "status": "ok",
-  "mode": "openai",
-  "timestamp": "2026/5/26 18:30:00",
-  "active_account": {
-    "index": 0,
-    "description": "account@example.com"
-  },
-  "configs": {
-    "total": 2,
-    "default": "account@example.com"
-  }
-}
-```
-
-## POST /v1/chat/completions
-
-OpenAI Chat Completions 兼容入口。显式路由下按配置的候选顺序选择上游；同协议原样转发，跨协议时支持文本、图片、工具调用/结果和 SSE 转换。下游 `model` 保持客户端模型 ID。
-
-```bash
-curl -sS http://localhost:3009/v1/chat/completions \
-  -H "Authorization: Bearer sk-airouter-xxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek",
-    "messages": [{"role": "user", "content": "你好"}]
-  }'
-```
-
-legacy 模式下继续由通用 `/v1/*` 代理链路处理。
-
-## POST /v1/responses
-
-OpenAI Responses 兼容入口。请求体使用 JSON。
-
-示例：
-
-```bash
-curl -sS http://localhost:3009/v1/responses \
-  -H "Authorization: Bearer sk-airouter-xxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-5.5",
-    "input": "用一句话介绍 Airouter"
-  }'
-```
-
-常用字段：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `model` | string | 模型名。会先经过 `responses.model_aliases` 映射 |
-| `input` | string 或 array | 用户输入，格式兼容 Responses API |
-| `instructions` | string | 可选，系统指令 |
-| `tools` | array | 可选，工具列表 |
-| `tool_choice` | string 或 object | 可选，默认 `auto` |
-| `stream` | boolean | 可选，Airouter 默认补 `true` |
-| `store` | boolean | 可选，token 模式下会强制为 `false` |
-
-Airouter 会给 `/v1/responses` 补这些默认值：
-
-```json
-{
-  "instructions": "",
-  "tools": [],
-  "tool_choice": "auto",
-  "parallel_tool_calls": false,
-  "store": false,
-  "stream": true,
-  "include": []
-}
-```
-
-当普通 `/v1/responses` 请求走 token/Codex 兼容链路时，Airouter 会保留 Responses 请求形状，包含 `instructions`、`input` 中的 `system` role、`top_p`、`service_tier` 和工具名等字段；仅会移除历史兼容所需的 `max_output_tokens`、`temperature`，并在 token 模式下强制 `store: false`。function tool 的 JSON Schema 会被规范化为 Codex 可接受的 schema 形状，包括给嵌套字段补齐缺失的 `type`，并把 object schema 的 `additionalProperties` 固定为 `false`。
-
-当使用 `/cpa/v1/responses` 时，会额外启用 CLIProxyAPI 风格规范化：原始 `instructions` 会转成 `input` 开头的 `developer` message，同时保留空字符串 `instructions` 字段；`input` 中的 `system` role 也会转成 `developer`。同时会移除当前 CPA/Codex 链路不支持的 `max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`、`truncation`、`context_management`、`user` 等字段，并把旧的 `web_search_preview` 工具名规范为 `web_search`。
-
-如果配置了 `responses.model_aliases`，`model` 会按大小写不敏感规则替换。例如配置：
-
-```json
-{
-  "responses": {
-    "model_aliases": {
-      "gpt-5.2": "gpt-5.5"
-    }
-  }
-}
-```
-
-请求里的 `"model": "GPT-5.2"` 会被转成 `"gpt-5.5"`。
-
-## POST /v1/messages
-
-显式模式按客户端模型路由选择后端模型；本节涉及固定模型和 token 优先的说明仅适用于旧模式。
-
-Claude Messages 兼容入口。请求体使用 JSON。
-
-Airouter 会先使用可用的 `claude_token` 原样转发 Claude Messages 请求；没有可用 Claude token 时，才使用 `support` 包含 `claude` 的 `apikey` 原样转发。`claude_token` 用于 Claude Code OAuth 登录态：请求 Authorization 命中 `local_auth_token`、同一配置里的真实 `access_token`，或命中 `request_auth_token_sha256s` 哈希列表时，会绑定到该配置并替换为真实 Claude OAuth Bearer token 转发。共享 Claude Code 登录态时，客户端可用 `npm run claude:install-login -- --token <local_auth_token> --base-url <Airouter 地址>` 把 `local_auth_token` 写入 Claude Code 本地凭证，并补齐交互模式依赖的全局 onboarding 状态，使交互模式主请求也使用这枚本地 token；启动 Claude Code 的 shell 里不要残留 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN`，否则这些环境变量会覆盖本地登录态。没有可用 Claude 直转上游时，Airouter 会把 Claude Messages 请求转换为 Responses 请求：优先使用 OpenAI token 配置项；OpenAI token 不可用时，使用 `support` 包含 `gpt` 的 `apikey` 配置项并请求 `${base_url}/responses`。
-
-`/cpa/v1/messages` 是同一入口的 CLIProxyAPI 风格前缀别名，调度行为与 `/v1/messages` 一致，但转换到 Responses 时会启用 CPA 风格请求体规范化。
-
-示例：
-
-```bash
-curl -sS http://localhost:3009/v1/messages \
-  -H "Authorization: Bearer sk-airouter-xxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-sonnet-4-5",
-    "max_tokens": 512,
-    "messages": [
-      {
-        "role": "user",
-        "content": "用一句话介绍 Airouter"
-      }
-    ]
-  }'
-```
-
-常用字段：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `model` | string | Claude Messages 模型名。原样转发时由上游决定；转换链路固定请求 `gpt-5.5` |
-| `max_tokens` | number | 最大输出 token。转换链路当前不向 Responses 传递该字段 |
-| `system` | string 或 array | 可选，系统提示词 |
-| `messages` | array | Claude Messages 消息列表 |
-| `tools` | array | 可选，Claude 工具定义 |
-| `tool_choice` | string 或 object | 可选，工具选择策略 |
-| `stream` | boolean | 可选，是否流式返回 |
-
-转换链路固定请求模型为 `gpt-5.5`，推理强度可通过配置调整：
-
-```json
-{
-  "claude_code": {
-    "reasoning_effort": "high"
-  }
-}
-```
-
-`/v1/messages` 的 Responses 转换链路固定请求模型为 `gpt-5.5`，`claude_code.model` 不再影响该链路。`claude_code.reasoning_effort` 只影响转换链路，不影响普通 `/v1/responses`，也不影响 `support` 包含 `claude` 的 apikey 原样转发链路。
-
-普通 `/v1/messages` 的 Responses 转换链路会把 Claude `system` 字段放入 Responses `instructions`，`messages` 按原角色转换为 `input`，并保持 `parallel_tool_calls: false` 和 `include: []`。
-
-`/cpa/v1/messages` 的 Responses 转换链路会按 CLIProxyAPI 风格把 Claude `system` 字段和 `messages[].role = "system"` 转成 Responses `input` 里的 `developer` message，并过滤 Claude Code 的 `x-anthropic-billing-header:` attribution 文本；原始系统提示不会作为 Responses `instructions` 发送，只保留空字符串 `instructions` 字段。
-
-## POST /v1/images/generations
-
-OpenAI Images 图片生成兼容入口。请求体使用 JSON。
-
-示例：
-
-```bash
-curl -sS http://localhost:3009/v1/images/generations \
-  -H "Authorization: Bearer sk-airouter-xxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-image-2",
-    "prompt": "A clean product-style photo of a small white ceramic mug on a desk.",
-    "size": "1024x1024",
-    "quality": "medium",
-    "output_format": "png"
-  }' \
-  -o image-generation-response.json
-```
-
-常用字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `prompt` | string | 是 | 图片生成提示词 |
-| `model` | string | 否 | OpenAI Images 兼容字段。token 模式下不会直接作为上游 Responses 模型使用 |
-| `n` | number | 否 | token 模式下只支持 `1` |
-| `output_format` | string | 否 | token 模式下支持 `png`、`jpeg`、`webp`，默认 `png` |
-| `size` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
-| `quality` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
-
-token 模式下，Airouter 会通过 Codex Responses 的 `image_generation` 工具生成图片，并返回 OpenAI Images 风格 JSON。token Responses 上游在响应提交给客户端前返回非 200 或请求失败时，会排除当前配置并尝试下一个可用配置；apikey 模式继续原生转发到上游 Images API：
-
-```json
-{
-  "created": 1779778600,
-  "data": [
-    {
-      "b64_json": "...",
-      "revised_prompt": "..."
-    }
-  ]
-}
-```
-
-apikey 模式下，请求会直连上游 Images API，支持字段和返回格式由上游决定。
-
-### 图片模型速度实测
-
-下面是 2026-05-26 18:36 左右在本机 `http://127.0.0.1:3009` 上的单次生成测速。测试请求都使用同一条小 prompt、`output_format=png`，并校验返回里存在 `data[0].b64_json`。
-
-当前测试环境是 token 模式。token 模式下，`model` 字段用于兼容 OpenAI Images 客户端；Airouter 实际会转成 Codex Responses + `image_generation` 工具调用，真正发给上游的 Responses 模型由 `AIROUTER_IMAGE_GENERATION_RESPONSES_MODEL` 控制。因此这张表只能代表当前 Airouter token 兼容路径的端到端耗时，不代表第三方 apikey 上游原生 Images API 的模型速度。
-
-| 请求里的图片模型 | HTTP 状态 | 单次耗时 | 返回图片数 | 备注 |
-| --- | --- | ---: | ---: | --- |
-| `gpt-image-2` | `200` | `16.14s` | `1` | 当前默认值 |
-| `gpt-image-1.5` | `200` | `17.32s` | `1` | 兼容旧客户端传参 |
-| `gpt-image-1` | `200` | `18.28s` | `1` | 兼容旧客户端传参 |
-| `gpt-image-1-mini` | `200` | `21.04s` | `1` | 兼容旧客户端传参 |
-
-复杂任务的耗时差异会明显放大。下面是同一环境下追加的一组单次复杂任务实测：
-
-- 复杂生成：同一条写实猫咪花园场景 prompt，包含自然光、毛发、胡须、眼睛、叶脉、石材纹理、景深、曝光平衡等细节要求。
-- 复杂编辑：同一张猫图作为输入，要求保留猫、姿势、构图和花园环境，同时改善曝光、暗部细节、色偏、毛发锐度和噪点。
-
-| 请求里的图片模型 | 复杂生成耗时 | 复杂编辑耗时 | 结果 |
-| --- | ---: | ---: | --- |
-| `gpt-image-2` | `300.05s` | `49.25s` | 生成超时；编辑成功 |
-| `gpt-image-1.5` | `139.63s` | `47.75s` | 生成成功；编辑成功 |
-| `gpt-image-1` | `84.67s` | `300.07s` | 生成成功；编辑超时 |
-| `gpt-image-1-mini` | `68.73s` | `300.04s` | 生成成功；编辑超时 |
-
-这里的 `300s` 左右表示 Airouter 等上游返回时达到服务端请求超时边界，返回 HTTP 500 `request timeout after 300000ms`。这些数据是单次样本，受账号状态、上游排队、图片尺寸、prompt 复杂度和网络状态影响很大，只适合作为当前链路的粗略参考。
-
-后续默认上游总 deadline 已经按官方 SDK 默认请求窗口调整为 `600000ms`（10 分钟）。优先使用 `UPSTREAM_TOTAL_TIMEOUT_MS` 覆盖；旧变量 `UPSTREAM_REQUEST_TIMEOUT_MS` 在未设置新变量时继续兼容。failover 和 redirect 共享同一个总 deadline，不会为每次尝试重新计算 10 分钟。连接、流式首响应和流式空闲另有更短的分阶段超时，详见 [并发、背压与超时](performance-and-timeouts.md)。两个图片测试脚本的客户端默认 timeout 是 `660s`，比服务端多 60 秒，方便服务端先返回上游结果或明确的超时错误。上表中的 `300s` 超时结果保留为调大超时前的实测记录。
-
-## POST /v1/images/edits
-
-OpenAI Images 图片编辑兼容入口。请求体使用 `multipart/form-data`。
-
-示例：
-
-```bash
-curl -sS http://localhost:3009/v1/images/edits \
-  -H "Authorization: Bearer sk-airouter-xxxx" \
-  -F "model=gpt-image-2" \
-  -F "prompt=Add a small red hat to the subject. Keep the original style and composition." \
-  -F "image=@/absolute/path/to/input.png" \
-  -F "size=1024x1024" \
-  -F "quality=medium" \
-  -F "output_format=png" \
-  -o image-edit-response.json
-```
-
-常用字段：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `prompt` | string | 是 | 图片编辑提示词 |
-| `image` | file | 是 | 输入图片。token 模式支持一个或多个同名 `image` 文件 |
-| `model` | string | 否 | OpenAI Images 兼容字段。token 模式下不会直接作为上游 Responses 模型使用 |
-| `n` | number | 否 | token 模式下只支持 `1` |
-| `output_format` | string | 否 | token 模式下支持 `png`、`jpeg`、`webp`，默认 `png` |
-| `size` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
-| `quality` | string | 否 | apikey 模式由上游决定；token 模式当前仅作为兼容字段接收 |
-| `mask` | file | 否 | apikey 模式由上游决定；token 模式当前不处理 mask |
-
-token 模式下返回格式与 `/v1/images/generations` 一致：
-
-```json
-{
-  "created": 1779778600,
-  "data": [
-    {
-      "b64_json": "...",
-      "revised_prompt": "..."
-    }
-  ]
-}
-```
-
-保存图片示例：
-
-```bash
-python3 - <<'PY'
-import base64
-import json
-from pathlib import Path
-
-data = json.loads(Path("image-edit-response.json").read_text())
-Path("edited.png").write_bytes(base64.b64decode(data["data"][0]["b64_json"]))
-PY
-```
-
-## 其它 /v1/* OpenAI 兼容接口
-
-除上面单独处理的接口外，Airouter 会把其它 `/v1/*` 请求作为 OpenAI 兼容接口透传，例如：
-
-```text
-/v1/models
-/v1/chat/completions
-/v1/embeddings
-```
-
-示例：
-
-```bash
-curl -sS http://localhost:3009/v1/models \
-  -H "Authorization: Bearer sk-airouter-xxxx"
-```
-
-对这些接口：
-
-- token 配置项会走 Airouter 的 Codex 兼容链路；具体路径是否可用由当前账号对应的上游能力决定。
-- apikey 配置项会直连配置里的 `base_url`；具体路径是否可用由第三方上游决定。
-- 路径命中 `/responses` 时会应用 Responses 默认值、模型别名和必要的 Codex 兼容规范化；只有 `/cpa/v1/*` 前缀会启用 CPA 风格转换。其它路径一般保持请求体原样。
-
-## 状态码和错误格式
-
-Airouter 自己产生的错误通常是 JSON：
-
-```json
-{
-  "error": "请求体处理失败",
-  "details": "prompt 必须是非空字符串"
-}
-```
-
-常见状态码：
-
-| 状态码 | 场景 |
+| 方法与路径 | 输入与返回 |
 | --- | --- |
-| `400` | 请求体格式错误、必填字段缺失、当前兼容路径不支持的参数 |
-| `408` | 客户端上传请求体时长时间没有新数据 |
-| `401` | 配置了入口 `apikeys`，但请求没有提供有效入口密钥 |
-| `413` | JSON、普通代理或图片编辑请求体超过配置上限 |
-| `404` | 路径不存在 |
-| `405` | 接口不支持该 HTTP 方法 |
-| `415` | `/v1/messages` 没有使用 `application/json` |
-| `502` | 没有可用配置项，或上游请求失败 |
-| `503` | 全局并发队列已满或排队超时；响应携带 `Retry-After: 1` |
-| `504` | 上游请求超时 |
+| `GET /health` | 返回 `status`、账号数量与客户端模型 ID 列表 |
+| `GET /v1/models` | OpenAI 风格 `data[]`，只列已启用的客户端路由 ID |
+| `POST /v1/chat/completions` | Chat Completions JSON；必填已配置 `model`，按候选协议转发或桥接 |
+| `POST /v1/responses` | Responses JSON；必填已配置 `model`，支持流式与非流式响应 |
+| `POST /v1/messages` | Messages JSON；必填已配置 `model`，按候选协议转发或桥接 |
 
-上游直接返回的错误会尽量保持原状态码、响应头和响应体。
+请求中的客户端 `model` 与后端模型名独立；响应中的模型身份保持客户端 ID。支持的文本、图片内容、普通工具和 SSE 能力受目标模型与协议转换能力约束；不支持的结构不会静默丢弃。完整边界见[统一设计第 5 节](unified-model-routing-design.md#5-转发和上下文边界)。
+
+`previous_response_id` 只允许续接原调用者的原 Responses 候选；服务重启、账号身份或候选模型变化后可能需要重发完整上下文。已经向客户端输出的流不会切换到后备拼接。
+
+没有 `/v1/*` 通配代理，也没有图片生成/编辑或 CPA 入口；未注册路径返回 404。
+
+## 3. 账号与目录管理
+
+| 方法与路径 | 请求 | 成功返回 |
+| --- | --- | --- |
+| `GET /admin/api/upstreams` | 无 | `revision`、`presets`、`configs`，包含模型、额度和路由引用 |
+| `POST /admin/api/upstreams` | 账号对象；必填有效 `preset`，其余字段见配置契约 | 201，账号概览及 `added_id` |
+| `POST /admin/api/upstreams/import` | `{ "raw_json": "<AuthSession 或 Sub2API JSON 字符串>" }`；字符串内可为对象或非空数组 | 201，账号概览及 `added_ids`；导入账号模型列表初始为空 |
+| `PUT /admin/api/upstreams/:id` | 账号补丁；凭证字段为空时保留旧值 | 更新后的账号概览 |
+| `DELETE /admin/api/upstreams/:id` | 无 | 删除后的账号概览 |
+| `POST /admin/api/upstreams/models/discover` | 草稿账号字段；可传 `config_id` 复用已有凭证 | 模型目录与差异预览，不保存草稿 |
+| `POST /admin/api/upstreams/:id/models/discover` | 空对象 | 使用已保存账号查询目录并返回差异 |
+| `POST /admin/api/upstreams/:id/quota-refresh` | 空对象 | `config_id`、归一化 `quota`、当前 `upstream` |
+
+目录差异包含 `discovered`、`added`、`removed`、`kept`、`protocol_changes` 和 `suggested_models`；界面合并后仍需保存账号才会持久化。内置平台使用内置目录规则，自定义平台支持 `models_endpoint`。
+
+账号对象和模型字段详见[配置契约](config-item-reference.md#4-上游账号)。被路由引用的模型或协议不可直接移除；仍被引用的账号不可删除。
+
+## 4. 路由与设置
+
+| 方法与路径 | 请求 | 成功返回 |
+| --- | --- | --- |
+| `GET /admin/api/model-routes` | 无 | `revision`、`max_attempts`、`models`、`route_status`、账号/平台目录和公开 ID |
+| `PUT /admin/api/model-routes` | `{ "revision": "可选修订号", "models": [], "max_attempts": 3 }` | 更新后的路由概览；提供旧修订号时返回 409 |
+| `GET /admin/api/settings` | 无 | `apikeys`、`port`、`proxy_port` |
+| `POST /admin/api/settings` | 仅支持 `port`、`proxy_port`；`proxy_port: null` 可取消代理端口 | 更新后的设置；监听端口变更成功后生效 |
+| `POST /admin/api/apikeys` | 空对象 | 201，新增随机入口密钥后的设置 |
+| `DELETE /admin/api/apikeys/:index` | `index` 为从 0 开始的入口密钥下标 | 删除后的设置 |
+
+管理页面路径是 `/admin/configs`、`/admin/configs/upstreams`、`/admin/configs/routes`。旧 `/admin/api/configs`、焦点、批量停用数组及全局别名设置接口不再提供。
+
+## 5. 主要错误
+
+| 状态 | 错误码或语义 | 处理 |
+| --- | --- | --- |
+| 400 | `model_required`、`invalid_json`、`invalid_request_body` | 修正客户端请求 |
+| 400 | `entry_protocol_not_supported` | 使用路由启用的入口协议 |
+| 400 | `model_referenced` | 先修改引用该模型或协议的路由 |
+| 400 | `invalid_request` | 管理字段、配置或目录请求不合法，见 `message` |
+| 401 | `invalid_api_key` / `unauthorized` | 分别检查入口密钥或管理凭证 |
+| 404 | `model_not_found` / `upstream_not_found` / `not_found` | 检查客户端 ID、账号 ID 或接口路径 |
+| 409 | `revision_conflict` | 重新读取路由后再保存 |
+| 409 | `upstream_referenced` | 先移除账号的路由引用 |
+| 409 | `upstream_context_unavailable` | 重发完整上下文，不迁移私有状态 |
+| 413 / 415 | 请求体超限 / `unsupported_media_type` | 缩小请求或使用 JSON |
+| 503 | `no_available_upstream` | 检查账号、模型、额度与冷却状态 |
+| 502 等 | 上游传输或供应商错误 | 未输出前按分类有界重试；已输出后不会拼接其他答案 |
+
+协议入口的错误包装会适配对应协议；不要假定所有供应商错误都具有相同字段。模型转换的已知限制、额度失败的含义和恢复规则以统一设计为准。

@@ -1,10 +1,6 @@
 const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
 const CLAUDE_API_BASE_URL = 'https://api.anthropic.com';
-const DEFAULT_CLAUDE_CODE_MODEL = 'gpt-5.5';
-const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = 'high';
-const SUPPORTED_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
-const SUPPORTED_APIKEY_CAPABILITIES = new Set(['gpt', 'claude']);
 const SUPPORTED_CONFIG_TYPES = new Set(['token', 'apikey', 'claude_token']);
 const {
     buildSub2ApiAuthHeaders,
@@ -87,23 +83,6 @@ function normalizeString(value) {
     return String(value).trim();
 }
 
-function getFirstNormalizedString(source, keys) {
-    if (!source || typeof source !== 'object' || Array.isArray(source)) {
-        return '';
-    }
-
-    for (const key of keys) {
-        if (Object.prototype.hasOwnProperty.call(source, key)) {
-            const normalized = normalizeString(source[key]);
-            if (normalized) {
-                return normalized;
-            }
-        }
-    }
-
-    return '';
-}
-
 function normalizeSha256HexArray(values) {
     if (!Array.isArray(values)) {
         return [];
@@ -117,65 +96,7 @@ function normalizeSha256HexArray(values) {
 
 function getConfigItemType(config) {
     const type = normalizeString(config && config.type);
-    return type || 'token';
-}
-
-function normalizeApiKeySupport(value) {
-    if (typeof value === 'undefined' || value === null) {
-        return ['gpt'];
-    }
-
-    if (!Array.isArray(value)) {
-        throw new Error('apikey support 必须是字符串数组');
-    }
-
-    const support = [];
-    for (const item of value) {
-        const capability = normalizeString(item).toLowerCase();
-        if (!SUPPORTED_APIKEY_CAPABILITIES.has(capability)) {
-            throw new Error('apikey support 仅支持 gpt 或 claude');
-        }
-
-        if (!support.includes(capability)) {
-            support.push(capability);
-        }
-    }
-
-    if (support.length === 0) {
-        throw new Error('apikey support 至少需要包含 gpt 或 claude');
-    }
-
-    return support;
-}
-
-function normalizeApiKeyHealth(value) {
-    if (typeof value === 'undefined' || value === null) {
-        return {};
-    }
-
-    if (!isPlainObject(value)) {
-        throw new Error('apikey health 必须是对象');
-    }
-
-    const health = {};
-    if (Object.prototype.hasOwnProperty.call(value, 'model')) {
-        const model = normalizeString(value.model);
-        if (!model) {
-            throw new Error('apikey health.model 必须是非空字符串');
-        }
-
-        health.model = model;
-    }
-
-    return health;
-}
-
-function configSupportsCapability(config, capability) {
-    if (!config || config.type !== 'apikey') {
-        return false;
-    }
-
-    return normalizeApiKeySupport(config.support).includes(capability);
+    return type;
 }
 
 function parseOpenAiConfigFile(raw) {
@@ -191,12 +112,10 @@ function parseOpenAiConfigFile(raw) {
 
     validateConfigItemArray(parsed.configs, 'configs');
 
-    if (parsed.disabled_configs !== undefined) {
-        if (!Array.isArray(parsed.disabled_configs)) {
-            throw new Error('配置文件 disabled_configs 必须是数组');
+    for (const removedField of ['type', 'disabled_configs', 'responses', 'claude_code']) {
+        if (Object.prototype.hasOwnProperty.call(parsed, removedField)) {
+            throw new Error(`配置文件不再支持 ${removedField}，请使用统一账号与模型路由配置`);
         }
-
-        validateConfigItemArray(parsed.disabled_configs, 'disabled_configs');
     }
 
     const configIds = new Set();
@@ -238,50 +157,6 @@ function parseOpenAiConfigFile(raw) {
         const port = Number.parseInt(normalizedPort.trim(), 10);
         if (port < 1 || port > 65535) {
             throw new Error(`配置文件 ${fieldName} 必须是 1-65535 之间的端口号`);
-        }
-    }
-
-    if (parsed.claude_code !== undefined) {
-        if (!isPlainObject(parsed.claude_code)) {
-            throw new Error('配置文件 claude_code 必须是对象');
-        }
-
-        if (
-            parsed.claude_code.model !== undefined &&
-            (typeof parsed.claude_code.model !== 'string' || parsed.claude_code.model.trim().length === 0)
-        ) {
-            throw new Error('配置文件 claude_code.model 必须是非空字符串');
-        }
-
-        if (parsed.claude_code.reasoning_effort !== undefined) {
-            if (
-                typeof parsed.claude_code.reasoning_effort !== 'string' ||
-                !SUPPORTED_REASONING_EFFORTS.has(parsed.claude_code.reasoning_effort)
-            ) {
-                throw new Error('配置文件 claude_code.reasoning_effort 仅支持 none、minimal、low、medium、high、xhigh');
-            }
-        }
-    }
-
-    if (parsed.responses !== undefined) {
-        if (!isPlainObject(parsed.responses)) {
-            throw new Error('配置文件 responses 必须是对象');
-        }
-
-        if (parsed.responses.model_aliases !== undefined) {
-            if (!isPlainObject(parsed.responses.model_aliases)) {
-                throw new Error('配置文件 responses.model_aliases 必须是对象');
-            }
-
-            for (const [sourceModel, targetModel] of Object.entries(parsed.responses.model_aliases)) {
-                if (typeof sourceModel !== 'string' || sourceModel.trim().length === 0) {
-                    throw new Error('配置文件 responses.model_aliases 的键必须是非空字符串');
-                }
-
-                if (typeof targetModel !== 'string' || targetModel.trim().length === 0) {
-                    throw new Error('配置文件 responses.model_aliases 的值必须是非空字符串');
-                }
-            }
         }
     }
 
@@ -352,12 +227,9 @@ function validateConfigItemArray(configs, fieldName) {
             }
         }
 
-        if (configType === 'apikey') {
-            try {
-                normalizeApiKeySupport(config.support);
-                normalizeApiKeyHealth(config.health);
-            } catch (err) {
-                throw new Error(`配置文件 ${fieldName}[${index}] ${err.message}`);
+        for (const removedField of ['support', 'health', 'apiKey', 'api_key', 'baseUrl', 'baseURL']) {
+            if (Object.prototype.hasOwnProperty.call(config, removedField)) {
+                throw new Error(`配置文件 ${fieldName}[${index}] 不再支持 ${removedField}`);
             }
         }
 
@@ -373,38 +245,6 @@ function validateConfigItemArray(configs, fieldName) {
             }
         }
     }
-}
-
-function resolveClaudeCodeOptions(parsed) {
-    const claudeCode = parsed && isPlainObject(parsed.claude_code)
-        ? parsed.claude_code
-        : {};
-
-    return {
-        model: typeof claudeCode.model === 'string' && claudeCode.model.trim().length > 0
-            ? claudeCode.model.trim()
-            : DEFAULT_CLAUDE_CODE_MODEL,
-        reasoningEffort: typeof claudeCode.reasoning_effort === 'string' && claudeCode.reasoning_effort.length > 0
-            ? claudeCode.reasoning_effort
-            : DEFAULT_CLAUDE_CODE_REASONING_EFFORT
-    };
-}
-
-function resolveResponsesOptions(parsed) {
-    const responses = parsed && isPlainObject(parsed.responses)
-        ? parsed.responses
-        : {};
-    const modelAliases = {};
-
-    if (isPlainObject(responses.model_aliases)) {
-        for (const [sourceModel, targetModel] of Object.entries(responses.model_aliases)) {
-            modelAliases[sourceModel.trim().toLowerCase()] = targetModel.trim();
-        }
-    }
-
-    return {
-        modelAliases
-    };
 }
 
 function createTokenRuntimeConfig(config, index) {
@@ -461,8 +301,8 @@ function createTokenRuntimeConfig(config, index) {
 }
 
 function createApiKeyRuntimeConfig(config, index) {
-    const apikey = getFirstNormalizedString(config, ['apikey', 'apiKey', 'api_key']);
-    const baseUrl = getFirstNormalizedString(config, ['base_url', 'baseUrl', 'baseURL']).replace(/\/+$/, '');
+    const apikey = normalizeString(config.apikey);
+    const baseUrl = normalizeString(config.base_url).replace(/\/+$/, '');
 
     if (!apikey || !baseUrl) {
         throw new Error('apikey 配置至少需要 apikey 和 base_url');
@@ -485,8 +325,6 @@ function createApiKeyRuntimeConfig(config, index) {
         baseUrl,
         apiBasePath: '',
         apiKey: apikey,
-        support: normalizeApiKeySupport(config.support),
-        health: normalizeApiKeyHealth(config.health),
         models: Array.isArray(config.models) ? config.models : [],
         models_endpoint: normalizeString(config.models_endpoint),
         protocol_paths: isPlainObject(config.protocol_paths) ? { ...config.protocol_paths } : {},
@@ -529,7 +367,7 @@ function createClaudeTokenRuntimeConfig(config, index) {
         expires_at: expiresAt,
         models: Array.isArray(config.models) ? config.models : [],
         description: config.description || `Claude OAuth 配置 #${index + 1}`,
-        runtime: createDefaultClaudeTokenRuntime(Boolean(accessToken))
+        runtime: createDefaultClaudeTokenRuntime(Boolean(accessToken) && config.enabled !== false)
     };
 }
 
@@ -580,19 +418,12 @@ module.exports = {
     CHATGPT_BASE_URL,
     CODEX_API_BASE_PATH,
     CLAUDE_API_BASE_URL,
-    DEFAULT_CLAUDE_CODE_MODEL,
-    DEFAULT_CLAUDE_CODE_REASONING_EFFORT,
     parseOpenAiConfigFile,
-    resolveClaudeCodeOptions,
-    resolveResponsesOptions,
     createRuntimeConfigs,
     createTokenRuntimeConfig,
     createApiKeyRuntimeConfig,
     createClaudeTokenRuntimeConfig,
     getConfigItemType,
-    normalizeApiKeySupport,
-    normalizeApiKeyHealth,
-    configSupportsCapability,
     buildAuthHeadersForConfig,
     shouldUseQuotaMonitoring
 };

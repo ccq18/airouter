@@ -3,7 +3,6 @@ const {
     parseOpenAiConfigFile,
     createRuntimeConfigs,
     getConfigItemType,
-    normalizeApiKeySupport,
 } = require('./openai-config');
 const {
     isSub2ApiConfig,
@@ -38,20 +37,6 @@ function normalizeString(value) {
     return String(value);
 }
 
-function getFirstObjectValue(source, keys) {
-    if (!source || typeof source !== 'object' || Array.isArray(source)) {
-        return undefined;
-    }
-
-    for (const key of keys) {
-        if (Object.prototype.hasOwnProperty.call(source, key)) {
-            return source[key];
-        }
-    }
-
-    return undefined;
-}
-
 function decodeJwtPayload(token) {
     const text = normalizeString(token);
     const parts = text.split('.');
@@ -81,62 +66,6 @@ function normalizeStringArray(values) {
         .filter(Boolean);
 }
 
-function hasOwnField(value, field) {
-    return Object.prototype.hasOwnProperty.call(value, field);
-}
-
-function normalizeApiKeyConfigAliases(item) {
-    const normalized = { ...item };
-
-    if (!hasOwnField(normalized, 'apikey')) {
-        if (hasOwnField(normalized, 'apiKey')) {
-            normalized.apikey = normalized.apiKey;
-        } else if (hasOwnField(normalized, 'api_key')) {
-            normalized.apikey = normalized.api_key;
-        }
-    }
-
-    if (!hasOwnField(normalized, 'base_url')) {
-        if (hasOwnField(normalized, 'baseUrl')) {
-            normalized.base_url = normalized.baseUrl;
-        } else if (hasOwnField(normalized, 'baseURL')) {
-            normalized.base_url = normalized.baseURL;
-        }
-    }
-
-    delete normalized.apiKey;
-    delete normalized.api_key;
-    delete normalized.baseUrl;
-    delete normalized.baseURL;
-
-    return normalized;
-}
-
-function normalizeResponsesModelAliases(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new ConfigEditorError('配置设置 responses.model_aliases 必须是对象');
-    }
-
-    const normalized = {};
-
-    for (const [sourceModel, targetModel] of Object.entries(value)) {
-        const normalizedSource = normalizeString(sourceModel);
-        const normalizedTarget = normalizeString(targetModel);
-
-        if (!normalizedSource) {
-            throw new ConfigEditorError('配置设置 responses.model_aliases 的键必须是非空字符串');
-        }
-
-        if (!normalizedTarget) {
-            throw new ConfigEditorError('配置设置 responses.model_aliases 的值必须是非空字符串');
-        }
-
-        normalized[normalizedSource] = normalizedTarget;
-    }
-
-    return normalized;
-}
-
 function normalizePortSetting(value, fieldName, options = {}) {
     if ((value === null || value === undefined || String(value).trim() === '') && options.optional) {
         return null;
@@ -157,7 +86,7 @@ function normalizePortSetting(value, fieldName, options = {}) {
 
 function getEditableFields(type) {
     if (type === 'apikey') {
-        return ['type', 'id', 'preset', 'apikey', 'base_url', 'description', 'support', 'models_endpoint', 'quota_url'];
+        return ['type', 'id', 'preset', 'apikey', 'base_url', 'description', 'models_endpoint', 'quota_url'];
     }
 
     if (type === 'token') {
@@ -171,20 +100,14 @@ function getEditableFields(type) {
     throw new ConfigEditorError(`不支持的配置类型: ${type}`);
 }
 
-const OPTIONAL_STRING_FIELDS = new Set([
-    'id',
-    'preset',
-    'subtype',
-    'models_endpoint',
-    'quota_url',
-    'base_url',
-    'api_base_path',
-]);
-
 function validateParsedConfig(parsed) {
-    const reparsed = parseOpenAiConfigFile(JSON.stringify(parsed));
-    createRuntimeConfigs(reparsed);
-    return reparsed;
+    try {
+        const reparsed = parseOpenAiConfigFile(JSON.stringify(parsed));
+        createRuntimeConfigs(reparsed);
+        return reparsed;
+    } catch (error) {
+        throw new ConfigEditorError(error.message);
+    }
 }
 
 function cloneParsedConfig(parsed) {
@@ -198,10 +121,6 @@ function cloneParsedConfig(parsed) {
         ...parsed,
         configs: parsed.configs.map(cloneConfigItem),
     };
-
-    if (Array.isArray(parsed.disabled_configs)) {
-        cloned.disabled_configs = parsed.disabled_configs.map(cloneConfigItem);
-    }
 
     return cloned;
 }
@@ -220,10 +139,6 @@ function readParsedConfigFile(configFile, options = {}) {
         throw err;
     }
 
-    if (options.validate === false) {
-        return parsed;
-    }
-
     try {
         return validateParsedConfig(parsed);
     } catch (err) {
@@ -237,35 +152,30 @@ function readParsedConfigFile(configFile, options = {}) {
 
 function normalizeConfigItem(item, existingItem = {}) {
     assertPlainObject(item, '配置项必须是对象');
+    for (const field of ['support', 'health', 'apiKey', 'api_key', 'baseUrl', 'baseURL']) {
+        if (Object.prototype.hasOwnProperty.call(item, field)) {
+            throw new ConfigEditorError(`配置项不再支持 ${field}`);
+        }
+    }
 
     const typeProbe = {
         ...(existingItem && typeof existingItem === 'object' && !Array.isArray(existingItem) ? existingItem : {}),
         ...item,
     };
     const type = getConfigItemType(typeProbe);
-    const normalizedItem = type === 'apikey' ? normalizeApiKeyConfigAliases(item) : item;
+    const normalizedItem = item;
     const nextItem = {
         ...(existingItem && typeof existingItem === 'object' && !Array.isArray(existingItem) ? existingItem : {}),
         ...normalizedItem,
     };
 
     for (const field of getEditableFields(type)) {
-        if (field === 'support') {
-            continue;
-        }
-
-        if (field === 'subtype' && !Object.prototype.hasOwnProperty.call(normalizedItem, field)) {
-            continue;
-        }
-
-        if (OPTIONAL_STRING_FIELDS.has(field) && !Object.prototype.hasOwnProperty.call(normalizedItem, field)) {
-            continue;
-        }
+        if (!Object.prototype.hasOwnProperty.call(normalizedItem, field)) continue;
 
         nextItem[field] = normalizeString(normalizedItem[field]);
     }
 
-    if (type !== 'claude_token') {
+    {
         if (Object.prototype.hasOwnProperty.call(normalizedItem, 'protocol_paths')) {
             if (normalizedItem.protocol_paths === null) {
                 delete nextItem.protocol_paths;
@@ -291,7 +201,7 @@ function normalizeConfigItem(item, existingItem = {}) {
         }
 
         if (Object.prototype.hasOwnProperty.call(normalizedItem, 'enabled')) {
-            nextItem.enabled = Boolean(normalizedItem.enabled);
+            nextItem.enabled = normalizedItem.enabled;
         }
     }
 
@@ -308,9 +218,7 @@ function normalizeConfigItem(item, existingItem = {}) {
         delete nextItem.quota_url;
     }
 
-    if (type === 'token' && !nextItem.type) {
-        delete nextItem.type;
-    }
+    nextItem.type = type;
 
     if (type === 'token' && !nextItem.refresh_token) {
         delete nextItem.refresh_token;
@@ -335,42 +243,11 @@ function normalizeConfigItem(item, existingItem = {}) {
     }
 
     if (type === 'apikey') {
-        const rawApiKey = getFirstObjectValue(typeProbe, ['apikey', 'apiKey', 'api_key']);
-        const rawBaseUrl = getFirstObjectValue(typeProbe, ['base_url', 'baseUrl', 'baseURL']);
+        const rawApiKey = typeProbe.apikey;
+        const rawBaseUrl = typeProbe.base_url;
         nextItem.type = 'apikey';
         nextItem.apikey = normalizeString(rawApiKey);
         nextItem.base_url = normalizeString(rawBaseUrl).replace(/\/+$/, '');
-        if (Object.prototype.hasOwnProperty.call(item, 'support')) {
-            nextItem.support = normalizeApiKeySupport(item.support);
-        }
-        delete nextItem.apiKey;
-        delete nextItem.api_key;
-        delete nextItem.baseUrl;
-        delete nextItem.baseURL;
-    }
-
-    if (type === 'claude_token') {
-        nextItem.type = 'claude_token';
-        if (nextItem.base_url) {
-            nextItem.base_url = nextItem.base_url.replace(/\/+$/, '');
-        } else {
-            delete nextItem.base_url;
-        }
-        if (!nextItem.refresh_token) {
-            delete nextItem.refresh_token;
-        }
-        if (!nextItem.expires_at) {
-            delete nextItem.expires_at;
-        }
-        if (!nextItem.account_uuid) {
-            delete nextItem.account_uuid;
-        }
-        if (!nextItem.organization_uuid) {
-            delete nextItem.organization_uuid;
-        }
-        if (!nextItem.local_auth_token) {
-            delete nextItem.local_auth_token;
-        }
     }
 
     if (type === 'claude_token') {
@@ -406,7 +283,7 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
 
     const type = typeof typeOrItem === 'string'
         ? typeOrItem
-        : getConfigItemType(item);
+        : getConfigItemType(item) || 'token';
 
     if (type !== 'token') {
         return normalizeConfigItem({
@@ -435,6 +312,7 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
         }
         const imported = {
             type: 'token',
+            preset: 'chatgpt',
             subtype: 'sub2api',
             description: normalizeString(item.description) || normalizedCredentials.email ||
                 normalizeString(item.name) || normalizedCredentials.chatgpt_account_id,
@@ -494,6 +372,8 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
     }
 
     const imported = {
+        type: 'token',
+        preset: 'chatgpt',
         access_token: accessToken,
         account_id: accountId,
         description,
@@ -513,15 +393,6 @@ function buildImportedConfigItem(typeOrItem, maybeItem) {
 function getConfigIndex(index, parsed) {
     if (!Number.isInteger(index) || index < 0 || index >= parsed.configs.length) {
         throw new ConfigEditorError('配置项索引不合法');
-    }
-
-    return index;
-}
-
-function getDisabledConfigIndex(index, parsed) {
-    const disabledConfigs = Array.isArray(parsed.disabled_configs) ? parsed.disabled_configs : [];
-    if (!Number.isInteger(index) || index < 0 || index >= disabledConfigs.length) {
-        throw new ConfigEditorError('停用配置项索引不合法');
     }
 
     return index;
@@ -548,6 +419,9 @@ function updateConfigItemById(parsed, configId, item) {
         throw new ConfigEditorError('上游账号不存在');
     }
 
+    if (item.id !== undefined && item.id !== configId) {
+        throw new ConfigEditorError('上游账号 ID 不可修改');
+    }
     nextParsed.configs[targetIndex] = normalizeConfigItem(item, nextParsed.configs[targetIndex]);
     if (Array.isArray(nextParsed.configs[targetIndex].models)) {
         nextParsed.configs[targetIndex].models = validateConfigModels(
@@ -627,7 +501,7 @@ function addConfigItems(parsed, items) {
         return normalized;
     });
     nextParsed.configs.push(...normalizedItems);
-    return nextParsed;
+    return validateParsedConfig(nextParsed);
 }
 
 function updateConfigItem(parsed, index, item) {
@@ -662,127 +536,13 @@ function deleteConfigItems(parsed, indexes) {
     return validateParsedConfig(nextParsed);
 }
 
-function disableConfigItem(parsed, index, options = {}) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const targetIndex = getConfigIndex(index, nextParsed);
-    const [item] = nextParsed.configs.splice(targetIndex, 1);
-    const disabledStatus = normalizeString(options.disabledStatus);
-    const disabledItem = { ...item };
-
-    if (disabledStatus) {
-        disabledItem.disabled_status = disabledStatus;
-    } else {
-        delete disabledItem.disabled_status;
-    }
-
-    nextParsed.disabled_configs = Array.isArray(nextParsed.disabled_configs)
-        ? nextParsed.disabled_configs
-        : [];
-    nextParsed.disabled_configs.push(disabledItem);
-    return validateParsedConfig(nextParsed);
-}
-
-function disableConfigItems(parsed, indexes, options = {}) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const targetIndexes = normalizeDeleteIndexes(indexes, nextParsed.configs.length, '配置项');
-    const disabledStatuses = options.disabledStatuses && typeof options.disabledStatuses === 'object'
-        ? options.disabledStatuses
-        : {};
-    const movedItems = [];
-
-    for (const index of targetIndexes) {
-        const [item] = nextParsed.configs.splice(index, 1);
-        const disabledStatus = normalizeString(disabledStatuses[index]);
-        const disabledItem = { ...item };
-
-        if (disabledStatus) {
-            disabledItem.disabled_status = disabledStatus;
-        } else {
-            delete disabledItem.disabled_status;
-        }
-
-        movedItems.unshift(disabledItem);
-    }
-
-    nextParsed.disabled_configs = Array.isArray(nextParsed.disabled_configs)
-        ? nextParsed.disabled_configs
-        : [];
-    nextParsed.disabled_configs.push(...movedItems);
-    return validateParsedConfig(nextParsed);
-}
-
-function enableConfigItem(parsed, index) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
-        ? nextParsed.disabled_configs
-        : [];
-    const targetIndex = getDisabledConfigIndex(index, nextParsed);
-    const [item] = disabledConfigs.splice(targetIndex, 1);
-    delete item.disabled_status;
-
-    nextParsed.disabled_configs = disabledConfigs;
-    nextParsed.configs.push(normalizeConfigItem(item));
-    return validateParsedConfig(nextParsed);
-}
-
-function enableConfigItems(parsed, indexes) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
-        ? nextParsed.disabled_configs
-        : [];
-    const targetIndexes = normalizeDeleteIndexes(indexes, disabledConfigs.length, '停用配置项');
-    const movedItems = [];
-
-    for (const index of targetIndexes) {
-        const [item] = disabledConfigs.splice(index, 1);
-        delete item.disabled_status;
-        movedItems.unshift(normalizeConfigItem(item));
-    }
-
-    nextParsed.disabled_configs = disabledConfigs;
-    nextParsed.configs.push(...movedItems);
-    return validateParsedConfig(nextParsed);
-}
-
-function deleteDisabledConfigItem(parsed, index) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
-        ? nextParsed.disabled_configs
-        : [];
-    const targetIndex = getDisabledConfigIndex(index, nextParsed);
-
-    disabledConfigs.splice(targetIndex, 1);
-    nextParsed.disabled_configs = disabledConfigs;
-    return validateParsedConfig(nextParsed);
-}
-
-function deleteDisabledConfigItems(parsed, indexes) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const disabledConfigs = Array.isArray(nextParsed.disabled_configs)
-        ? nextParsed.disabled_configs
-        : [];
-    const targetIndexes = normalizeDeleteIndexes(indexes, disabledConfigs.length, '停用配置项');
-
-    for (const index of targetIndexes) {
-        disabledConfigs.splice(index, 1);
-    }
-
-    nextParsed.disabled_configs = disabledConfigs;
-    return validateParsedConfig(nextParsed);
-}
-
-function moveConfigItem(parsed, fromIndex, toIndex) {
-    const nextParsed = cloneParsedConfig(parsed);
-    const sourceIndex = getConfigIndex(fromIndex, nextParsed);
-    const targetIndex = getConfigIndex(toIndex, nextParsed);
-    const [item] = nextParsed.configs.splice(sourceIndex, 1);
-
-    nextParsed.configs.splice(targetIndex, 0, item);
-    return nextParsed;
-}
-
 function updateConfigSettings(parsed, settings) {
     assertPlainObject(settings, '配置设置必须是对象');
+    for (const field of Object.keys(settings)) {
+        if (!['apikeys', 'auth_token', 'port', 'proxy_port', 'routing'].includes(field)) {
+            throw new ConfigEditorError(`配置设置不支持 ${field}`);
+        }
+    }
 
     const nextParsed = cloneParsedConfig(parsed);
 
@@ -805,24 +565,6 @@ function updateConfigSettings(parsed, settings) {
         } else {
             nextParsed.proxy_port = proxyPort;
         }
-    }
-
-    if (Object.prototype.hasOwnProperty.call(settings, 'responses')) {
-        const nextResponses = settings.responses;
-
-        if (!nextResponses || typeof nextResponses !== 'object' || Array.isArray(nextResponses)) {
-            throw new ConfigEditorError('配置设置 responses 必须是对象');
-        }
-
-        const mergedResponses = {
-            ...(parsed.responses && typeof parsed.responses === 'object' && !Array.isArray(parsed.responses) ? parsed.responses : {}),
-        };
-
-        if (Object.prototype.hasOwnProperty.call(nextResponses, 'model_aliases')) {
-            mergedResponses.model_aliases = normalizeResponsesModelAliases(nextResponses.model_aliases);
-        }
-
-        nextParsed.responses = mergedResponses;
     }
 
     if (Object.prototype.hasOwnProperty.call(settings, 'routing')) {
@@ -854,7 +596,6 @@ function updateRoutingModels(parsed, models, options = {}) {
     const existingRouting = nextParsed.routing && isPlainObject(nextParsed.routing) ? nextParsed.routing : {};
     nextParsed.routing = {
         ...existingRouting,
-        mode: 'explicit',
         models: JSON.parse(JSON.stringify(models)),
     };
 
@@ -868,10 +609,11 @@ function updateRoutingModels(parsed, models, options = {}) {
 }
 
 function writeParsedConfigFile(configFile, parsed, options = {}) {
-    const validated = options.validate === false ? parsed : validateParsedConfig(parsed);
+    const validated = validateParsedConfig(parsed);
     const tempFile = `${configFile}.tmp`;
 
-    fs.writeFileSync(tempFile, `${JSON.stringify(validated, null, 2)}\n`, 'utf8');
+    fs.writeFileSync(tempFile, `${JSON.stringify(validated, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(tempFile, 0o600);
     fs.renameSync(tempFile, configFile);
 
     return validated;
@@ -887,18 +629,11 @@ module.exports = {
     deleteConfigItem,
     deleteConfigItems,
     deleteConfigItemById,
-    deleteDisabledConfigItem,
-    deleteDisabledConfigItems,
-    disableConfigItem,
-    disableConfigItems,
-    enableConfigItem,
-    enableConfigItems,
     findConfigIndexById,
     getConfigById,
     updateConfigItemById,
     assignMissingConfigIds,
     updateRoutingModels,
-    moveConfigItem,
     readParsedConfigFile,
     writeParsedConfigFile,
 };

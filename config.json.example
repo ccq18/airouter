@@ -1,0 +1,10 @@
+{
+  "apikeys": [],
+  "auth_token": "",
+  "port": 3009,
+  "configs": [],
+  "routing": {
+    "models": [],
+    "max_attempts": 3
+  }
+}

@@ -70,3 +70,15 @@ test('desktop build installs locked production dependencies and migrates them on
   assert.match(rustMain, /files_have_same_contents\(&source_dependency_marker, &destination_dependency_marker\)/);
   assert.match(rustMain, /replace_dir_atomically\(&source_modules, &destination_modules\)/);
 });
+
+
+test('desktop initializes only the new config.json and packages its unified template', () => {
+  const rustMain = fs.readFileSync(path.join(desktopDir, 'src-tauri', 'src', 'main.rs'), 'utf8');
+  const prepareResources = fs.readFileSync(path.join(desktopDir, 'scripts', 'prepare-resources.mjs'), 'utf8');
+  assert.match(rustMain, /const CONFIG_FILE: &str = "config\.json"/);
+  assert.match(rustMain, /const CONFIG_TEMPLATE_FILE: &str = "config\.json\.example"/);
+  assert.doesNotMatch(rustMain.split('#[cfg(test)]')[0], /openai\.json/);
+  assert.match(rustMain, /fn does_not_read_retired_config_filename/);
+  assert.match(prepareResources, /'config\.json\.example'/);
+  assert.doesNotMatch(prepareResources, /openai(?:-api-key)?\.json\.example/);
+});

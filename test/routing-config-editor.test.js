@@ -74,14 +74,14 @@ test('deleting an upstream by stable id does not use array indexes', () => {
   assert.throws(() => deleteConfigItemById(parsed, 'cfg-missing'), /不存在/);
 });
 
-test('routing models are saved atomically with explicit mode and validation', () => {
+test('routing models are saved atomically without a mode switch', () => {
   const next = updateRoutingModels(baseParsed(), [{
     id: 'public-model',
     entry_protocols: ['chat_completions'],
     targets: [{ config_id: 'cfg-a', model: 'glm-5.3', protocol: 'chat_completions' }],
   }], { maxAttempts: 2 });
 
-  assert.equal(next.routing.mode, 'explicit');
+  assert.equal(Object.hasOwn(next.routing, 'mode'), false);
   assert.equal(next.routing.max_attempts, 2);
   assert.equal(next.routing.models[0].targets[0].id, 'target_1');
 
@@ -91,19 +91,14 @@ test('routing models are saved atomically with explicit mode and validation', ()
   }]), /不存在/);
 });
 
-test('routing can be enabled and disabled through settings without touching credentials', () => {
-  const enabled = updateConfigSettings(baseParsed(), {
-    routing: {
-      mode: 'explicit',
-      models: [{
-        id: 'public-model',
-        targets: [{ config_id: 'cfg-a', model: 'glm-5.3', protocol: 'chat_completions' }],
-      }],
-    },
-  });
-  assert.equal(enabled.routing.mode, 'explicit');
-  assert.equal(enabled.configs[0].apikey, 'sk-example');
+test('routing settings update model mappings without a mode switch or credential change', () => {
+  const next = updateConfigSettings(baseParsed(), { routing: { models: [{ id: 'public-model', targets: [{ config_id: 'cfg-a', model: 'glm-5.3', protocol: 'chat_completions' }] }] } });
+  assert.equal(Object.hasOwn(next.routing, 'mode'), false);
+  assert.equal(next.configs[0].apikey, 'sk-example');
+  assert.equal(next.routing.models[0].id, 'public-model');
+});
 
-  const disabled = updateConfigSettings(enabled, { routing: { mode: 'legacy' } });
-  assert.equal(disabled.routing.mode, 'legacy');
+
+test('stable upstream identity cannot be replaced through an edit', () => {
+  assert.throws(() => updateConfigItemById(baseParsed(), 'cfg-a', { id: 'cfg-new' }), /ID 不可修改/);
 });

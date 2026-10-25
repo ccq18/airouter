@@ -7,7 +7,7 @@ const { spawnSync } = require('node:child_process');
 
 const runScript = path.resolve(__dirname, '..', 'run.js');
 const openaiScript = path.resolve(__dirname, '..', 'openai.js');
-const exampleConfigFile = path.resolve(__dirname, '..', 'openai.json.example');
+const exampleConfigFile = path.resolve(__dirname, '..', 'config.json.example');
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-run-'));
@@ -16,7 +16,7 @@ function makeTempDir() {
 function prepareWorkspace(appScript, initialLog = '', config = { proxy_port: 7890 }) {
   const cwd = makeTempDir();
 
-  fs.writeFileSync(path.join(cwd, 'openai.json'), `${JSON.stringify(config)}\n`);
+  fs.writeFileSync(path.join(cwd, 'config.json'), `${JSON.stringify(config)}\n`);
   fs.writeFileSync(path.join(cwd, 'openai.js'), appScript);
 
   if (initialLog) {
@@ -30,7 +30,7 @@ function prepareWorkspaceWithoutConfig(appScript, initialLog = '') {
   const cwd = makeTempDir();
 
   fs.writeFileSync(path.join(cwd, 'openai.js'), appScript);
-  fs.copyFileSync(exampleConfigFile, path.join(cwd, 'openai.json.example'));
+  fs.copyFileSync(exampleConfigFile, path.join(cwd, 'config.json.example'));
 
   if (initialLog) {
     fs.writeFileSync(path.join(cwd, 'openai.log'), initialLog);
@@ -249,7 +249,7 @@ test('start shows all fresh startup logs instead of truncating to the last 20 li
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 
-test('start passes the configured port from openai.json', () => {
+test('start passes the configured port from config.json', () => {
   const workspace = prepareWorkspace(
     buildManagedAppScript({ startupLog: null }),
     '',
@@ -326,7 +326,7 @@ test('start works without proxy_port and preserves inherited proxy env', () => {
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 
-test('start creates openai.json from the example template and continues startup with a custom proxy port', () => {
+test('start creates config.json from the example template and continues startup with a custom proxy port', () => {
   const workspace = prepareWorkspaceWithoutConfig(
     buildManagedAppScript({
       startupLog: null,
@@ -346,7 +346,7 @@ test('start creates openai.json from the example template and continues startup 
   assert.match(startResult.stdout, /starting/);
   assert.match(startResult.stdout, /proxy=http:\/\/127\.0\.0\.1:8899/);
 
-  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'openai.json'), 'utf8'));
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'config.json'), 'utf8'));
   assert.equal(savedConfig.proxy_port, 8899);
   assert.equal(savedConfig.apikeys.length, 1);
   assert.match(savedConfig.apikeys[0], /^sk-airouter-/);
@@ -374,7 +374,7 @@ test('start enables the proxy by default and uses the default proxy port when th
   assert.equal(startResult.status, 0, startResult.stderr);
   assert.match(startResult.stdout, /proxy=http:\/\/127\.0\.0\.1:7890/);
 
-  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'openai.json'), 'utf8'));
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'config.json'), 'utf8'));
   assert.equal(savedConfig.proxy_port, 7890);
   assert.deepEqual(savedConfig.apikeys, []);
 
@@ -382,7 +382,7 @@ test('start enables the proxy by default and uses the default proxy port when th
   assert.equal(stopResult.status, 0, stopResult.stderr);
 });
 
-test('start wizard creates config without deprecated top-level type', () => {
+test('start wizard creates a fresh unified routing config', () => {
   const workspace = prepareWorkspaceWithoutConfig(
     buildManagedAppScript({
       startupLog: null,
@@ -400,9 +400,11 @@ test('start wizard creates config without deprecated top-level type', () => {
 
   assert.equal(startResult.status, 0, startResult.stderr);
 
-  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'openai.json'), 'utf8'));
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(workspace.cwd, 'config.json'), 'utf8'));
   assert.equal(Object.prototype.hasOwnProperty.call(savedConfig, 'type'), false);
   assert.deepEqual(savedConfig.configs, []);
+  assert.deepEqual(savedConfig.routing, { models: [], max_attempts: 3 });
+  assert.equal(Object.hasOwn(savedConfig.routing, 'mode'), false);
   assert.deepEqual(savedConfig.apikeys, []);
   assert.equal(Object.prototype.hasOwnProperty.call(savedConfig, 'proxy_port'), false);
 
@@ -423,9 +425,9 @@ test('start fails with a clear message when config is missing in non-interactive
   });
 
   assert.notEqual(startResult.status, 0);
-  assert.match(startResult.stdout, /openai\.json 不存在/);
+  assert.match(startResult.stdout, /config\.json 不存在/);
   assert.match(startResult.stdout, /交互终端/);
-  assert.equal(fs.existsSync(path.join(workspace.cwd, 'openai.json')), false);
+  assert.equal(fs.existsSync(path.join(workspace.cwd, 'config.json')), false);
 });
 
 test('logs prints the latest 100 lines before following new output', () => {
@@ -538,4 +540,29 @@ test('start fails fast and prints fresh startup errors when the process exits', 
   assert.match(startResult.stdout, /startup boom/);
   assert.doesNotMatch(startResult.stdout, /old log line/);
   assert.equal(fs.existsSync(path.join(workspace.cwd, 'openai.pid')), false);
+});
+
+
+test('start ignores an old openai.json when the new config.json is absent', () => {
+  const workspace = prepareWorkspaceWithoutConfig(buildManagedAppScript({ startupLog: 'legacy config must not start' }));
+  fs.writeFileSync(path.join(workspace.cwd, 'openai.json'), JSON.stringify({ port: 3009, configs: [] }));
+  const result = runCommand(['start'], { ...workspace, extraEnv: { AIROUTER_FORCE_INTERACTIVE: '0' } });
+  try {
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /config\.json 不存在/);
+    assert.equal(fs.existsSync(path.join(workspace.cwd, 'config.json')), false);
+    assert.equal(fs.existsSync(path.join(workspace.cwd, 'openai.json')), true);
+  } finally {
+    runCommand(['stop'], workspace);
+  }
+});
+
+
+test('Claude login help uses config.json without initiating authorization', () => {
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, '..', 'scripts', 'claude-auth-login.js'), '--help'], {
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /--config config\.json/);
+  assert.doesNotMatch(result.stdout, /openai\.json/);
 });

@@ -20,8 +20,8 @@ use tauri_plugin_updater::UpdaterExt;
 
 const APP_DIR_NAME: &str = "Airouter";
 const RUNTIME_DIR_NAME: &str = "airouter";
-const CONFIG_FILE: &str = "openai.json";
-const CONFIG_TEMPLATE_FILE: &str = "openai.json.example";
+const CONFIG_FILE: &str = "config.json";
+const CONFIG_TEMPLATE_FILE: &str = "config.json.example";
 const DEPENDENCY_MARKER_FILE: &str = ".airouter-dependencies.sha256";
 const PID_FILE: &str = "openai.pid";
 const LOG_FILE: &str = "openai.log";
@@ -449,11 +449,11 @@ fn build_initial_config_value(
     request: InitialConfigRequest,
 ) -> Result<Map<String, Value>, String> {
     let parsed: Value = serde_json::from_str(template_raw)
-        .map_err(|error| format!("openai.json.example 解析失败: {error}"))?;
+        .map_err(|error| format!("config.json.example 解析失败: {error}"))?;
     let mut config = parsed
         .as_object()
         .cloned()
-        .ok_or_else(|| "openai.json.example 必须是 JSON 对象".to_string())?;
+        .ok_or_else(|| "config.json.example 必须是 JSON 对象".to_string())?;
 
     let service_port = parse_initial_port(request.service_port, DEFAULT_PORT, "服务端口")?;
     config.insert("port".to_string(), Value::from(service_port));
@@ -476,14 +476,13 @@ fn build_initial_config_value(
         config.insert("apikeys".to_string(), Value::from(Vec::<String>::new()));
     }
 
-    config.remove("type");
     Ok(config)
 }
 
 fn write_initial_config(runtime_dir: &Path, request: InitialConfigRequest) -> Result<(), String> {
     let config_path = runtime_dir.join(CONFIG_FILE);
     if config_path.exists() {
-        return Err("openai.json 已存在，无需初始化".to_string());
+        return Err("config.json 已存在，无需初始化".to_string());
     }
 
     let template_path = runtime_dir.join(CONFIG_TEMPLATE_FILE);
@@ -491,15 +490,15 @@ fn write_initial_config(runtime_dir: &Path, request: InitialConfigRequest) -> Re
         .map_err(|error| format!("无法读取配置模板 {}: {error}", template_path.display()))?;
     let config = build_initial_config_value(&template_raw, request)?;
     let rendered = serde_json::to_string_pretty(&Value::Object(config))
-        .map_err(|error| format!("无法生成 openai.json: {error}"))?;
+        .map_err(|error| format!("无法生成 config.json: {error}"))?;
     fs::write(&config_path, format!("{rendered}\n"))
         .map_err(|error| format!("无法写入 {}: {error}", config_path.display()))
 }
 
 fn read_config(runtime_dir: &Path) -> Result<ConfigShape, String> {
     let raw = fs::read_to_string(runtime_dir.join(CONFIG_FILE))
-        .map_err(|error| format!("无法读取 openai.json: {error}"))?;
-    serde_json::from_str(&raw).map_err(|error| format!("openai.json 解析失败: {error}"))
+        .map_err(|error| format!("无法读取 config.json: {error}"))?;
+    serde_json::from_str(&raw).map_err(|error| format!("config.json 解析失败: {error}"))
 }
 
 fn configured_port(runtime_dir: &Path) -> Result<u16, String> {
@@ -1281,7 +1280,7 @@ fn status_for_runtime(runtime_dir: PathBuf) -> ServiceStatus {
             }
         }
     } else {
-        message = "运行目录中缺少 openai.json".to_string();
+        message = "运行目录中缺少 config.json".to_string();
     }
 
     ServiceStatus {
@@ -1673,6 +1672,14 @@ mod tests {
     }
 
     #[test]
+    fn does_not_read_retired_config_filename() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("openai.json"), r#"{"port":31888}"#).expect("write retired config");
+        assert!(configured_port(temp.path()).is_err());
+        assert!(!temp.path().join(CONFIG_FILE).exists());
+    }
+
+    #[test]
     fn configured_port_falls_back_to_default_when_missing() {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(temp.path().join(CONFIG_FILE), r#"{}"#).expect("write config");
@@ -1693,12 +1700,15 @@ mod tests {
         };
 
         let config = build_initial_config_value(
-            r#"{"type":"token","apikeys":[],"port":3009,"proxy_port":7890,"configs":[]}"#,
+            r#"{"apikeys":[],"port":3009,"proxy_port":7890,"configs":[],"routing":{"models":[],"max_attempts":3}}"#,
             request,
         )
         .expect("build initial config");
 
-        assert_eq!(config.get("type"), None);
+        assert_eq!(
+            config.get("routing"),
+            Some(&serde_json::json!({"models": [], "max_attempts": 3}))
+        );
         assert_eq!(config.get("port"), Some(&Value::from(3017)));
         assert_eq!(config.get("proxy_port"), Some(&Value::from(8899)));
         assert_eq!(

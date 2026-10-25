@@ -2,7 +2,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  isExplicitRouting,
   ensureConfigIds,
   getRoutingRevision,
   parseRoutingConfig,
@@ -39,7 +38,6 @@ function baseParsed(overrides = {}) {
       },
     ],
     routing: {
-      mode: 'explicit',
       models: [
         {
           id: 'deepseek',
@@ -56,13 +54,12 @@ function baseParsed(overrides = {}) {
   };
 }
 
-test('explicit routing is opt-in and legacy configs remain valid without routing', () => {
-  assert.equal(isExplicitRouting({ routing: { mode: 'explicit', models: [] } }), true);
-  assert.equal(isExplicitRouting({ routing: { mode: 'legacy' } }), false);
-  assert.equal(isExplicitRouting({}), false);
-
+test('routing is the only dispatch contract and mode flags are rejected', () => {
   const parsed = parseOpenAiConfigFile(JSON.stringify(baseParsed()));
-  assert.equal(parsed.routing.mode, 'explicit');
+  assert.deepEqual(getPublicModelIds(parsed), ['deepseek']);
+  assert.deepEqual(parseRoutingConfig({ configs: [] }).models, []);
+  assert.throws(() => parseRoutingConfig({ routing: { mode: 'legacy' } }), /mode.*移除/);
+  assert.throws(() => parseRoutingConfig({ routing: { mode: 'explicit' } }), /mode.*移除/);
 });
 
 test('config model lists and targets preserve arbitrary backend model IDs and case', () => {
@@ -148,7 +145,6 @@ test('custom providers may only configure model discovery themselves', () => {
       models: [{ id: 'my-model', protocols: ['chat_completions'] }],
     }],
     routing: {
-      mode: 'explicit',
       models: [{
         id: 'public',
         targets: [{ config_id: 'cfg-custom', model: 'my-model', protocol: 'chat_completions' }],
@@ -190,9 +186,7 @@ test('stable config ids are assigned without reordering or rewriting credentials
       { type: 'token', access_token: 'token-1', account_id: 'account-1' },
       { id: 'cfg-keep', type: 'apikey', base_url: 'https://example.com/v1', apikey: 'sk-example' },
     ],
-    disabled_configs: [
-      { type: 'apikey', base_url: 'https://example.com/v1', apikey: 'sk-example-2' },
-    ],
+
   };
   let counter = 0;
   const ensured = ensureConfigIds(parsed, {
@@ -204,7 +198,6 @@ test('stable config ids are assigned without reordering or rewriting credentials
   assert.equal(ensured.parsed.configs[1].id, 'cfg-keep');
   assert.equal(ensured.parsed.configs[0].access_token, 'token-1');
   assert.equal(ensured.parsed.configs[0].account_id, 'account-1');
-  assert.equal(ensured.parsed.disabled_configs[0].id, 'cfg_generated_2');
 
   const again = ensureConfigIds(ensured.parsed, { generateId: () => 'cfg-unused' });
   assert.equal(again.changed, false);

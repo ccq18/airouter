@@ -43,7 +43,6 @@ function createParsed() {
       },
     ],
     routing: {
-      mode: 'explicit',
       models: [{
         id: 'public-model',
         entry_protocols: ['chat_completions', 'responses', 'messages'],

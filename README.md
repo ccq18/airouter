@@ -1,291 +1,79 @@
 # Airouter
 
-Airouter 是一个本地 API 转发 App 和服务。
+Airouter 将任意客户端模型 ID 映射到有序的「上游账号 + 后端模型」候选。ChatGPT/Codex、Claude OAuth、OpenCode Zen/Go、OpenRouter、GLM Coding Plan 和自定义接口按同一规则参与路由；账号类型不决定优先级。
 
-你可以把 ChatGPT/Codex 登录态、OpenAI 兼容 API、Claude Messages 兼容 API 放进 Airouter，然后让 Codex、Claude Code、cc-switch 等工具统一访问一个本地地址：
-
-```text
-http://localhost:3009/v1
-```
-
-Airouter 会在本机转发请求，并在账号不可用时自动切换到其他可用账号。
-
-## 下载和启动
-
-打开 [GitHub Releases](https://github.com/ccq18/airouter/releases) 下载最新版。
-
-- macOS：下载 `Airouter_*.app.zip`，解压后打开 `Airouter.app`。
-- Windows：下载 `Airouter_*.exe`，安装后打开 Airouter。
-
-打开 App 后，它会自动启动本地服务，并打开管理页面。退出 App 时，本地服务也会一起关闭。
-
-也可以在项目目录里用命令行启动：
+## 1. 启动与配置
 
 ```bash
 npm install
 npm start
 ```
 
-命令行服务默认端口是 `3009`。管理页面地址会写入日志，可以用下面的命令查看：
+首次在交互终端启动时，会依据 `config.json.example` 创建 `config.json`；也可以复制模板后手动填写。服务不会读取或迁移 `openai.json`。本次只支持统一模型路由，不存在模式开关、旧账号焦点或全局模型别名。
 
 ```bash
+npm run stop
+npm run restart
 npm run logs
 ```
 
-## 第一次使用
-
-第一次打开时，App 会让你完成基础设置：
-
-1. 服务端口：默认 `3009`，一般不用改。
-2. 本地代理端口：如果你访问 ChatGPT 需要代理，常见填 `7890`；不需要可以留空。
-3. 入口 apikey：可选。开启后，客户端访问 Airouter 时需要带这个 apikey。
-
-完成后会进入管理页面。
-
-如果用命令行启动且项目目录里还没有 `openai.json`，命令行会进入同样的配置引导；完成后访问日志里显示的管理页面。
-![cc-switch Codex 配置](docs/img/img.png)
-
-## 添加账号
-
-管理页面里主要添加两类账号。
-
-### ChatGPT/Codex 账号
-
-适合使用 ChatGPT/Codex 账号额度。
-
-有两种添加方式。
-
-方式一：App 自动获取。
-
-在 `AuthSession JSON` 旁边点击 `App 自动获取`，App 会打开一个新的 ChatGPT 登录窗口。你登录成功后，Airouter 会自动读取登录态并填回表单。
-
-方式二：手动粘贴 JSON。
-
-如果你已经有 AuthSession JSON 文件或别人提供给你的 JSON 内容，直接打开文件，复制完整 JSON，粘贴到 `OpenAI token` 页面里的 `AuthSession JSON` 文本框。
-
-如果你手里的是 OAuth 导出数组，也可以直接粘贴进同一个文本框；系统会自动从每个条目里提取 `access_token`、`chatgpt_account_id`、`refresh_token` 和邮箱备注。
-
-无论用哪种方式，确认文本框里已经有 JSON 后，点击 `新增 OpenAI token`。新增 OpenAI token 只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
-
-注意：
-
-- 登录窗口是临时窗口，不会复用上次登录信息。
-- 如果你手动关闭登录窗口，`App 自动获取`按钮会恢复可点。
-- 手动粘贴时请复制完整 JSON，不要只复制 `accessToken`。
-- 登录态添加成功后，不要主动退出这个 ChatGPT 登录态，否则 token 可能失效。
-
-### 第三方 API Key
-
-适合接入 OpenAI 兼容接口或 Claude Messages 兼容接口，作为对应 token 主链路不可用后的 fallback。
-
-在管理页打开 `Fallback apikey` 页面，填写：
-
-- `Base URL`：上游地址，通常写到 `/v1`，例如 `https://api.example.com/v1`。
-- `API Key`：上游服务提供的 key。
-- `支持类型`：
-  - `GPT`：支持 OpenAI 兼容接口，也可作为 `/v1/messages` 的 Responses 转换上游。
-  - `Claude`：支持 Claude Messages 原样转发接口。
-- `可用性测试模型`：用于 GPT fallback 恢复探测，默认 `gpt-5.4-mini`，可选 `gpt-5.4`。
-
-填完后点击 `新增 fallback apikey`。
-
-新增 fallback apikey 只追加当前输入并写入配置文件，不会完整校验历史配置；暂时无法构建运行态的新增项会显示为不可用，不会阻塞保存。
-
-### Claude OAuth 登录态
-
-适合让 Claude Code 以本地 OAuth token 形态访问 Airouter，再由 Airouter 替换为真实 Claude OAuth token 转发到 Anthropic。
-
-运行登录脚本：
-
-```bash
-npm run claude:login
-```
-
-脚本会启动一个本地 OAuth 回调服务，打印 Claude 授权链接。浏览器授权成功后，它会把一个 `type: "claude_token"` 配置追加到 `openai.json`，并生成一个本地 fake auth token 写入顶层 `apikeys`。如果本机 Claude Code Keychain 里存在同一登录态的交互式 OAuth token，脚本只会把它的 SHA-256 写入 `request_auth_token_sha256s`，不额外保存这枚 token 明文。
-
-Claude Code 使用示例：
-
-```bash
-export ANTHROPIC_BASE_URL=http://localhost:3009
-export CLAUDE_CODE_OAUTH_TOKEN=<脚本输出的本地 fake auth token>
-unset ANTHROPIC_API_KEY
-unset ANTHROPIC_AUTH_TOKEN
-```
-
-`claude_token` 只用于 `/v1/messages` Claude Messages 原样转发链路。Airouter 不改写 Claude Code 请求体，只替换上游 `Authorization`，并保留 Claude Code 发来的 `anthropic-version`、`anthropic-beta`、`x-claude-code-session-id` 等请求头。请求里的本地 fake auth token 命中某个 `local_auth_token` 时会严格绑定到该登录态，不会透明切到其它 Claude 登录态；交互式 Claude Code 主请求如果改用本机 Keychain 中同一登录态的真实 Claude OAuth access token，Airouter 会通过 `request_auth_token_sha256s` 做入站匹配并绑定到这条 `claude_token` 配置。`airouter-oauth-` 前缀的本地 fake token 如果没有绑定到可用 `claude_token`，也不会 fallback 到 OpenAI/GPT 上游。
-
-## 给客户端使用
-
-管理页面会显示代理地址，通常是：
+默认端口为 `3009`。管理凭证 `auth_token` 为空时，服务会生成并写回配置；日志不打印该值。从自己的 `config.json` 获取它后访问：
 
 ```text
-http://localhost:3009/v1
+http://localhost:3009/admin/configs?auth_token=<管理凭证>
 ```
 
-常用接口：
+`apikeys` 是客户端入口密钥，区别于上游转发凭证。缺少该字段时服务生成一枚入口密钥；显式配置为空数组时关闭入口密钥校验。
+
+## 2. 配置账号与路由
+
+管理台只有两个页签：
+
+- **上游账号**：账号列表；新增和编辑通过弹窗完成。选择平台、填写转发凭证，维护支持模型。内置平台不需要填写模型目录地址，只有自定义接口需要。
+- **模型路由**：填写任意客户端 ID，添加「账号 + 后端模型」候选并调整顺序。客户端 ID 与后端模型名相互独立。
+
+模型同步先预览差异、合并到草稿，再保存。取消不会修改配置；被路由引用的模型不能直接删除。新增账号保存前也能使用草稿凭证同步目录。入口密钥、端口和登录态导入在设置入口中维护。
+
+最高优先级候选可用时持续使用；额度耗尽或出现可重试故障后使用后备。确认额度恢复后，后续不依赖上游私有状态的请求自动回切。额度未知或查询失败不会被显示为零；已知耗尽不会因查询失败而恢复。
+
+## 3. 客户端调用
+
+支持三个 JSON 对话入口和模型目录：
 
 ```text
-http://localhost:3009/v1/responses
-http://localhost:3009/v1/images/generations
-http://localhost:3009/v1/images/edits
-http://localhost:3009/v1/messages
+POST /v1/chat/completions
+POST /v1/responses
+POST /v1/messages
+GET  /v1/models
 ```
 
-完整接口说明见 [API 接口文档](docs/api-reference.md)。
+客户端 Base URL 为 `http://localhost:3009/v1`，使用 `Authorization: Bearer <入口密钥>` 或 `x-api-key`。请求中的 `model` 必须是已配置的客户端路由 ID；没有路由时不会猜测或自动选择账号。
 
-Token 配置下，`/v1/images/generations` 和 `/v1/images/edits` 会通过 Codex Responses 的 `image_generation` 工具兼容输出 OpenAI Images JSON；图片业务请求在响应提交给客户端前遇到 token Responses 错误时，也会排除当前配置并尝试切到下一个可用配置：
+流式响应已经开始后不会拼接其他上游的答案；`previous_response_id` 固定到原账号、模型和协议，绑定丢失时需要客户端重发完整上下文。
 
-```json
-{
-  "created": 1779778600,
-  "data": [
-    {
-      "b64_json": "...",
-      "revised_prompt": "..."
-    }
-  ]
-}
-```
+## 4. 登录态与平台边界
 
-如果页面里配置了入口 `apikey`，客户端里还要填同一个 `apikey`：
-
-```http
-Authorization: Bearer sk-airouter-xxxx
-```
-
-如果没有配置入口 apikey，本机请求不会校验 apikey。
-
-## 统一模型路由（显式模式）
-
-管理台现在只有两个页签：`上游账号` 和 `模型路由`。默认展示列表，新增和编辑通过独立弹窗完成；模型同步先预览并合并到草稿，保存后生效。入口密钥、导入和端口位于设置入口。
-
-- `上游账号`：维护 ChatGPT/Codex、Claude OAuth、OpenCode Zen/Go、OpenRouter、GLM Coding Plan 中国/国际以及自定义接口。内置平台的模型列表地址和鉴权由系统内置；只有自定义接口会显示“模型列表地址”。
-- `模型路由`：为任意客户端模型 ID 配置有序候选。每个候选分别选择上游账号、该账号支持的后端模型和协议。客户端 ID 区分大小写，与后端模型名完全独立。例如可以配置 `deepseek` -> GLM 账号 / `glm-5.3`，也可以配置任何其他名称。
-
-在管理台保存第一条模型路由即可启用显式模式；也可在 `openai.json` 写入：
-
-```json
-{
-  "routing": {
-    "mode": "explicit"
-  }
-}
-```
-
-没有 `routing.mode: "explicit"` 时继续使用旧模式，原有 token/apikey 调度不变。
-
-显式模式的行为：
-
-- 严格按候选顺序使用；第一项可用就一直使用第一项，不会为了平均分流跨过更高优先级。
-- 额度耗尽时使用下一项；确认额度恢复后，下一次不依赖上游私有状态的请求会自动回到更高优先级。
-- 额度未知或查询失败不会被视为耗尽，也不会显示成 0；已知耗尽后查询失败不会自动恢复。
-- 账号鉴权失败/临时冷却与额度状态分开处理。
-- 每个候选在一次请求中最多尝试一次，默认最多 3 次上游尝试，且不会超过候选数量。
-- 流式响应已经开始返回后不会切换上游拼接答案；客户端取消会取消当前上游。
-- `previous_response_id` 只固定在原 Responses 候选；候选不可用、跨协议或服务重启导致归属丢失时返回 `upstream_context_unavailable`，需要客户端重发完整上下文。
-- `GET /v1/models` 返回已启用的客户端模型 ID。后端真实模型只会在管理台状态中展示，不会替换客户端看到的下游模型字段。
-
-跨协议支持文本、图片、工具调用/结果和 SSE。结构化输出、内置服务端工具、thinking/加密 reasoning、文件和音频在不能保真时明确拒绝或跳过候选，不会静默丢弃。ChatGPT/Codex 会尝试通过内置的 `/backend-api/codex/models` 同步模型；不同账号或版本可能不返回该列表，失败时会显示可读原因，可继续手动维护。OpenCode Go 的实时模型列表不包含协议元数据，默认按模型家族推导（Claude -> Messages，OpenAI -> Responses，GLM/DeepSeek 等 -> Chat Completions），可在界面中手动调整。
-
-## 配合 cc-switch
-
-推荐用 [cc-switch](https://github.com/farion1231/cc-switch) 管理 Codex、Claude Code 等客户端配置。
-
-在 cc-switch 里填写：
-
-```text
-Base URL: http://localhost:3009/v1
-API Key: 管理页里的入口 apikey，没有配置就留空
-```
-
-示例：
-
-![cc-switch Codex 配置](docs/img/ccs_codex.png)
-
-![cc-switch Claude 配置](docs/img/ccs_claude.png)
-
-## 账号顺序和自动切换（legacy 模式）
-
-未启用 `routing.mode: "explicit"` 时，Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`，或请求头里的 `x-airouter-session-id` / `x-client-request-id`，会通过 HRW/Rendezvous 一致性哈希尽量固定到同一个可用 token 账号。
-
-你可以：
-
-- 用 `置顶`、`上移`、`下移` 调整优先级。
-- 在 OpenAI token 行用 `设为 OpenAI 焦点` 调整 Responses 主链路的调度焦点。
-- 在 Claude token 行用 `设为 Claude 焦点` 调整 `/v1/messages` 原样转发主链路的调度焦点。
-- 在 apikey 行用 `设为兜底焦点` 调整 fallback 优先级；apikey 仍只在对应 token 链路不可用时兜底。
-- 用 `停用` 将账号移入停用列表。停用账号对服务不可见，后续请求、额度刷新和 fallback 都不会读取它，但可以在管理页重新启用；管理页也支持勾选多项后批量停用已启用配置、批量启用停用配置。
-- 用 `删除` 永久移除不再需要的账号；管理页也支持勾选多项后批量删除启用配置、停用配置和入口 apikey。
-
-token 账号不可用时，同一会话会自动漂移到其他可用 token 账号；没有会话标识的 token 请求会按当前 in-flight 数分摊。`apikey` 上游不参与这套并发调度，只有 token 不可用时才作为传统 fallback。Airouter 会自动检查 ChatGPT/Codex token 账号状态；额度低、登录态失效或账号不可用时，会跳过它。额度检查本身连续 3 次失败才会把 token 标记为 `quota_check_failed`，成功检查会清零失败计数。token Responses 请求如果请求模型不是 `gpt-5.4-mini` 或它的日期版本后缀，但上游成功响应里的实际模型变成了 `gpt-5.4-mini` 或同名日期版本，会被视为模型降级并触发本次请求自动切号，但不会把账号标记为不可用。apikey 直连上游在响应提交给客户端前遇到任意非 200 HTTP 状态、请求失败或响应体中断时，会在本次请求内先尝试切到下一个可用配置；响应已经开始写给客户端后不再透明切换。最近 30 分钟内最多 10 个已完成真实请求累计达到 3 次失败时，才会被临时标记为不可用。已被标记为不可用的 GPT apikey 会在每 3 分钟全量校正中用 `/v1/responses` 的 `hello` 请求探测，成功后自动恢复可用；探测默认超时 `30000ms`（30 秒），可用环境变量 `APIKEY_RECOVERY_TIMEOUT_MS` 覆盖；探测模型默认 `gpt-5.4-mini`，管理页新增 fallback apikey 时可选择 `gpt-5.4-mini` 或 `gpt-5.4`，配置文件中对应 `"health": {"model": "gpt-5.4-mini"}`。
-
-管理页会在“调度模式”和 token 账号摘要里显示安全的调度观测：正在请求时显示 `当前会话 #短hash -> 配置 #N`，请求结束后保留 `最近会话 #短hash`，用于观察某个会话实际命中了哪个账号。原始会话 ID 不会写入配置，也不会返回到页面。
-
-管理页也会在账号摘要中显示最近一次 `/v1/responses` 或 `/v1/messages` 转换链路的模型观测，例如 `响应模型 gpt-5.4-mini-2026-03-17 · 请求 gpt-5.4-mini`，同名日期版本会视为一致，方便判断上游实际返回的模型是否符合预期。
-
-`/v1/messages` 会优先使用 `claude_token` 原样转发；没有可用 Claude token 时，使用支持 `Claude` 的 API Key 原样转发。Claude 直转链路都不可用时，才转换到 Responses：优先使用 OpenAI token，OpenAI token 不可用时再使用支持 `GPT` 的 API Key。
-
-`/cpa/v1/*` 提供 CLIProxyAPI 风格前缀入口，内部剥离 `/cpa` 后复用 `/v1/*` 链路。走 Codex/Responses 转换时，Airouter 会把原始 `instructions` 或 Claude `system` 转成 `developer` input，并保留空字符串 `instructions` 字段，避免把系统提示直接作为 system/instructions 发给上游。
-
-## 性能与超时
-
-Airouter 不在业务入口设置全局请求队列或全局并发上限；上游限流时，客户端应针对上游返回的 429/5xx 使用带随机抖动的指数退避。流式响应会在慢客户端产生背压时暂停读取上游，避免未发送数据持续占用内存。
-
-上游默认使用 10 秒连接超时、60 秒流式首响应超时、180 秒流式空闲超时和 10 分钟共享总 deadline。一次请求发生 failover 时复用同一个总 deadline，不会为每次重放重新计算 10 分钟。详细环境变量、请求体上限和调优建议见 [并发、背压与超时](docs/performance-and-timeouts.md)。
-
-## 端口说明
-
-管理页可以修改两个端口：
-
-- 服务端口：Airouter 对外提供接口的端口，默认 `3009`。
-- 本地代理端口：Airouter 访问上游时使用的代理端口，例如 `7890`。
-
-保存端口后会立即生效。服务端口变化时，页面会自动跳转到新地址。
-
-## 常见问题
-
-### 管理页面打不开
-
-重新打开 App。App 会尝试启动本地服务，并清理旧进程占用的端口。
-
-如果用命令行启动，先确认服务正在运行：
+ChatGPT/Codex 可通过管理台导入 AuthSession 或 Sub2API Agent Identity JSON，然后维护支持模型与路由。Claude OAuth 使用：
 
 ```bash
-npm start
-npm run logs
+npm run claude:login -- --config config.json --open
+npm run restart
 ```
 
-### 提示 auth_token 无效
+登录脚本修改磁盘配置后需重启服务，再添加模型与路由。管理接口保存的修改会热加载；直接编辑配置文件也需要重启。
 
-管理页面地址里的 `auth_token` 不对。请使用 App 自动打开或日志里显示的完整管理页面地址，不要手动删改 URL 后面的参数。
+Go、GLM 和 OpenRouter 按各平台接口读取额度，复用转发凭证。Zen 普通 Key 余额、Claude OAuth 额度尚无已核实的读取接口，会显示未知。完整平台与协议边界见[统一设计](docs/unified-model-routing-design.md)。
 
-### 请求返回 401 或 token_revoked
-
-通常是 ChatGPT 登录态失效。重新点击 `App 自动获取`，登录 ChatGPT 后添加新的配置项；命令行模式下重新获取 AuthSession JSON 后添加新的配置项。
-
-### API Key 有两种，怎么区分
-
-- 上游 API Key：填在 `Fallback apikey` 页面里，Airouter 用它访问上游。
-- 入口 apikey：填在客户端里，客户端用它访问 Airouter。
-
-## 命令行运行
-
-推荐使用桌面 App。确实需要命令行时，可以这样运行：
+## 5. 验证与部署
 
 ```bash
-npm install
-npm start
+npm test
 ```
 
-常用命令：
+集成测试使用临时配置和本地假上游；真实套餐、供应商网络与推理需另行验收。服务器可直接运行 `CONFIG=/绝对路径/config.json AIROUTER_BIND_HOST=127.0.0.1 node openai.js`，由 Nginx 提供 HTTPS。配置文件应仅对服务用户可读写，反向代理应关闭 SSE 缓冲。
 
-```bash
-npm start        # 启动
-npm run stop     # 停止
-npm run restart  # 重启
-npm run logs     # 查看日志
-npm run claude:login # 追加 Claude OAuth 登录态
-npm run claude:install-login -- --token airouter-oauth-xxx --base-url http://localhost:3009
-```
+桌面应用的开发、打包和签名更新见 [desktop/README.md](desktop/README.md)。
 
-命令行版本会使用项目目录下的 `openai.json`。桌面 App 会使用系统应用数据目录里的配置文件，升级 App 不会覆盖你的配置。
+## 6. 参考
+
+[配置契约](docs/config-item-reference.md) · [HTTP 接口](docs/api-reference.md) · [统一路由设计与运行边界](docs/unified-model-routing-design.md)

@@ -10,14 +10,7 @@ const {
   addConfigItem,
   addConfigItems,
   buildImportedConfigItem,
-  disableConfigItem,
-  disableConfigItems,
   deleteConfigItems,
-  deleteDisabledConfigItem,
-  deleteDisabledConfigItems,
-  enableConfigItem,
-  enableConfigItems,
-  moveConfigItem,
   updateConfigItem,
   updateConfigSettings,
   deleteConfigItem,
@@ -29,12 +22,10 @@ function createTokenConfig(overrides = {}) {
   return {
     proxy_port: 7890,
     port: 3009,
-    claude_code: {
-      model: 'gpt-5.4',
-      reasoning_effort: 'high',
-    },
     configs: [
       {
+        type: 'token',
+        preset: 'chatgpt',
         access_token: 'token-1',
         account_id: 'account-1',
         description: 'primary',
@@ -70,6 +61,7 @@ test('addConfigItem appends a token config and preserves top-level settings', ()
   const parsed = createTokenConfig();
 
   const next = addConfigItem(parsed, {
+    type: 'token',
     access_token: 'token-2',
     account_id: 42,
     description: 'backup',
@@ -77,12 +69,12 @@ test('addConfigItem appends a token config and preserves top-level settings', ()
 
   assert.equal(next.proxy_port, 7890);
   assert.equal(next.port, 3009);
-  assert.equal(next.claude_code.model, 'gpt-5.4');
   assert.equal(next.configs.length, 2);
   assert.match(next.configs[1].id, /^cfg_/);
   const { id: generatedId, ...appendedConfig } = next.configs[1];
   assert.ok(generatedId);
   assert.deepEqual(appendedConfig, {
+    type: 'token',
     access_token: 'token-2',
     account_id: '42',
     description: 'backup',
@@ -94,6 +86,7 @@ test('addConfigItems appends multiple configs in one update', () => {
 
   const next = addConfigItems(parsed, [
     {
+      type: 'token',
       access_token: 'token-2',
       account_id: 42,
       description: 'backup',
@@ -103,7 +96,6 @@ test('addConfigItems appends multiple configs in one update', () => {
       apikey: 'sk-example',
       base_url: 'https://api.example.com/v1/',
       description: 'gpt api',
-      support: ['gpt'],
     },
   ]);
 
@@ -115,6 +107,7 @@ test('addConfigItems appends multiple configs in one update', () => {
   const { id: tokenId, ...tokenConfig } = next.configs[1];
   assert.ok(tokenId);
   assert.deepEqual(tokenConfig, {
+    type: 'token',
     access_token: 'token-2',
     account_id: '42',
     description: 'backup',
@@ -127,63 +120,6 @@ test('addConfigItems appends multiple configs in one update', () => {
     apikey: 'sk-example',
     base_url: 'https://api.example.com/v1',
     description: 'gpt api',
-    support: ['gpt'],
-  });
-});
-
-test('addConfigItems appends without validating existing configs', () => {
-  const parsed = createApiKeyConfig({
-    configs: [
-      {
-        type: 'apikey',
-        apikey: '',
-        base_url: '',
-        description: 'historical draft',
-      },
-    ],
-  });
-
-  const next = addConfigItems(parsed, [
-    {
-      access_token: 'token-2',
-      account_id: 'account-2',
-      description: 'new token',
-    },
-  ]);
-
-  assert.equal(next.configs.length, 2);
-  assert.deepEqual(next.configs[0], parsed.configs[0]);
-  assert.match(next.configs[1].id, /^cfg_/);
-  const { id: generatedId, ...appendedConfig } = next.configs[1];
-  assert.ok(generatedId);
-  assert.deepEqual(appendedConfig, {
-    access_token: 'token-2',
-    account_id: 'account-2',
-    description: 'new token',
-  });
-});
-
-test('addConfigItems appends without validating new runtime fields', () => {
-  const parsed = createTokenConfig();
-
-  const next = addConfigItems(parsed, [
-    {
-      type: 'apikey',
-      apikey: '',
-      base_url: '',
-      description: 'new draft apikey',
-    },
-  ]);
-
-  assert.equal(next.configs.length, 2);
-  assert.match(next.configs[1].id, /^cfg_/);
-  const { id: generatedId, ...appendedConfig } = next.configs[1];
-  assert.ok(generatedId);
-  assert.deepEqual(appendedConfig, {
-    type: 'apikey',
-    apikey: '',
-    base_url: '',
-    description: 'new draft apikey',
   });
 });
 
@@ -200,6 +136,8 @@ test('buildImportedConfigItem extracts token fields from auth session JSON', () 
   });
 
   assert.deepEqual(imported, {
+    type: 'token',
+    preset: 'chatgpt',
     description: 'user@example.com',
     account_id: 'account-from-session',
     access_token: 'access-token-from-session',
@@ -219,6 +157,8 @@ test('buildImportedConfigItem preserves refresh_token from auth session JSON', (
   });
 
   assert.deepEqual(imported, {
+    type: 'token',
+    preset: 'chatgpt',
     description: 'user@example.com',
     account_id: 'account-from-session',
     access_token: 'access-token-from-session',
@@ -261,6 +201,8 @@ test('buildImportedConfigItem supports oauth export credential JSON', () => {
   });
 
   assert.deepEqual(imported, {
+    type: 'token',
+    preset: 'chatgpt',
     description: 'export@example.com',
     account_id: 'account-from-credentials',
     access_token: 'access-token-from-export',
@@ -298,6 +240,7 @@ test('buildImportedConfigItem converts Sub2API Agent Identity exports to token s
 
   assert.deepEqual(imported, {
     type: 'token',
+    preset: 'chatgpt',
     subtype: 'sub2api',
     description: 'agent@example.com',
     credentials: {
@@ -370,6 +313,8 @@ test('buildImportedConfigItem falls back to oauth export extra fields and accoun
   });
 
   assert.deepEqual(imported, {
+    type: 'token',
+    preset: 'chatgpt',
     description: 'exported-account',
     account_id: 'account-from-extra',
     access_token: 'access-token-from-export',
@@ -409,6 +354,8 @@ test('buildImportedConfigItem keeps explicit token config fields when provided',
   });
 
   assert.deepEqual(imported, {
+    type: 'token',
+    preset: 'chatgpt',
     description: 'manual description',
     account_id: 'manual-account',
     access_token: 'manual-token',
@@ -436,7 +383,6 @@ test('buildImportedConfigItem keeps item-level apikey credentials', () => {
     apikey: '  sk-third-party  ',
     base_url: ' https://api.example.com/v1/ ',
     description: ' third party ',
-    support: [' gpt ', 'claude', 'gpt'],
   });
 
   assert.deepEqual(imported, {
@@ -444,24 +390,6 @@ test('buildImportedConfigItem keeps item-level apikey credentials', () => {
     apikey: 'sk-third-party',
     base_url: 'https://api.example.com/v1',
     description: 'third party',
-    support: ['gpt', 'claude'],
-  });
-});
-
-test('buildImportedConfigItem accepts fallback apikey form field aliases', () => {
-  const imported = buildImportedConfigItem('apikey', {
-    apiKey: '  sk-fallback  ',
-    baseUrl: ' https://api.fallback.example.com/v1/ ',
-    description: ' fallback upstream ',
-    support: [' gpt '],
-  });
-
-  assert.deepEqual(imported, {
-    type: 'apikey',
-    apikey: 'sk-fallback',
-    base_url: 'https://api.fallback.example.com/v1',
-    description: 'fallback upstream',
-    support: ['gpt'],
   });
 });
 
@@ -469,6 +397,7 @@ test('updateConfigItem overwrites editable fields but keeps unknown keys on the 
   const parsed = createTokenConfig({
     configs: [
       {
+        type: 'token',
         access_token: 'token-1',
         account_id: 'account-1',
         description: 'primary',
@@ -484,6 +413,7 @@ test('updateConfigItem overwrites editable fields but keeps unknown keys on the 
   });
 
   assert.deepEqual(next.configs[0], {
+    type: 'token',
     access_token: 'token-9',
     account_id: 'account-9',
     description: 'rotated',
@@ -502,17 +432,20 @@ test('deleteConfigItems removes multiple enabled configs by original index order
   const next = deleteConfigItems(createTokenConfig({
     configs: [
       {
+        type: 'token',
         access_token: 'token-1',
         account_id: 'account-1',
         description: 'first',
       },
       {
-        access_token: 'token-2',
+        type: 'token',
+      access_token: 'token-2',
         account_id: 'account-2',
         description: 'second',
       },
       {
-        access_token: 'token-3',
+        type: 'token',
+      access_token: 'token-3',
         account_id: 'account-3',
         description: 'third',
       },
@@ -532,12 +465,14 @@ test('deleteConfigItems rejects duplicate indexes without mutating input', () =>
   const parsed = createTokenConfig({
     configs: [
       {
+        type: 'token',
         access_token: 'token-1',
         account_id: 'account-1',
         description: 'first',
       },
       {
-        access_token: 'token-2',
+        type: 'token',
+      access_token: 'token-2',
         account_id: 'account-2',
         description: 'second',
       },
@@ -548,227 +483,6 @@ test('deleteConfigItems rejects duplicate indexes without mutating input', () =>
     deleteConfigItems(parsed, [1, 1]);
   }, /配置项索引重复/);
   assert.deepEqual(parsed.configs.map(item => item.description), ['first', 'second']);
-});
-
-test('disableConfigItem moves an enabled config into disabled_configs', () => {
-  const disabledStatus = '可用=否 | 额度=99% | 刷新时间=2026/7/9 00:52:23 | 周额度=unknown | 刷新时间=unknown | 状态=额度检查失败 | 错误=OpenAI token refresh failed: [object Object]';
-  const next = disableConfigItem(createTokenConfig(), 0, {
-    disabledStatus,
-  });
-
-  assert.deepEqual(next.configs, []);
-  assert.deepEqual(next.disabled_configs, [
-    {
-      access_token: 'token-1',
-      account_id: 'account-1',
-      description: 'primary',
-      disabled_status: disabledStatus,
-    },
-  ]);
-});
-
-test('disableConfigItem appends to an existing disabled config list', () => {
-  const next = disableConfigItem(createTokenConfig({
-    disabled_configs: [
-      {
-        access_token: 'disabled-token',
-        account_id: 'disabled-account',
-        description: 'disabled',
-      },
-    ],
-  }), 0);
-
-  assert.deepEqual(next.configs, []);
-  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled', 'primary']);
-});
-
-test('disableConfigItems moves multiple enabled configs and preserves original order', () => {
-  const next = disableConfigItems(createTokenConfig({
-    configs: [
-      {
-        access_token: 'token-1',
-        account_id: 'account-1',
-        description: 'first',
-      },
-      {
-        access_token: 'token-2',
-        account_id: 'account-2',
-        description: 'second',
-      },
-      {
-        access_token: 'token-3',
-        account_id: 'account-3',
-        description: 'third',
-      },
-    ],
-    disabled_configs: [
-      {
-        access_token: 'disabled-token',
-        account_id: 'disabled-account',
-        description: 'disabled',
-      },
-    ],
-  }), [2, 0], {
-    disabledStatuses: {
-      0: '可用=否 | 状态=失败',
-      2: '可用=是 | 额度=83%',
-    },
-  });
-
-  assert.deepEqual(next.configs.map(item => item.description), ['second']);
-  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled', 'first', 'third']);
-  assert.equal(next.disabled_configs[1].disabled_status, '可用=否 | 状态=失败');
-  assert.equal(next.disabled_configs[2].disabled_status, '可用=是 | 额度=83%');
-});
-
-test('enableConfigItem moves a disabled config back to enabled configs', () => {
-  const next = enableConfigItem(createTokenConfig({
-    configs: [],
-    disabled_configs: [
-      {
-        type: 'apikey',
-        apikey: 'sk-disabled',
-        base_url: 'https://api.example.com/v1',
-        description: 'disabled key',
-        disabled_status: '可用=否 | 状态=已停用',
-      },
-    ],
-  }), 0);
-
-  assert.deepEqual(next.disabled_configs, []);
-  assert.deepEqual(next.configs, [
-    {
-      type: 'apikey',
-      apikey: 'sk-disabled',
-      base_url: 'https://api.example.com/v1',
-      description: 'disabled key',
-    },
-  ]);
-});
-
-test('enableConfigItems moves multiple disabled configs back and clears disabled status', () => {
-  const next = enableConfigItems(createTokenConfig({
-    configs: [
-      {
-        access_token: 'token-1',
-        account_id: 'account-1',
-        description: 'enabled',
-      },
-    ],
-    disabled_configs: [
-      {
-        access_token: 'disabled-token-1',
-        account_id: 'disabled-account-1',
-        description: 'disabled first',
-        disabled_status: '可用=否',
-      },
-      {
-        type: 'apikey',
-        apikey: 'sk-disabled',
-        base_url: 'https://api.example.com/v1',
-        description: 'disabled key',
-        disabled_status: '服务不可见',
-      },
-      {
-        access_token: 'disabled-token-3',
-        account_id: 'disabled-account-3',
-        description: 'disabled third',
-        disabled_status: '可用=否',
-      },
-    ],
-  }), [2, 0]);
-
-  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled key']);
-  assert.deepEqual(next.configs.map(item => item.description), ['enabled', 'disabled first', 'disabled third']);
-  assert.equal(next.configs[1].disabled_status, undefined);
-  assert.equal(next.configs[2].disabled_status, undefined);
-});
-
-test('deleteDisabledConfigItem permanently removes a disabled config only', () => {
-  const next = deleteDisabledConfigItem(createTokenConfig({
-    disabled_configs: [
-      {
-        access_token: 'disabled-token',
-        account_id: 'disabled-account',
-        description: 'disabled',
-      },
-    ],
-  }), 0);
-
-  assert.deepEqual(next.configs.map(item => item.description), ['primary']);
-  assert.deepEqual(next.disabled_configs, []);
-});
-
-test('deleteDisabledConfigItems removes multiple disabled configs by original index order', () => {
-  const next = deleteDisabledConfigItems(createTokenConfig({
-    disabled_configs: [
-      {
-        access_token: 'disabled-token-1',
-        account_id: 'disabled-account-1',
-        description: 'disabled first',
-      },
-      {
-        access_token: 'disabled-token-2',
-        account_id: 'disabled-account-2',
-        description: 'disabled second',
-      },
-      {
-        access_token: 'disabled-token-3',
-        account_id: 'disabled-account-3',
-        description: 'disabled third',
-      },
-    ],
-  }), [0, 2]);
-
-  assert.deepEqual(next.configs.map(item => item.description), ['primary']);
-  assert.deepEqual(next.disabled_configs.map(item => item.description), ['disabled second']);
-});
-
-test('moveConfigItem moves a config earlier while preserving top-level settings', () => {
-  const parsed = createTokenConfig({
-    configs: [
-      {
-        access_token: 'token-1',
-        account_id: 'account-1',
-        description: 'first',
-      },
-      {
-        type: 'apikey',
-        apikey: 'sk-backup',
-        base_url: 'https://api.example.com/v1',
-        description: 'second',
-      },
-    ],
-  });
-
-  const next = moveConfigItem(parsed, 1, 0);
-
-  assert.equal(next.port, 3009);
-  assert.equal(next.proxy_port, 7890);
-  assert.deepEqual(next.configs.map(item => item.description), ['second', 'first']);
-  assert.equal(parsed.configs[0].description, 'first');
-});
-
-test('moveConfigItem reorders without validating config contents', () => {
-  const parsed = createApiKeyConfig({
-    configs: [
-      {
-        access_token: 'token-1',
-        account_id: 'account-1',
-        description: 'primary',
-      },
-      {
-        type: 'apikey',
-        apikey: '',
-        base_url: '',
-        description: 'historical draft',
-      },
-    ],
-  });
-
-  const next = moveConfigItem(parsed, 1, 0);
-
-  assert.deepEqual(next.configs.map(item => item.description), ['historical draft', 'primary']);
 });
 
 test('updateConfigSettings normalizes top-level apikeys and auth_token', () => {
@@ -820,44 +534,11 @@ test('updateConfigSettings rejects invalid port settings', () => {
   });
 });
 
-test('updateConfigSettings normalizes responses.model_aliases and preserves other settings', () => {
-  const next = updateConfigSettings(createTokenConfig(), {
-    responses: {
-      model_aliases: {
-        '  GPT-5.2  ': '  gpt-5.5  ',
-        'o3-mini': ' gpt-5.4 ',
-      },
-    },
-  });
-
-  assert.deepEqual(next.responses, {
-    model_aliases: {
-      'GPT-5.2': 'gpt-5.5',
-      'o3-mini': 'gpt-5.4',
-    },
-  });
-  assert.equal(next.claude_code.model, 'gpt-5.4');
-  assert.equal(next.configs.length, 1);
-});
-
-test('updateConfigSettings rejects non-object responses.model_aliases', () => {
-  assert.throws(() => {
-    updateConfigSettings(createTokenConfig(), {
-      responses: {
-        model_aliases: 'gpt-5.2=gpt-5.5',
-      },
-    });
-  }, err => {
-    assert.equal(err instanceof ConfigEditorError, true);
-    assert.match(err.message, /responses\.model_aliases 必须是对象/);
-    return true;
-  });
-});
-
 test('writeParsedConfigFile persists a validated config file', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
-  const configPath = path.join(tempDir, 'openai.json');
+  const configPath = path.join(tempDir, 'config.json');
   const parsed = addConfigItem(createTokenConfig(), {
+    type: 'token',
     access_token: 'token-2',
     account_id: 'account-2',
     description: 'secondary',
@@ -870,50 +551,9 @@ test('writeParsedConfigFile persists a validated config file', () => {
   assert.equal(loaded.configs[1].description, 'secondary');
 });
 
-test('readParsedConfigFile can skip full validation', () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
-  const configPath = path.join(tempDir, 'openai.json');
-  fs.writeFileSync(configPath, `${JSON.stringify(createApiKeyConfig({
-    configs: [
-      {
-        type: 'apikey',
-        apikey: '',
-        base_url: '',
-        description: 'historical draft',
-      },
-    ],
-  }), null, 2)}\n`, 'utf8');
-
-  const loaded = readParsedConfigFile(configPath, { validate: false });
-
-  assert.equal(loaded.configs.length, 1);
-  assert.equal(loaded.configs[0].description, 'historical draft');
-});
-
-test('writeParsedConfigFile can persist without full validation', () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
-  const configPath = path.join(tempDir, 'openai.json');
-
-  writeParsedConfigFile(configPath, createApiKeyConfig({
-    configs: [
-      {
-        type: 'apikey',
-        apikey: '',
-        base_url: '',
-        description: 'historical draft',
-      },
-    ],
-  }), { validate: false });
-
-  const loaded = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-
-  assert.equal(loaded.configs.length, 1);
-  assert.equal(loaded.configs[0].description, 'historical draft');
-});
-
 test('writeParsedConfigFile rejects invalid apikey entries', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airouter-config-editor-'));
-  const configPath = path.join(tempDir, 'openai.json');
+  const configPath = path.join(tempDir, 'config.json');
 
   assert.throws(() => {
     writeParsedConfigFile(configPath, createApiKeyConfig({
@@ -931,4 +571,21 @@ test('writeParsedConfigFile rejects invalid apikey entries', () => {
     assert.match(err.message, /apikey 配置至少需要 apikey 和 base_url/);
     return true;
   });
+});
+
+
+test('account enabled state stays in configs and never creates a disabled archive', () => {
+  const parsed = createTokenConfig();
+  parsed.configs[0].id = 'cfg-token';
+  const { updateConfigItemById } = require('../app/config-editor');
+  const next = updateConfigItemById(parsed, 'cfg-token', { enabled: false });
+  assert.equal(next.configs[0].enabled, false);
+  assert.equal(next.configs[0].access_token, 'token-1');
+  assert.equal(Object.hasOwn(next, 'disabled_configs'), false);
+});
+
+test('settings rejects removed compatibility fields', () => {
+  for (const field of ['responses', 'claude_code', 'disabled_configs', 'type']) {
+    assert.throws(() => updateConfigSettings(createTokenConfig(), { [field]: {} }), /不支持/);
+  }
 });

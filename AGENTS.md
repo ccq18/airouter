@@ -1,125 +1,57 @@
 # AGENTS.md
 
-本文件适用于整个仓库。
+本文件适用于 Airouter 仓库，描述当前项目入口与验收约束。
 
-## 项目概览
+## 1. 当前结构
 
-Airouter 是一个本地 OpenAI/Claude 兼容 API 转发工具。主进程是 Node.js/Express 服务，提供：
+- `openai.js`：HTTP 入口、鉴权、配置持久化与运行态连接。
+- `run.js`：交互式初始化、后台启停和日志查看。默认配置为 `config.json`，模板为 `config.json.example`；不读取或迁移旧文件。
+- `app/openai-config.js`、`app/config-editor.js`、`app/routing-config.js`：账号和路由配置契约、校验与编辑。
+- `app/provider-presets.js`、`app/quota-engine.js`：供应商地址、目录和额度解析、快照与刷新。
+- `app/model-router.js`、`app/explicit-routing-handler.js`、`app/protocol-bridge.js`：有序候选、一次请求的执行清理、协议桥接。
+- `public/config-admin.html`、`public/config-admin.js`、`public/config-admin-routing.js`：两个页签的列表、编辑、设置与导入交互。
+- `scripts/claude-auth-login.js`：Claude OAuth 登录与配置写入；写入后需重启运行服务。
+- `desktop/`：Tauri 壳、资源准备和桌面发布；`test/`：Node 内置测试；`docs/`：当前配置、接口与统一设计。
 
-- `/v1/*` OpenAI 兼容代理，token 配置会改写到 ChatGPT Codex backend-api。
-- `/v1/responses` 默认值、模型别名和 token 账号 failover。
-- `/v1/messages` Claude Messages 兼容入口，优先原样转发到 `support: ["claude"]` 的 apikey 上游，否则转换到 responses 链路。
-- `/admin/configs` 网页管理台和 `/admin/api/*` 配置管理接口。
-- `desktop/` 下的 Tauri 桌面壳，打包时把 Node 服务和前端资源放进应用资源目录。
-
-## 重要路径
-
-- `openai.js`：HTTP 服务入口、代理转发、管理接口、运行态调度。
-- `run.js`：命令行启动器，负责配置引导、后台启动、停止、重启和日志查看。
-- `app/`：可测试的业务模块。新增逻辑优先放这里，再由 `openai.js` 串接。
-- `app/provider-presets.js`、`quota-engine.js`、`model-router.js`、`protocol-bridge.js`、`explicit-routing-handler.js`：统一上游、额度、显式路由、协议桥接和对话入口。
-- `public/config-admin.html`、`public/config-admin.js`、`public/config-admin-routing.js`：管理台页面与统一路由 UI。
-- `test/*.test.js`：Node 内置测试。
-- `desktop/`：Tauri 桌面应用、资源准备脚本和 Rust 外壳。
-- `docs/`：配置、运行逻辑和特性设计说明。
-
-## 常用命令
+## 2. 运行与验证
 
 ```bash
-npm test
+npm install
 npm start
 npm run stop
 npm run restart
 npm run logs
+npm test
 ```
 
-桌面端命令在 `desktop/` 目录内运行：
+共享逻辑、HTTP、配置或管理交互发生变化时运行 `npm test`。针对性检查使用 `node --test test/<名称>.test.js`；启动器重点检查 `test/run.test.js`，桌面入口重点检查 `test/desktop-boot.test.js`，路由行为重点检查 `test/unified-routing.integration.test.js`。
 
-```bash
-npm install
-npm run dev
-npm run build
-npm run build:macos
-npm run build:windows
-```
+HTTP 集成测试使用临时配置和随机端口的假上游，不访问真实供应商。真实网络、账号额度和协议调用应另行记录结果。桌面构建会写入 `desktop/dist`、资源目录和 Rust `target`；先确认构建环境，不能把静态测试当作桌面编译成功。
 
-## 测试要求
+## 3. 实现约束
 
-- 修改共享业务模块、代理行为、配置解析或管理接口时，运行 `npm test`。
-- 可用 Node 的内置测试过滤单个文件，例如 `node --test test/responses-failover.test.js`。
-- 涉及统一路由时，至少运行 `test/routing-config.test.js`、`test/model-router.test.js`、`test/protocol-bridge.test.js`、`test/quota-engine.test.js` 和 `test/unified-routing.integration.test.js`；集成测试会启动真实本地服务与假上游 HTTP 服务，使用临时配置和随机端口，不访问真实供应商。
-- 涉及 `run.js` 启停行为时，重点跑 `test/run.test.js`。
-- 涉及管理台 HTML/JS 时，重点跑 `test/config-admin.test.js` 和相关 API 测试。
-- 涉及桌面壳或资源准备时，至少跑 `test/desktop-boot.test.js`；能本地构建时再跑对应 `desktop` 构建命令。
+只支持统一模型路由。`routing.models[].targets` 顺序决定优先级，不存在 `routing.mode`、Token 优先、API Key 兜底焦点或全局模型别名。账号采用稳定 ID；新增候选和重新排序不得造成 ID 冲突。
 
-## 版本与发布
+账号模型清单与客户端公开模型分离。同步目录只产生预览，用户保存才写入配置；被引用的模型和协议不能直接删除。只有自定义平台需要模型列表地址。
 
-- 本仓库的默认发布分支是 `main`。口头所说的 `master` 在本仓库按 `main` 理解；推送 `main` 本身不会自动打包。
-- `.github/workflows/release.yml` 由 `v*` Git Tag 触发，负责从 Tag 同步桌面版本、构建 macOS arm64、macOS x64 和 Windows x64 安装包，并发布 GitHub Release。
-- 准备新版本前先拉取 `origin/main` 和远端 Tags，确认工作区干净、待发布提交已推送、`main` 与 `origin/main` 一致，并按变更范围完成本文件要求的测试。
-- 将 `origin/main` 与最新版本 Tag 比较：只有 Tag 之后存在新提交时才创建新版本；若最新 Tag 已指向 `origin/main`，不要为同一提交重复打 Tag。
-- Tag 使用语义化版本 `vMAJOR.MINOR.PATCH`。没有明确的大版本或兼容功能版本要求时，默认递增补丁版本，例如 `v0.5.6` 后发布 `v0.5.7`。
-- Tag 必须指向待发布的 `origin/main` 精确提交。优先创建带发布说明的 annotated Tag，推送前再次核对提交和版本；禁止移动、覆盖或复用已经推送的版本 Tag。
-- 发布签名更新包时，GitHub 仓库必须已配置 `TAURI_SIGNING_PRIVATE_KEY`；如私钥有密码，同时配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。不要在代码、日志或文档中写入密钥内容。
-- 推送 Tag 后必须检查 GitHub Actions 和对应 GitHub Release；确认三个平台构建成功，且 Release 资产与 `desktop/README.md` 的清单一致后，才能声称发布完成。失败时保留失败证据，修复并验证后使用新的版本 Tag，不能改写已经发布的 Tag。
+额度查询失败、无权限或字段缺失不能伪造为零；已知耗尽需要正面恢复证据。短期限频、认证错误与额度分开处理。未输出前可按错误分类尝试后备，已输出的流不能切换上游拼接答案。异常和客户端取消必须释放探测锁并中止活动请求。
 
-## 代码风格
+私有响应上下文不能跨调用者、账号、模型或协议迁移。更换账号身份时失效额度、健康和上下文；迟到请求不能污染新身份。不能保真的协议能力必须明确拒绝或跳过候选。
 
-- 根项目使用 CommonJS：`require(...)` 和 `module.exports`。
-- `desktop/` 前端和脚本使用 ESM；不要把根项目风格机械搬到 `desktop/`。
-- 保持现有缩进和文件风格：多数根项目业务模块使用 2 空格或 4 空格混合的既有格式，局部修改时跟随所在文件。
-- 优先写小的纯函数到 `app/` 并导出测试，避免把新业务逻辑直接堆进 `openai.js`。
-- 错误信息、管理台文案和日志当前主要是中文；新增用户可见文案请保持中文。
-- 不要引入新的框架或构建链，除非需求明确且收益足够大。
+当前业务入口只有模型目录及三种对话协议，完整清单见 [API 参考](docs/api-reference.md)。未注册的旧 API、图片生成和 CPA 通配入口不是当前能力，不恢复兼容路径。
 
-## 配置与安全
+## 4. 配置和安全
 
-- 不要提交或粘贴真实 `openai.json`、`openai.log`、`openai.pid`、`openai.control.json`、`openai.control.request.json`。
-- 不要把真实 `access_token`、`refresh_token`、`apikey`、`auth_token`、账号 ID 或完整 AuthSession JSON 写入测试、文档或示例。
-- 示例配置请使用 `openai.json.example` 或明显的假值，如 `sk-example`、`token-1`、`account-1`。
-- 管理接口必须继续受 `auth_token` 保护；普通代理入口必须继续遵守 `apikeys` 配置。
-- 本项目面向本地服务，改动监听地址、鉴权、跨域或外部打开行为时要格外保守。
+真实 `config.json`、退役的本地配置、日志、PID、控制文件、入口密钥和上游凭证不进入 Git。不要清理用户已有配置和生成物；测试使用临时目录。示例只使用明显假值。
 
-## 代理行为约束
+管理接口受 `auth_token` 保护，业务接口遵守 `apikeys`。日志和认证失败响应不得泄露管理凭证；账号读取只返回凭证是否存在，不回显上游秘密。公网部署使用 HTTPS、受保护的持久配置和回环监听，避免访问日志记录查询参数中的管理凭证。
 
-- 未启用 `routing.mode: "explicit"` 时保留旧模式：token 配置项默认优先于 apikey 配置项；只有 token 不可用时才落到 apikey。
-- 启用显式路由后，对话入口的优先级只由 `routing.models[].targets` 顺序决定；不得把 Token 优先、API Key 覆盖、会话哈希或全局别名混入显式路由。
-- 显式路由按候选顺序严格选择；额度耗尽才使用下一项，额度恢复后下一次无状态请求自动优先使用高优先级候选。
-- 额度读取失败、缺少字段或无权限时保持 `unknown`，不得当成 `exhausted` 或余额 0；已确认耗尽后读取失败不得自动恢复。
-- 账号鉴权健康/冷却与额度状态分离；下游流式响应已经提交后不得切换上游拼接答案。
-- `apikey.support` 只支持 `gpt` 和 `claude`；默认是 `["gpt"]`，该旧字段只影响 legacy 模式。
-- `/v1/messages` 只注册在 `/v1/messages`，不要新增旧式 `/claude/v1/messages` 兼容路径，除非需求明确。
-- `/v1/responses` 的 legacy 自动切号只针对 token-backed responses 请求；显式路由使用统一候选与有界重试。
-- `previous_response_id` 只能续接到原 Responses 候选；跨账号/跨协议或归属丢失时返回 `upstream_context_unavailable`，不得猜测落点。
-- Hop-by-hop headers 和本地鉴权头不要转发给上游；相关边界已有测试覆盖。
-- 对流式响应和压缩响应的处理要优先保持现有 failover/透传语义，避免提前消费客户端需要的流。
-- 跨协议路由只做已实现且可验证的文本、图片、工具调用/结果和 SSE 转换；结构化输出、内置服务端工具、thinking/加密 reasoning、文件和音频不得静默丢弃，必须明确拒绝或跳过该候选。
+根项目使用 CommonJS；`desktop/` 前端与脚本使用 ESM。保持既有风格，新逻辑优先进入可测试模块，不引入无关框架。用户可见配置或行为变化应同步当前文档，不并行维护第二套有效规范。
 
-## 配置文件语义
+## 5. Git 与桌面发布
 
-- 顶层 `type` 已废弃；配置类型写在 `configs[]` 的每一项里。
-- 未写 `type` 的配置项视为 token。
-- `configs[].id` 是稳定本地账号 ID。新账号会自动写入；不得用数组下标引用显式路由中的账号。
-- `configs[].preset` 只用于内置平台默认地址、模型发现和额度解释，不决定调度优先级；内置平台为 `chatgpt`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`claude`，其他为 `custom`。
-- `configs[].models[]` 是账号允许使用的后端模型清单，每项包含 `id`、`protocols`，可选 `capabilities`、`context_window`、`max_output_tokens`。模型清单不会自动公开给客户端。
-- 只有自定义上游需要填写 `models_endpoint`；内置平台的模型列表地址、鉴权和解析规则内置。
-- `routing.mode` 缺省或为 `legacy` 时保留旧调度；`routing.mode: "explicit"` 时启用统一显式路由。
-- `routing.models[].id` 是客户端模型 ID，精确且区分大小写；`targets[]` 的顺序就是优先级，每项必须同时指定 `config_id`、`model` 和 `protocol`。
-- `routing.max_attempts` 是单次请求包含首次在内的最大上游尝试次数，实际不会超过候选数量。
-- 不提供额度模板页签或额度查询凭证选择；额度由内置平台规则读取，未知和读取失败不会变成 0 或耗尽。
-- `responses.model_aliases` 的键和值必须是非空字符串，匹配时忽略大小写；显式路由不使用该全局别名。
-- `claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 legacy token 兼容转换链路。
-- `port` 和 `proxy_port` 必须保持 1-65535 的端口校验。
+默认分支为 `main`；口头所说的 `master` 按 `main` 理解。推送 `main` 不触发桌面打包；`.github/workflows/release.yml` 由 `v*` Tag 触发。
 
-## 文档习惯
+准备桌面版本前先获取 `origin/main` 和 Tags，完成相关验证，确认待发布提交已推送且 `main` 与 `origin/main` 一致。若最新 Tag 已指向同一提交，不为它重复发版；未指定版本范围时递增补丁版本。Tag 必须指向精确待发布提交，优先 annotated Tag；不移动、覆盖或复用已推送 Tag。
 
-- 改动用户可见行为时，同步更新 `README.md` 或 `docs/` 中对应说明。
-- 复杂代理边界、failover 语义或配置兼容性变化，应优先补充到 `docs/`，避免只靠测试名表达。
-- 已有 `docs/superpowers/specs/` 和 `docs/superpowers/plans/` 是历史设计/计划资料；新增普通项目文档优先放在 `docs/` 根层。
-
-## 开发注意事项
-
-- 仓库可能存在本地运行生成物或用户自己的配置文件；不要清理或重写未被要求的本地文件。
-- 不要运行会覆盖真实本地服务配置的命令。需要测试配置读写时，使用临时目录或测试 fixture。
-- 启动服务会使用默认端口 `3009`；如果本机已有服务运行，先确认再操作。
-- 如果需要新增依赖，先确认它是否真的必要，并同步更新 `package-lock.json`。
+签名发布需要 `TAURI_SIGNING_PRIVATE_KEY`，有密码时还需 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，均不得写入代码或日志。推送 Tag 后检查 Actions、macOS arm64/x64 与 Windows x64 产物及 Release 资产；失败时修复后使用新 Tag，不能仅以 Tag 推送成功宣称发布完成。资产清单见 [desktop/README.md](desktop/README.md)。
