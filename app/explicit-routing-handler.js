@@ -22,12 +22,17 @@ const {
   };
 })();
 const { normalizeResponsesRequestBody } = require('./responses-defaults');
+const { nativeChatToSse, createNativeChatAccumulator } = require('./native-chat-bridge');
 
 const RETRYABLE_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 429]);
 const MAX_UPSTREAM_ERROR_BODY_BYTES = 512 * 1024;
 
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function conversionFailureMessage(error, lease) {
+  return `${error.message}${lease.policyReason ? `; 上游拒绝: ${lease.policyReason}` : ''}`;
 }
 
 function buildStableSessionId(sessionKey) {
@@ -440,22 +445,29 @@ function bindResponseContext(contextStore, entryProtocol, responseId, lease, pub
   });
 }
 
-function nativeResponsesToSse(payload, publicModel) {
+function nativeResponsesToSse(payload, publicModel, streamOptions = {}) {
+  if (streamOptions.include_obfuscation === true) throw new UnsupportedProtocolFeatureError('stream_options.include_obfuscation: 网关 JSON→SSE 重建未实现随机填充；请保持原生 SSE 或省略该要求');
   const response = transformResponseForEntry({ entryProtocol: 'responses', targetProtocol: 'responses', payload, publicModel });
   if (!['completed', 'incomplete', 'failed'].includes(response.status)) throw new UnsupportedProtocolFeatureError('原生 JSON 响应尚未到可表示的终态，不能伪造已完成的流');
-  const events = [{ event: 'response.created', data: { type: 'response.created', response: { ...response, status: 'in_progress', output: [], usage: null } } }];
+  const events = [{ event: 'response.created', data: { type: 'response.created', response: { ...response, status: 'in_progress', output: [], usage: null, ...(Object.hasOwn(response, 'incomplete_details') ? { incomplete_details: null } : {}), ...(Object.hasOwn(response, 'error') ? { error: null } : {}) } } }];
   for (const [output_index, item] of (response.output || []).entries()) {
+    if (!['message', 'function_call'].includes(item.type)) throw new UnsupportedProtocolFeatureError(`output[${output_index}].type: ${item.type} 的原生流式生命周期尚未实现；请保持原生 JSON 或 SSE 透传`);
     const initial = { ...item, ...(item.status ? { status: 'in_progress' } : {}), ...(item.type === 'message' ? { content: [] } : {}), ...(item.type === 'function_call' ? { arguments: '' } : {}) };
     events.push({ event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index, item: initial } });
     if (item.type === 'message') {
       for (const [content_index, part] of (item.content || []).entries()) {
+        if (!['output_text', 'refusal'].includes(part.type)) throw new UnsupportedProtocolFeatureError(`output[${output_index}].content[${content_index}].type: ${part.type} 的流式生命周期尚未实现`);
         const common = { item_id: item.id, output_index, content_index };
-        events.push({ event: 'response.content_part.added', data: { type: 'response.content_part.added', ...common, part: { ...part, ...(part.type === 'output_text' ? { text: '' } : {}), ...(part.type === 'refusal' ? { refusal: '' } : {}) } } });
+        events.push({ event: 'response.content_part.added', data: { type: 'response.content_part.added', ...common, part: { ...part, ...(part.type === 'output_text' ? { text: '', annotations: [], ...(Object.hasOwn(part, 'logprobs') ? { logprobs: [] } : {}) } : {}), ...(part.type === 'refusal' ? { refusal: '' } : {}) } } });
         if (part.type === 'output_text' || part.type === 'refusal') {
           const name = part.type === 'refusal' ? 'refusal' : 'output_text';
           const text = part.type === 'refusal' ? part.refusal : part.text;
-          events.push({ event: `response.${name}.delta`, data: { type: `response.${name}.delta`, ...common, delta: text } });
-          events.push({ event: `response.${name}.done`, data: { type: `response.${name}.done`, ...common, ...(part.type === 'refusal' ? { refusal: text } : { text }) } });
+          const logprobs = part.type === 'output_text' && Object.hasOwn(part, 'logprobs') ? { logprobs: part.logprobs } : {};
+          events.push({ event: `response.${name}.delta`, data: { type: `response.${name}.delta`, ...common, delta: text, ...logprobs } });
+          if (part.type === 'output_text') for (const [annotation_index, annotation] of (part.annotations || []).entries()) {
+            events.push({ event: 'response.output_text.annotation.added', data: { type: 'response.output_text.annotation.added', ...common, annotation_index, annotation } });
+          }
+          events.push({ event: `response.${name}.done`, data: { type: `response.${name}.done`, ...common, ...(part.type === 'refusal' ? { refusal: text } : { text, ...logprobs }) } });
         }
         events.push({ event: 'response.content_part.done', data: { type: 'response.content_part.done', ...common, part } });
       }
@@ -468,7 +480,7 @@ function nativeResponsesToSse(payload, publicModel) {
   }
   const type = `response.${response.status}`;
   events.push({ event: type, data: { type, response } });
-  return events;
+  return events.map((event, sequence_number) => ({ ...event, data: { ...event.data, sequence_number } }));
 }
 
 function minRetryAfterFromSkipped(skipped, now = Date.now()) {
@@ -984,7 +996,7 @@ function createExplicitRoutingHandler(options = {}) {
             : null;
           const bridge = rewriter
             ? null
-            : createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel });
+            : createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, includeUsage: entryProtocol === 'chat_completions' ? body.stream_options?.include_usage === true : undefined });
           let pendingEntries = [];
           let downstreamResponseId = '';
           let sawTerminal = false;
@@ -1199,10 +1211,10 @@ function createExplicitRoutingHandler(options = {}) {
                 releaseLease();
                 if (res.headersSent) {
                   if (!res.writableEnded) {
-                    writeSse(res, { event: 'error', data: { type: 'error', error: { code: 'upstream_response_not_representable', message: lease.policyReason || conversionError.message } } });
+                    writeSse(res, { event: 'error', data: { type: 'error', error: { code: 'upstream_response_not_representable', message: conversionFailureMessage(conversionError, lease) } } });
                     res.end();
                   }
-                } else sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || conversionError.message);
+                } else sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', conversionFailureMessage(conversionError, lease));
                 finishAttempt({ error: conversionError });
                 upstream.abort(conversionError);
               }
@@ -1326,10 +1338,10 @@ function createExplicitRoutingHandler(options = {}) {
             payload: parsedPayload,
             publicModel,
           });
-          if (!(entryProtocol === targetProtocol && ['responses', 'messages'].includes(entryProtocol))) canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
+          if (entryProtocol !== targetProtocol) canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
         } catch (err) {
           if (err instanceof UnsupportedProtocolFeatureError || lease.policyObserved) {
-            sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || err.message); return;
+            sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', conversionFailureMessage(err, lease)); return;
           }
           markNotCommittedFailure(lease, { statusCode: 502, message: err.message, reason: 'response_transform_failed' });
           releaseLease();
@@ -1339,8 +1351,9 @@ function createExplicitRoutingHandler(options = {}) {
         }
 
         const entries = entryProtocol === 'responses' && targetProtocol === 'responses'
-          ? nativeResponsesToSse(entryPayload, publicModel) : entryProtocol === 'messages' && targetProtocol === 'messages'
-            ? nativeMessagesToSse(entryPayload, publicModel) : responseToEntrySse(entryProtocol, canonical, publicModel);
+          ? nativeResponsesToSse(entryPayload, publicModel, body.stream_options) : entryProtocol === 'messages' && targetProtocol === 'messages'
+            ? nativeMessagesToSse(entryPayload, publicModel) : entryProtocol === 'chat_completions' && targetProtocol === 'chat_completions'
+              ? nativeChatToSse(entryPayload, publicModel, { includeUsage: body.stream_options?.include_usage === true, includeObfuscation: body.stream_options?.include_obfuscation === true }) : responseToEntrySse(entryProtocol, canonical, publicModel, { includeUsage: entryProtocol === 'chat_completions' ? body.stream_options?.include_usage === true : undefined });
         applyStreamHeaders(res);
         committed = true;
         for (const entry of entries) {
@@ -1363,11 +1376,13 @@ function createExplicitRoutingHandler(options = {}) {
         let sawDone = false;
         const nativeResponses = entryProtocol === 'responses' && targetProtocol === 'responses';
         const nativeMessages = entryProtocol === 'messages' && targetProtocol === 'messages' ? createNativeMessagesAccumulator(publicModel) : null;
+        const nativeChat = entryProtocol === 'chat_completions' && targetProtocol === 'chat_completions' ? createNativeChatAccumulator(publicModel) : null;
         let nativeFinalResponse = null;
         const acceptPayload = parsed => {
           observeUpstreamState(lease, parsed.data);
           if (nativeResponses && ['response.completed', 'response.incomplete'].includes(parsed.data.type || parsed.event) && parsed.data.response) nativeFinalResponse = parsed.data.response;
-          if (nativeMessages) nativeMessages.accept(parsed.event, parsed.data);
+          if (nativeChat) nativeChat.accept(parsed.data);
+          else if (nativeMessages) nativeMessages.accept(parsed.event, parsed.data);
           else if (!nativeResponses) bridge.accept(parsed.event, parsed.data);
         };
 
@@ -1513,7 +1528,7 @@ function createExplicitRoutingHandler(options = {}) {
           return;
         }
 
-        if (nativeResponses ? !nativeFinalResponse : nativeMessages ? !nativeMessages.isComplete() : (!sawDone && !bridge.isComplete())) {
+        if (nativeResponses ? !nativeFinalResponse : nativeMessages ? !nativeMessages.isComplete() : nativeChat ? !nativeChat.isComplete() : (!sawDone && !bridge.isComplete())) {
           if (lease.policyObserved) {
             router.markFailure(lease, { statusCode: 400, errorCode: 'refusal', message: lease.policyReason || '上游已拒绝' });
             sendProtocolError(res, entryProtocol, 502, 'upstream_refusal_incomplete', lease.policyReason || '上游已拒绝请求，但未返回完整终态'); return;
@@ -1532,7 +1547,7 @@ function createExplicitRoutingHandler(options = {}) {
 
         const payload = nativeResponses
           ? transformResponseForEntry({ entryProtocol, targetProtocol, payload: nativeFinalResponse, publicModel })
-          : nativeMessages ? nativeMessages.build() : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel); })();
+          : nativeMessages ? nativeMessages.build() : nativeChat ? nativeChat.build() : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel); })();
         res.status(200).json(payload);
         router.markSuccess(lease);
         bindResponseContext(getContextStore(), entryProtocol, payload.id, lease, publicModel, requestAuthHash);
@@ -1619,7 +1634,7 @@ function createExplicitRoutingHandler(options = {}) {
         });
       } catch (err) {
         if (err instanceof UnsupportedProtocolFeatureError || lease.policyObserved) {
-          sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || err.message); return;
+          sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', conversionFailureMessage(err, lease)); return;
         }
         markNotCommittedFailure(lease, {
           statusCode: 502,
@@ -1647,7 +1662,7 @@ function createExplicitRoutingHandler(options = {}) {
         }
         if (clientClosed) return;
         if (attemptError instanceof UnsupportedProtocolFeatureError && !committed && !res.headersSent) {
-          sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', lease.policyReason || attemptError.message); return;
+          sendProtocolError(res, entryProtocol, 502, 'upstream_response_not_representable', conversionFailureMessage(attemptError, lease)); return;
         }
         if (lease.policyObserved && !committed && !res.headersSent) {
           sendProtocolError(res, entryProtocol, 502, 'upstream_refusal_incomplete', lease.policyReason || '上游已拒绝请求，但响应在完整结束前中断'); return;

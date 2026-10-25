@@ -11,6 +11,8 @@
 
 const { StringDecoder } = require('node:string_decoder');
 const { randomUUID } = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
+const { mapCrossProtocolControls } = require('./protocol-request-controls');
 const SUPPORTED_PROTOCOLS = ['chat_completions', 'responses', 'messages'];
 
 class UnsupportedProtocolFeatureError extends Error {
@@ -1096,7 +1098,9 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
     return;
   }
 
-  if (hasStructuredOutput(body)) {
+  const controls = mapCrossProtocolControls({ entryProtocol, targetProtocol, body,
+    fail: message => new UnsupportedProtocolFeatureError(message) });
+  if (hasStructuredOutput(body) && (entryProtocol === 'messages' || targetProtocol === 'messages')) {
     throw new UnsupportedProtocolFeatureError('跨协议路由不支持结构化输出，请改用同协议候选');
   }
   if (hasBuiltinTools(body)) {
@@ -1114,7 +1118,7 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
     if (crossesMessages && Object.prototype.hasOwnProperty.call(value, 'prompt_cache_breakpoint')) throw new UnsupportedProtocolFeatureError('Messages 无法保留 OpenAI prompt_cache_breakpoint 缓存边界');
     for (const [name, nested] of Object.entries(value)) {
       // Application metadata and tool schemas/arguments are user data, not API controls.
-      if (['metadata', 'parameters', 'input_schema'].includes(name) || (value.type === 'tool_use' && name === 'input')) continue;
+      if (['metadata', 'parameters', 'input_schema', 'schema'].includes(name) || (value.type === 'tool_use' && name === 'input')) continue;
       checkCache(nested);
     }
   }
@@ -1133,6 +1137,7 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
     if (targetProtocol === 'responses' && values.length) throw new UnsupportedProtocolFeatureError('Responses 无法等价表达 stop / stop_sequences 停止条件');
     if (targetProtocol === 'chat_completions' && values.length > 4) throw new UnsupportedProtocolFeatureError('Chat 最多支持四个停止序列');
   }
+  return controls;
 }
 
 function transformRequestForTarget({ entryProtocol, targetProtocol, body, targetModel, stream }) {
@@ -1153,7 +1158,7 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
     return result;
   }
 
-  assertCrossProtocolSupported(entryProtocol, targetProtocol, body);
+  const controls = assertCrossProtocolSupported(entryProtocol, targetProtocol, body);
   const canonical = parseEntryRequest(entryProtocol, body);
   validateToolRounds(canonical);
   const result = targetProtocol === 'chat_completions'
@@ -1161,13 +1166,22 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
     : targetProtocol === 'messages'
       ? serializeMessagesRequest(canonical, targetModel, stream)
       : serializeResponsesRequest(canonical, targetModel, stream);
-  return result;
+  if (entryProtocol === 'responses' && targetProtocol === 'chat_completions' && Object.prototype.hasOwnProperty.call(controls, 'max_completion_tokens')) delete result.max_tokens;
+  return Object.assign(result, controls);
 }
 
 // Opaque reasoning/signature state cannot be moved into another protocol.
 // Native JSON and native SSE bypass canonical conversion and retain it verbatim.
 function assertResponseContentSupported(protocol, payload) {
-  if (protocol === 'messages') {
+  if (protocol === 'chat_completions') {
+    for (const [index, choice] of (payload?.choices || []).entries()) {
+      const kind = choice.message ? 'message' : 'delta';
+      const message = choice[kind] || {};
+      for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']) {
+        if (message[field] !== undefined && message[field] !== null && message[field] !== '') throw new UnsupportedProtocolFeatureError(`choices[${index}].${kind}.${field}: 私有或未实现的 Chat 输出没有无损跨协议映射，请使用同协议候选`);
+      }
+    }
+  } else if (protocol === 'messages') {
     for (const block of payload?.content || []) {
       if (block && !['text', 'tool_use'].includes(block.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Messages 内容块 ${block.type}（thinking/signature 等私有状态不能跨协议迁移）`);
     }
@@ -1182,6 +1196,8 @@ function assertResponseContentSupported(protocol, payload) {
 }
 
 function parseChatResponse(payload) {
+  assertResponseContentSupported('chat_completions', payload);
+  if (Array.isArray(payload?.choices) && payload.choices.length > 1) throw new UnsupportedProtocolFeatureError('choices: 多个 Chat 候选无法无损转换为单次跨协议响应');
   const choice = payload && Array.isArray(payload.choices) ? payload.choices[0] : null;
   if (!choice) {
     throw new UnsupportedProtocolFeatureError('上游 chat.completions 响应缺少 choices');
@@ -1190,7 +1206,7 @@ function parseChatResponse(payload) {
   const message = choice.message || {};
   const text = contentToText(message.content);
   if (text) {
-    parts.push({ type: 'text', text });
+    parts.push({ type: 'text', text, ...(Array.isArray(choice.logprobs?.content) ? { logprobs: cloneJson(choice.logprobs.content) } : {}) });
   }
   if (typeof message.refusal === 'string' && message.refusal) parts.push({ type: 'refusal', text: message.refusal });
   for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
@@ -1207,6 +1223,8 @@ function parseChatResponse(payload) {
     model: payload.model || '',
     createdAt: Number.isFinite(payload.created) ? payload.created : Math.floor(Date.now() / 1000),
     parts,
+    ...(Object.prototype.hasOwnProperty.call(payload, 'service_tier') ? { serviceTier: cloneJson(payload.service_tier) } : {}),
+    ...(Object.prototype.hasOwnProperty.call(choice, 'logprobs') ? { logprobs: cloneJson(choice.logprobs) } : {}),
     stopReason: choice.finish_reason === 'content_filter' ? 'content_filter' : message.refusal ? 'refusal' : mapChatStopToCanonical(choice.finish_reason),
     usage: usageFromChat(payload.usage),
   };
@@ -1244,16 +1262,21 @@ function parseResponsesResponse(payload) {
   if (['queued', 'in_progress'].includes(payload?.status)) throw new UnsupportedProtocolFeatureError(`上游 Responses 响应尚未完成: ${payload.status}`);
   if (payload?.status === 'incomplete' && !['max_output_tokens', 'content_filter'].includes(payload.incomplete_details?.reason)) throw new UnsupportedProtocolFeatureError(`无法准确映射 Responses incomplete 原因: ${payload.incomplete_details?.reason || 'unknown'}`);
   const parts = [];
+  let logprobs;
   for (const item of Array.isArray(payload && payload.output) ? payload.output : []) {
     if (!item || typeof item !== 'object') {
       continue;
     }
     if (item.type === 'message') {
-      const text = contentToText(item.content);
-      if (text) {
-        parts.push({ type: 'text', text });
-      }
       for (const block of Array.isArray(item.content) ? item.content : []) {
+        if (block?.type === 'output_text') {
+          if (block.text) parts.push({ type: 'text', text: block.text, ...(Array.isArray(block.logprobs) ? { logprobs: cloneJson(block.logprobs) } : {}) });
+          if (Object.prototype.hasOwnProperty.call(block, 'logprobs')) {
+            if (!Array.isArray(block.logprobs)) throw new UnsupportedProtocolFeatureError('output[].content[].logprobs 必须为数组');
+            if (!logprobs) logprobs = { content: [], refusal: null };
+            logprobs.content.push(...cloneJson(block.logprobs));
+          }
+        }
         if (block?.type === 'refusal') parts.push({ type: 'refusal', text: block.refusal || '' });
       }
     } else if (item.type === 'function_call') {
@@ -1280,6 +1303,8 @@ function parseResponsesResponse(payload) {
     createdAt: Number.isFinite(payload.created_at) ? payload.created_at : Math.floor(Date.now() / 1000),
     parts,
     stopReason,
+    ...(Object.prototype.hasOwnProperty.call(payload, 'service_tier') ? { serviceTier: cloneJson(payload.service_tier) } : {}),
+    ...(logprobs ? { logprobs } : {}),
     usage: usageFromResponses(payload.usage),
   };
 }
@@ -1334,9 +1359,11 @@ function serializeChatResponse(entryProtocol, canonical, publicModel) {
     object: 'chat.completion',
     created: canonical.createdAt || Math.floor(Date.now() / 1000),
     model: publicModel,
+    ...(Object.prototype.hasOwnProperty.call(canonical, 'serviceTier') ? { service_tier: cloneJson(canonical.serviceTier) } : {}),
     choices: [{
       index: 0,
       message,
+      ...(Object.prototype.hasOwnProperty.call(canonical, 'logprobs') ? { logprobs: cloneJson(canonical.logprobs) } : {}),
       finish_reason: mapCanonicalStopToChat(canonical.stopReason),
     }],
     ...(canonical.usage ? { usage: serializeUsage(canonical.usage, 'chat_completions') } : {}),
@@ -1344,6 +1371,7 @@ function serializeChatResponse(entryProtocol, canonical, publicModel) {
 }
 
 function serializeMessagesResponse(entryProtocol, canonical, publicModel) {
+  if (canonical.logprobs?.content?.length || canonical.logprobs?.refusal?.length) throw new UnsupportedProtocolFeatureError('logprobs: Messages 无等价的 token 概率字段');
   const content = canonical.parts.map(part => {
     if (part.type === 'text' || part.type === 'refusal') {
       return { type: 'text', text: part.text };
@@ -1363,6 +1391,7 @@ function serializeMessagesResponse(entryProtocol, canonical, publicModel) {
 }
 
 function serializeResponsesResponse(entryProtocol, canonical, publicModel) {
+  if (canonical.logprobs?.refusal?.length) throw new UnsupportedProtocolFeatureError('logprobs.refusal: Responses refusal 没有等价概率字段，不能静默丢弃');
   if (!['end_turn', 'stop_sequence', 'max_tokens', 'tool_use', 'refusal', 'content_filter', undefined, null].includes(canonical.stopReason)) throw new UnsupportedProtocolFeatureError(`无法保真转换为 Responses 终态: ${canonical.stopReason}`);
   const output = [];
   const text = canonical.parts.filter(part => part.type === 'text').map(part => part.text).join('');
@@ -1373,7 +1402,7 @@ function serializeResponsesResponse(entryProtocol, canonical, publicModel) {
       type: 'message',
       status: 'completed',
       role: 'assistant',
-      content: [...(text ? [{ type: 'output_text', text, annotations: [] }] : []), ...(refusal ? [{ type: 'refusal', refusal }] : [])],
+      content: [...(text ? [{ type: 'output_text', text, annotations: [], ...(Array.isArray(canonical.logprobs?.content) ? { logprobs: cloneJson(canonical.logprobs.content) } : {}) }] : []), ...(refusal ? [{ type: 'refusal', refusal }] : [])],
     });
   }
   for (const part of canonical.parts.filter(item => item.type === 'tool_use')) {
@@ -1395,6 +1424,7 @@ function serializeResponsesResponse(entryProtocol, canonical, publicModel) {
       ? { incomplete_details: { reason: canonical.stopReason === 'content_filter' ? 'content_filter' : 'max_output_tokens' } }
       : {}),
     model: publicModel,
+    ...(Object.prototype.hasOwnProperty.call(canonical, 'serviceTier') ? { service_tier: cloneJson(canonical.serviceTier) } : {}),
     output,
     output_text: text,
     ...(canonical.usage ? { usage: serializeUsage(canonical.usage, 'responses') } : {}),
@@ -1622,12 +1652,21 @@ function canonicalEventStart(accumulator, payload, fallbackModel = '') {
     id: accumulator.id,
     model: accumulator.model,
     createdAt: accumulator.createdAt,
+    ...(Object.prototype.hasOwnProperty.call(payload, 'service_tier') ? { serviceTier: cloneJson(payload.service_tier) } : {}),
   }];
 }
 
 function accumulateCanonicalEvent(accumulator, event) {
   if (!event) {
     return;
+  }
+  if (Object.prototype.hasOwnProperty.call(event, 'serviceTier')) accumulator.serviceTier = cloneJson(event.serviceTier);
+  if (Object.prototype.hasOwnProperty.call(event, 'logprobs')) {
+    if (!Array.isArray(event.logprobs)) throw new UnsupportedProtocolFeatureError('logprobs: 流 token 概率必须为数组');
+    if (!accumulator.logprobs) accumulator.logprobs = { content: null, refusal: null };
+    const key = event.type === 'refusal_delta' ? 'refusal' : 'content';
+    if (!Array.isArray(accumulator.logprobs[key])) accumulator.logprobs[key] = [];
+    accumulator.logprobs[key].push(...cloneJson(event.logprobs));
   }
   if (event.type === 'start') {
     accumulator.id = event.id || accumulator.id;
@@ -1709,6 +1748,8 @@ function createCanonicalAccumulator(publicModel, sourceProtocol) {
         createdAt: accumulator.createdAt,
         parts,
         stopReason,
+        ...(Object.prototype.hasOwnProperty.call(accumulator, 'serviceTier') ? { serviceTier: cloneJson(accumulator.serviceTier) } : {}),
+        ...(accumulator.logprobs ? { logprobs: cloneJson(accumulator.logprobs) } : {}),
         ...(Object.prototype.hasOwnProperty.call(accumulator, 'stopSequence') ? { stopSequence: accumulator.stopSequence } : {}),
         usage: accumulator.usage,
         ...(accumulator.error ? { error: accumulator.error } : {}),
@@ -1731,6 +1772,26 @@ function createTargetEventParser(targetProtocol, publicModel) {
   let nextToolIndex = 0;
   let sawFinish = false;
   let pendingChatFinish = null;
+  let chatChoiceIndex;
+  const responseLogprobs = new Map();
+  function responseProbabilityEvents(events, payload, snapshot = false) {
+    if (!Object.prototype.hasOwnProperty.call(payload, 'logprobs')) return;
+    if (!Array.isArray(payload.logprobs)) throw new UnsupportedProtocolFeatureError('logprobs: Responses 流 token 概率必须为数组');
+    const key = `${payload.output_index ?? 0}:${payload.content_index ?? 0}`;
+    const hadPrevious = responseLogprobs.has(key);
+    const previous = responseLogprobs.get(key) || [];
+    let delta = payload.logprobs;
+    if (snapshot) {
+      if (!isDeepStrictEqual(payload.logprobs.slice(0, previous.length), previous)) throw new UnsupportedProtocolFeatureError('logprobs: Responses 终态与已输出概率不一致');
+      delta = payload.logprobs.slice(previous.length);
+    }
+    responseLogprobs.set(key, [...previous, ...cloneJson(delta)]);
+    if (delta.length || !hadPrevious) {
+      const textEvent = events.findLast(event => event.type === 'text_delta' && !Object.prototype.hasOwnProperty.call(event, 'logprobs'));
+      if (textEvent) textEvent.logprobs = cloneJson(delta);
+      else events.push({ type: 'text_delta', text: '', logprobs: cloneJson(delta) });
+    }
+  }
 
   function emit(events) {
     for (const event of events) {
@@ -1764,17 +1825,23 @@ function createTargetEventParser(targetProtocol, publicModel) {
 
     if (targetProtocol === 'chat_completions') {
       const events = [];
+      assertResponseContentSupported('chat_completions', payload);
+      if (payload.choices?.length > 1) throw new UnsupportedProtocolFeatureError('choices: 多个 Chat 候选无法无损转换为单次跨协议响应');
+      if (Object.prototype.hasOwnProperty.call(payload, 'service_tier')) events.push({ type: 'metadata', serviceTier: cloneJson(payload.service_tier) });
       if (!accumulator.accumulator.id) {
         events.push(...canonicalEventStart(accumulator.accumulator, payload));
       }
       const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
       if (choice) {
+        const sourceIndex = choice.index ?? 0;
+        if (chatChoiceIndex !== undefined && chatChoiceIndex !== sourceIndex) throw new UnsupportedProtocolFeatureError('choices: 多个 Chat choice.index 不能合并为单次跨协议响应');
+        chatChoiceIndex = sourceIndex;
         const delta = choice.delta || choice.message || {};
         const text = contentToText(delta.content);
-        if (text) {
-          events.push({ type: 'text_delta', text });
+        if (text || Array.isArray(choice.logprobs?.content)) {
+          events.push({ type: 'text_delta', text, ...(Array.isArray(choice.logprobs?.content) ? { logprobs: cloneJson(choice.logprobs.content) } : {}) });
         }
-        if (typeof delta.refusal === 'string' && delta.refusal) events.push({ type: 'refusal_delta', text: delta.refusal });
+        if (typeof delta.refusal === 'string' && delta.refusal || Array.isArray(choice.logprobs?.refusal) && choice.logprobs.refusal.length) events.push({ type: 'refusal_delta', text: delta.refusal || '', ...(Array.isArray(choice.logprobs?.refusal) ? { logprobs: cloneJson(choice.logprobs.refusal) } : {}) });
         for (const [callIndex, call] of (Array.isArray(delta.tool_calls) ? delta.tool_calls : []).entries()) {
           const index = resolveToolIndex(call.index ?? callIndex);
           if (call.id || call.function?.name) {
@@ -1822,6 +1889,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
     if (targetProtocol === 'responses') {
       const events = [];
       const type = payload.type || eventName;
+      if (payload.response && Object.prototype.hasOwnProperty.call(payload.response, 'service_tier')) events.push({ type: 'metadata', serviceTier: cloneJson(payload.response.service_tier) });
       if (payload.response) assertResponseContentSupported('responses', payload.response);
       if (payload.item) assertResponseContentSupported('responses', { output: [payload.item] });
       if (/^response\.reasoning/.test(type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses reasoning 事件 ${type}`);
@@ -1842,12 +1910,16 @@ function createTargetEventParser(targetProtocol, publicModel) {
         }
       } else if (type === 'response.output_text.delta') {
         events.push({ type: 'text_delta', text: payload.delta || '' });
+        responseProbabilityEvents(events, payload);
       } else if (type === 'response.refusal.delta') {
         events.push({ type: 'refusal_delta', text: payload.delta || '' });
       } else if (type === 'response.refusal.done' && !accumulator.accumulator.refusal && payload.refusal) {
         events.push({ type: 'refusal_delta', text: payload.refusal });
       } else if (type === 'response.output_text.done' && !accumulator.accumulator.text && payload.text) {
         events.push({ type: 'text_delta', text: payload.text });
+        responseProbabilityEvents(events, payload, true);
+      } else if (type === 'response.output_text.done') {
+        responseProbabilityEvents(events, payload, true);
       } else if (type === 'response.function_call_arguments.delta') {
         events.push({
           type: 'tool_args_delta',
@@ -1865,6 +1937,9 @@ function createTargetEventParser(targetProtocol, publicModel) {
         }
       } else if (type === 'response.completed' || type === 'response.incomplete') {
         const response = payload.response || {};
+        for (const [output_index, item] of (response.output || []).entries()) for (const [content_index, block] of (item.content || []).entries()) {
+          if (block.type === 'output_text') responseProbabilityEvents(events, { ...block, output_index, content_index }, true);
+        }
         if (!accumulator.accumulator.id) events.push(...canonicalEventStart(accumulator.accumulator, response));
         if (!accumulator.accumulator.text) {
           const responseText = typeof response.output_text === 'string' && response.output_text
@@ -2015,7 +2090,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
   };
 }
 
-function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) {
+function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, options = {}) {
   const state = {
     started: false,
     finished: false,
@@ -2038,6 +2113,23 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
     usage: null,
     stopReason: 'end_turn',
   };
+
+  function decorate(entries, canonicalEvent = {}) {
+    for (const entry of entries) {
+      if (entryProtocol === 'chat_completions' && entry.data?.choices) {
+        if (Object.prototype.hasOwnProperty.call(state, 'serviceTier')) entry.data.service_tier = cloneJson(state.serviceTier);
+        if (options.includeUsage === true && entry.data.choices.length) entry.data.usage = null;
+        else if (options.includeUsage === false) delete entry.data.usage;
+        if (canonicalEvent.type === 'text_delta' && Object.prototype.hasOwnProperty.call(canonicalEvent, 'logprobs')) {
+          for (const choice of entry.data.choices) if (choice.delta && Object.prototype.hasOwnProperty.call(choice.delta, 'content')) choice.logprobs = { content: cloneJson(canonicalEvent.logprobs), refusal: null };
+        }
+      } else if (entryProtocol === 'responses') {
+        if (entry.data?.response && Object.prototype.hasOwnProperty.call(state, 'serviceTier')) entry.data.response.service_tier = cloneJson(state.serviceTier);
+        if (entry.event === 'response.output_text.delta' && Object.prototype.hasOwnProperty.call(canonicalEvent, 'logprobs')) entry.data.logprobs = cloneJson(canonicalEvent.logprobs);
+      }
+    }
+    return entries;
+  }
 
   function ensureStarted(canonicalEvent = {}) {
     const events = [];
@@ -2400,6 +2492,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
           usage: serializeUsage(state.usage, 'chat_completions'),
         },
       });
+      if (options.includeUsage === true) events.push({ event: null, data: { id: state.responseId, object: 'chat.completion.chunk', created: state.createdAt, model: publicModel, choices: [], usage: serializeUsage(state.usage, 'chat_completions') || null } });
       events.push({ event: null, raw: '[DONE]' });
       return events;
     }
@@ -2435,6 +2528,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
           output_index: state.textOutputIndex,
           content_index: 0,
           text,
+          ...(Array.isArray(state.logprobs?.content) ? { logprobs: cloneJson(state.logprobs.content) } : {}),
         },
       });
       events.push({
@@ -2444,7 +2538,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
           item_id: state.textItemId,
           output_index: state.textOutputIndex,
           content_index: 0,
-          part: { type: 'output_text', text, annotations: [] },
+          part: { type: 'output_text', text, annotations: [], ...(Array.isArray(state.logprobs?.content) ? { logprobs: cloneJson(state.logprobs.content) } : {}) },
         },
       });
       events.push({
@@ -2457,7 +2551,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
             type: 'message',
             status: 'completed',
             role: 'assistant',
-            content: [{ type: 'output_text', text, annotations: [] }],
+            content: [{ type: 'output_text', text, annotations: [], ...(Array.isArray(state.logprobs?.content) ? { logprobs: cloneJson(state.logprobs.content) } : {}) }],
           },
         },
       });
@@ -2470,7 +2564,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
         type: 'message',
         status: 'completed',
         role: 'assistant',
-        content: [{ type: 'output_text', text, annotations: [] }],
+        content: [{ type: 'output_text', text, annotations: [], ...(Array.isArray(state.logprobs?.content) ? { logprobs: cloneJson(state.logprobs.content) } : {}) }],
       });
     }
     for (const index of state.toolOrder) {
@@ -2521,24 +2615,34 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
       if (!event || state.finished) {
         return [];
       }
+      if (Object.prototype.hasOwnProperty.call(event, 'serviceTier')) state.serviceTier = cloneJson(event.serviceTier);
+      if (Object.prototype.hasOwnProperty.call(event, 'logprobs')) {
+        if (!Array.isArray(event.logprobs)) throw new UnsupportedProtocolFeatureError('logprobs: 流 token 概率必须为数组');
+        if (entryProtocol === 'messages' && event.logprobs.length) throw new UnsupportedProtocolFeatureError('logprobs: Messages 无等价的 token 概率字段');
+        if (entryProtocol === 'responses' && event.type === 'refusal_delta' && event.logprobs.length) throw new UnsupportedProtocolFeatureError('logprobs.refusal: Responses refusal 没有等价概率字段');
+        if (!state.logprobs) state.logprobs = { content: null, refusal: null };
+        const key = event.type === 'refusal_delta' ? 'refusal' : 'content';
+        if (!Array.isArray(state.logprobs[key])) state.logprobs[key] = [];
+        state.logprobs[key].push(...cloneJson(event.logprobs));
+      }
       if (event.type === 'start') {
-        return ensureStarted(event);
+        return decorate(ensureStarted(event), event);
       }
       if (event.type === 'text_delta') {
-        return handleText(event.text || '');
+        return decorate(handleText(event.text || ''), event);
       }
-      if (event.type === 'refusal_delta') return handleRefusal(event.text || '');
+      if (event.type === 'refusal_delta') return decorate(handleRefusal(event.text || ''), event);
       if (event.type === 'tool_start') {
-        return handleToolStart(event);
+        return decorate(handleToolStart(event), event);
       }
       if (event.type === 'tool_args_delta') {
-        return handleToolArgs(event);
+        return decorate(handleToolArgs(event), event);
       }
       if (event.type === 'tool_end') {
-        return handleToolEnd(event);
+        return decorate(handleToolEnd(event), event);
       }
       if (event.type === 'finish') {
-        return handleFinish(event);
+        return decorate(handleFinish(event), event);
       }
       if (event.type === 'error') {
         state.finished = true;
@@ -2554,9 +2658,9 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol) 
   };
 }
 
-function createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel }) {
+function createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, includeUsage }) {
   const targetParser = createTargetEventParser(targetProtocol, publicModel);
-  const entrySerializer = createEntryEventSerializer(entryProtocol, publicModel, targetProtocol);
+  const entrySerializer = createEntryEventSerializer(entryProtocol, publicModel, targetProtocol, { includeUsage });
   let finished = false;
 
   return {
@@ -2601,20 +2705,22 @@ const CANONICAL_RESPONSE_EVENTS = [
   { type: 'finish' },
 ];
 
-function responseToEntrySse(entryProtocol, canonicalResponse, publicModel) {
-  const serializer = createEntryEventSerializer(entryProtocol, publicModel, canonicalResponse.sourceProtocol);
+function responseToEntrySse(entryProtocol, canonicalResponse, publicModel, options = {}) {
+  if (entryProtocol === 'responses' && canonicalResponse.logprobs?.refusal?.length) throw new UnsupportedProtocolFeatureError('logprobs.refusal: Responses refusal 没有等价概率字段');
+  const serializer = createEntryEventSerializer(entryProtocol, publicModel, canonicalResponse.sourceProtocol, options);
   const events = [];
   events.push(...serializer.handle({
     type: 'start',
     id: canonicalResponse.id,
     model: publicModel,
     createdAt: canonicalResponse.createdAt,
+    ...(Object.prototype.hasOwnProperty.call(canonicalResponse, 'serviceTier') ? { serviceTier: cloneJson(canonicalResponse.serviceTier) } : {}),
   }));
 
   let toolIndex = 0;
   for (const part of canonicalResponse.parts || []) {
     if (part.type === 'text') {
-      events.push(...serializer.handle({ type: 'text_delta', text: part.text }));
+      events.push(...serializer.handle({ type: 'text_delta', text: part.text, ...(Object.prototype.hasOwnProperty.call(part, 'logprobs') ? { logprobs: cloneJson(part.logprobs) } : {}) }));
     } else if (part.type === 'refusal') {
       events.push(...serializer.handle({ type: 'refusal_delta', text: part.text }));
     } else if (part.type === 'tool_use') {

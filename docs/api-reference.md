@@ -24,7 +24,7 @@
 
 没有 `/v1/*` 通配代理，也没有图片生成/编辑或 CPA 入口；未注册路径返回 404。
 
-同协议缓存字段与响应明细原样保留；跨协议只映射已确认等价字段，不支持的控制明确拒绝。未知用量不填零，不可等价的统计细分附于 `usage.airouter_upstream_usage`。完整转换、停止、拒绝与真实验证边界见[三协议修复记录](protocol-compatibility-verification.md)。
+同协议缓存字段与响应明细原样保留；跨协议只映射已确认等价字段，不支持的控制明确拒绝。未知用量不填零，不可等价的统计细分附于 `usage.airouter_upstream_usage`。完整转换、停止、拒绝与真实验证边界见[三协议修复记录](protocol-compatibility-verification.md)。Chat↔Responses 公共字段、输出格式、logprobs、流选项与原生格式互转的当前规则见该记录第 7 节；含私有 reasoning 的上游输出仍需要同协议，不能将普通文本调用成功理解为所有跨协议模型可用。
 
 ## 3. 账号与目录管理
 

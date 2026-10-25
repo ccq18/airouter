@@ -141,6 +141,23 @@ test('capability matching skips text-only pool for images and enforces concrete 
   assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).body.model, 'vendor/fast');
 });
 
+test('Responses fields use the same pool capability and preflight rules as ordinary routes', async () => {
+  quota = 100; await admin('upstreams/paid/quota-refresh', {});
+  const send = controls => fetch(base + '/v1/responses', { method: 'POST', headers: { authorization: `Bearer ${ENTRY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'any-client-id', stream: false, input: [{ role: 'user', content: 'hello' }], ...controls }) });
+  let before = calls.length;
+  let response = await send({ text: { format: { type: 'text' }, verbosity: 'low' }, service_tier: 'default', safety_identifier: 'pool-caller', max_output_tokens: 128 });
+  assert.equal(response.status, 200); await response.json();
+  assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).body.model, 'beam', 'plain text does not require structured-output capability');
+  assert.deepEqual(calls.at(-1).body.response_format, { type: 'text' }); assert.equal(calls.at(-1).body.verbosity, 'low'); assert.equal(calls.at(-1).body.max_completion_tokens, 128);
+  assert.equal(calls.at(-1).body.safety_identifier, 'pool-caller');
+  before = calls.length; response = await send({ text: { format: { type: 'json_object' } } });
+  assert.equal(response.status, 200); await response.json(); assert.equal(calls.length, before + 1);
+  assert.equal(calls.at(-1).body.model, 'vendor/fast', 'structured output skips a known text-only member');
+  assert.deepEqual(calls.at(-1).body.response_format, { type: 'json_object' });
+  before = calls.length; response = await send({ include: ['future.output'] });
+  const rejected = await response.json(); assert.equal(response.status, 400); assert.match(JSON.stringify(rejected), /include\[0\]/); assert.equal(calls.length, before, 'no pool attempt for an unrepresentable control');
+});
+
 test('pool failures exhaust only inner candidates and then use next pool with diagnostic actual model trace', async () => {
   phase = 'all-fail';
   const result = await admin('model-routes/test', { model: 'any-client-id', input: 'test the pool', mode: 'route' });

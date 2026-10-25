@@ -123,3 +123,66 @@
 Node 22.19.0：`npm run test:protocol` 为 **247/247**，完整 `npm test` 为 **499/499**，均为零失败、零跳过；相关新代码收敛后执行，完整日志分别在 `/tmp/airouter-gate-protocol-final.log`、`/tmp/airouter-gate-full-final.log`。`git diff --check` 通过。完整测试已包含专项用例，CI 仅跑完整测试，避免在同一次 CI 重复执行。
 
 本次新增的先失败用例在对应修复后全部通过；已正确工作的分片、角色、缓存、状态与免费池能力只补覆盖，不虚构修复前失败。提交与部署使用通过门禁的同一源码；部署验收核对运行版本、服务健康、三种入口和免费池，并比较持久 `config.json` 部署前后 SHA256，保留账号、路由、凭证与用户文件。
+
+## 7. 28329ef 之后的原生格式互转与控制字段修复
+
+### 7.1 依据、范围与实测结论
+
+本轮从当前 `28329ef` 开始，没有回退提交、恢复旧配置模式或改动 auto 语义。先沿 HTTP 入口、路由预检、转换器、真实本地上游补回归，再根据失败修复。旁支直接函数探针只作为线索：reasoning 和 structured output 原先被路由提前拦截，不能将其描述成实际 HTTP 静默丢失。seed、penalty、n、消息 name、未知控制等则实际返回 200 且上游请求字段已消失，已记录先失败证据。
+
+官方依据为实际获取的 [Chat create](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[Responses create](https://developers.openai.com/api/reference/resources/responses/methods/create)、[Responses 流事件](https://developers.openai.com/api/reference/resources/responses/streaming-events)及[缓存](https://developers.openai.com/api/docs/guides/prompt-caching)。官方支持字段不等于每个兼容站/模型都支持；不删除参数掩盖供应商拒绝。
+
+### 7.2 最终处理规则
+
+`app/protocol-request-controls.js` 集中处理跨协议控制；`protocol-bridge.js/transformRequestForTarget` 同时被路由发送前预检和真正转发调用。只扫描协议控制对象，不把 metadata、Schema、工具 parameters/input/arguments 中的同名用户数据当控制。普通同协议请求继续原样保留字段。
+
+| 类别 | 当前规则 |
+| --- | --- |
+| 同名公共字段 | Chat↔Responses 保留 service_tier、safety_identifier、user、metadata；返回使用上游实际 service_tier，不用请求值填充 |
+| verbosity / format | verbosity↔text.verbosity；text/json_object 格式直接映射；json_schema 包装/展开配置层，完整保留 name、description、strict 和原 Schema。缺 Schema 不编造，未知格式控制明确拒绝 |
+| logprobs | Chat logprobs:true↔Responses include 中 message.output_text.logprobs；top_logprobs 保留并检查 0..20 及启用条件。token/bytes/logprob/top_logprobs 经 JSON/SSE、聚合/合成保留；delta 与 done/final 快照语义去重，对象键序变化不算冲突，真正值变化明确失败 |
+| 拒绝概率 | 非空 Chat logprobs.refusal 没有已核实 Responses refusal 等价字段，明确报错，保留原拒绝原因且不换上游 |
+| stream_options | 逐子项处理。Chat include_usage 在网关入口消费，true 时在 DONE 前发 choices:[] 用量块，其余块 usage:null；未报告统计发 null，不编造零。false/省略不强发 usage。include_obfuscation:false 可等价处理；显式 true 的跨协议/JSON→SSE 重建尚未实现随机混淆保证，明确拒绝；原生 SSE 透传保持上游事件 |
+| 缓存 | 公共 key/retention/options.mode/ttl/breakpoint 原值映射，retention 与 ttl 不互换、不自动延长；预热/比较私有响应等独有项明确拒绝；读写计数维持原基数，缺失不补零，原生完整 usage 保留 |
+| 输出上限 | max_completion_tokens↔max_output_tokens；Responses→Chat 发 max_completion_tokens，Responses→Messages 发 max_tokens。Chat 旧 max_tokens 单独给出时保留既有输出上限映射，不由此开放 reasoning；同时提供两个 Chat max 字段时明确拒绝，官方没有可据以发明的优先级 |
+| reasoning | effort 参数相似不等于完整输出/私有状态可迁移，当前 reasoning_effort、reasoning、thinking 仍需同协议。已知 Chat reasoning_content/reasoning/audio/旧 function_call 输出也不能静默丢掉，跨协议明确拒绝；原生保留 |
+| 无等价控制 | n>1 不拆多次付费请求；seed、penalty、logit_bias、消息 name、音频/预测、内置工具等未实现控制拒绝/跳过候选。n:1 识别为一次生成。后台 true、自动裁剪 auto 拒绝；background:false/truncation:disabled 作为同步、不裁剪的明确等价默认处理，不自行改历史 |
+| 未知字段 | 未认识的跨协议根控制及 text/format/include/stream_options/tool/image 等控制子项明确报出路径。未知同协议字段继续交上游，不因新检查删字段 |
+
+原生 Chat 新增 `app/native-chat-bridge.js`：JSON↔SSE 按 choice.index 和各自 tool.index 隔离，保留内容、拒绝、参数、logprobs、完整 usage、service_tier、system_fingerprint 与稳定扩展。相同工具身份重复不拼接；身份冲突或无法无损合并的变化扩展明确拒绝。原生 JSON→JSON、SSE→SSE 继续透传。不同 choice 的分片跨 Responses 不会合成一条回答。
+
+原生 Responses JSON→SSE 除最终 payload 外，补全连续 sequence_number、annotation.added、text delta/done 的 logprobs。仅对已经实现完整生命周期的 message/text/refusal 和 function_call 合成；reasoning、内置工具等其他 output 类型不能凭 final 存在就伪造流式生命周期，格式互转明确失败。它们的原生 JSON/SSE 直接透传仍保留。
+
+### 7.3 HTTP 先失败证据与覆盖
+
+所有新增回归沿用 Node 测试和现有受控 HTTP 上游。断言实际请求体、字段路径、完整语义、响应头、顺序、次数和后续原生健康；不是只判断 200、非空文本或往返相等。
+
+| 确认问题/补充 | 修复前实际 HTTP 证据 | 修复后对应测试 |
+| --- | --- | --- |
+| 原生 Chat 多 choices/扩展丢失 | `/tmp/airouter-native-chat-http-red.log`：5 项中原始两路径 2 项原本通过，互转和扩展冲突 3 项失败 | native Chat 四路径，多 choice 的相同 tool.index、交错片段、拒绝、logprobs、完整 usage/扩展；无法无损扩展明确失败 |
+| 原生 Responses 流事件不完整 | `/tmp/airouter-native-response-events-red.log`：2 项失败 | sequence、annotation.added、text delta/done 概率与 final 独立断言；未知生命周期拒绝 |
+| 请求控制缺失/笼统阻断 | `/tmp/airouter-followup-fields-red.log`：24 项中原生未知字段保留 2 项原本通过，其余 22 项失败；其中 format 为原路由阻断而非静默丢失 | 两向三种 format/verbosity/身份/cache/max/logprobs组合；20 类控制逐路径拒绝、零上游尝试，后续健康不受影响；字段不兼容时保留优先级并走原生后备 |
+| 未知嵌套工具/图片控制 | `/tmp/airouter-followup-nested-fields-red.log`、`/tmp/airouter-followup-image-fields-red.log`：各 2 项先失败 | tools/function、tool_choice.function、image_url/source 子项严格处理，metadata/工具 Schema 中同名用户数据保持 |
+| 跨协议响应明细丢失 | `/tmp/airouter-followup-cross-detail-red.log`：9 项先失败；`/tmp/airouter-followup-cross-choices-red.log`：不同 choice 分帧被混入一条成功 | Chat↔Responses JSON/SSE 四路径，完整 token 字节与 top 概率、真实 tier、拒绝概率限制、多 choices 拒绝及一次调用 |
+| 概率快照对象键序误报 | `/tmp/airouter-followup-probability-order-red.log`：键序两项失败、真实冲突两项原本正确拒绝 | semantic deep comparison，包括 nested top_logprobs；真正冲突不放宽 |
+| 私有/未实现 Chat 输出被丢弃 | `/tmp/airouter-followup-chat-output-red.log`：8 项失败，原生保留但跨协议 200 字段消失 | JSON/SSE 四类字段、两个跨协议目标，明确 502、一次调用、随后原生健康 |
+| 工具身份重复/冲突 | `/tmp/airouter-native-chat-identity-red.log`：3 项先失败 | id/name 同值去重、异值拒绝；只有 arguments 累计，choice/tool 两层索引不串线 |
+| 免费池 text 默认误判 | `/tmp/airouter-followup-pool-fields-red.log`：实际误选低优先级池 | type:text 不需要 structuredOutput；json_object 跳过明确不支持的成员；相同预检阻止未知控制的付费/免费调用 |
+| 预算/未知 usage | `/tmp/airouter-followup-budget-target-red.log`：新增规则一度向 Messages 泄漏 Chat 上限字段；`/tmp/airouter-followup-unknown-usage-red.log`：2 项遗漏未知用量尾块 | 目标仅收到自身预算字段；两种源格式都发一次 usage:null 尾块，不伪造计数 |
+
+用户专门新增的 `test/protocol-boundary-contract.integration.test.js` 保持内容和断言不变，单独运行 **31/31** 通过，现纳入 `npm run test:protocol`；覆盖原生四路径完整对象、两向格式/用户数据、发送前拒绝、原生后备、Responses 概率及 sequence 事件。旧的 json_object“必须拒绝”用例按本轮明确开放需求改为精确映射断言，保留不支持文件的拒绝断言。
+
+最终本地门禁：协议专项 **347/347**，完整 `npm test` **599/599**，零失败、零跳过；日志 `/tmp/airouter-followup-protocol-final.log`、`/tmp/airouter-followup-full-final.log`。三协议原有回归、取消、拒绝不重试、状态归属、免费池耗尽接替及恢复切回包含在本轮验证内。
+
+### 7.4 真实供应商结果与仍未满足的边界
+
+在受保护临时配置中使用现有账号验证，没有写线上 config.json：
+
+- 原生 Go DeepSeek Chat JSON 返回 200，中文/emoji 完整。
+- 同账号/模型、相同缓存前缀重复请求的标准 prompt_tokens 都为 4368，首次 cached_tokens=4096、重复=4352；重复 total_tokens=4433（含 output=65），4352 已在 4368 内，不再相加。Go 自有明细普通输入=16、缓存读取=4352，与标准总输入相符。这是本轮真实缓存 usage，不以回答成功替代命中。
+- Go DeepSeek 的普通输出实际带非空 reasoning_content（探测样本长度 42），因此当前指向该 Chat 后端的 Responses/Messages JSON/SSE 入口会遇到明确 502 `upstream_response_not_representable`，路径为 choices[0].message.reasoning_content。不是三个入口均已实供通过，也不会删除此字段或换上游规避限制。
+- Go 原生 gpt-6-luna Responses 实际返回 200，但 output 含加密 reasoning 与 message。转 Chat 明确拒绝该私有 output。原生透传可用，不能据此声称跨协议 reasoning 已支持。
+- 带新 format/标识或 logprobs 参数的真实跨协议请求本次同样止于上述私有输出边界，未获得可作为格式遵循或概率支持验收的成功响应。等价字段及六向规则由受控 HTTP 测试证明，尚未取得所有真实供应商/模型的成功矩阵。
+- 服务端存储/续接沿用第 6.3 节未验证边界；本轮没有改造 Conversations、后台任务管理、持久本地会话，也没有放宽账号身份、路由代际、TTL/重启/迟到响应保护。
+
+脱敏真实结果保留于 `/tmp/airouter-protocol-followup-live/supplier-results.json` 与 `boundary-results.json`。部署仍必须保持持久配置校验值；线上应分别记录原生成功和明确受限路径，不能把可控测试通过当作供应商全部兼容。

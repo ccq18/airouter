@@ -21,6 +21,33 @@ const usage = {
 };
 let server, child, dir, base, childLog = '', serial = 0;
 const calls = [];
+// Explicit field contracts exercise routing preflight and the actual wire body.
+const CONTROL_REJECTIONS = [
+  ['chat_completions', { seed: 7 }, 'seed'],
+  ['chat_completions', { presence_penalty: 0.5 }, 'presence_penalty'],
+  ['chat_completions', { frequency_penalty: 0.5 }, 'frequency_penalty'],
+  ['chat_completions', { n: 2 }, 'n'],
+  ['chat_completions', { logit_bias: { 123: -1 } }, 'logit_bias'],
+  ['chat_completions', { messages: [{ role: 'user', name: 'named-user', content: 'MODE:ok' }] }, 'messages[0].name'],
+  ['chat_completions', { prediction: { type: 'content', content: 'predicted' } }, 'prediction'],
+  ['chat_completions', { modalities: ['text', 'audio'], audio: { voice: 'alloy', format: 'wav' } }, 'modalities'],
+  ['chat_completions', { stream_options: { include_obfuscation: true } }, 'stream_options.include_obfuscation'],
+  ['chat_completions', { stream_options: { future_control: true } }, 'stream_options.future_control'],
+  ['chat_completions', { future_control: true }, 'future_control'],
+  ['chat_completions', { max_tokens: 64, max_completion_tokens: 32 }, 'max_tokens'],
+  ['chat_completions', { logprobs: false, top_logprobs: 3 }, 'top_logprobs'],
+  ['chat_completions', { tools: [{ type: 'function', function: { name: 'f', parameters: {}, defer_loading: true } }] }, 'tools[0].function.defer_loading'],
+  ['chat_completions', { tools: [{ type: 'function', function: { name: 'f', parameters: {} } }], tool_choice: { type: 'function', function: { name: 'f', future_control: true } } }, 'tool_choice.function.future_control'],
+  ['chat_completions', { messages: [{ role: 'user', content: [{ type: 'text', text: 'MODE:ok' }, { type: 'image_url', image_url: { url: 'https://example.invalid/image.png', future_control: true } }] }] }, 'messages[0].content[1].image_url.future_control'],
+  ['messages', { messages: [{ role: 'user', content: [{ type: 'text', text: 'MODE:ok' }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/image.png', future_control: true } }] }] }, 'messages[0].content[1].source.future_control'],
+  ['responses', { background: true }, 'background'],
+  ['responses', { truncation: 'auto' }, 'truncation'],
+  ['responses', { include: ['future.output'] }, 'include[0]'],
+  ['responses', { text: { future_control: true } }, 'text.future_control'],
+  ['responses', { text: { format: { type: 'json_schema', name: 's', schema: {}, future_control: true } } }, 'text.format.future_control'],
+  ['responses', { stream_options: { include_usage: true } }, 'stream_options.include_usage'],
+  ['responses', { future_control: true }, 'future_control'],
+];
 const listen = srv => new Promise(resolve => srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); }
@@ -82,6 +109,60 @@ function matrixStream(protocol, model, id) {
       + frame('content_block_delta', { type: 'content_block_delta', index: i + 1, delta: { type: 'input_json_delta', partial_json: call.arguments.slice(4) } })
       + frame('content_block_stop', { type: 'content_block_stop', index: i + 1 })).join('')
     + frame('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 2 } }) + frame('message_stop', { type: 'message_stop' });
+}
+
+const CHAT_LOG = [{ token: '中', logprob: -0.25, bytes: [228, 184, 173], top_logprobs: [{ token: '文', logprob: -1, bytes: [230, 150, 135] }] }];
+function nativeChatJson(model) {
+  return { id: 'chatcmpl-native-multi', object: 'chat.completion', created: 12345, model, service_tier: 'priority', system_fingerprint: 'fp_fixture', provider_extension: { kept: ['opaque'] },
+    choices: [
+      { index: 2, message: { role: 'assistant', content: TEXT, tool_calls: [{ id: 'a0', type: 'function', function: { name: 'alpha', arguments: '{"n":1}' } }, { id: 'a1', type: 'function', function: { name: 'beta', arguments: '{"n":2}' } }], vendor_message: { kept: true } }, finish_reason: 'tool_calls', logprobs: { content: CHAT_LOG, refusal: null }, vendor_choice: 'choice-two' },
+      { index: 7, message: { role: 'assistant', content: '第二个', tool_calls: [{ id: 'b0', type: 'function', function: { name: 'gamma', arguments: '{"n":3}' } }, { id: 'b1', type: 'function', function: { name: 'delta', arguments: '{"n":4}' } }] }, finish_reason: 'length', logprobs: null },
+      { index: 9, message: { role: 'assistant', content: null, refusal: REFUSAL }, finish_reason: 'content_filter', logprobs: { content: null, refusal: CHAT_LOG } },
+    ], usage: { ...usage.chat_completions, provider_usage: { kept: 17 } } };
+}
+function nativeChatStream(model, conflict = false, identityMode = '') {
+  const payload = nativeChatJson(model), { choices, usage: finalUsage, ...top } = payload;
+  const chunk = choices => ({ ...top, object: 'chat.completion.chunk', choices });
+  const chunks = [chunk(choices.map(choice => ({ ...choice, message: undefined, delta: { ...choice.message, tool_calls: choice.message.tool_calls?.map((call, index) => ({ ...call, index, function: { ...call.function, arguments: call.function.arguments.slice(0, 5) } })) }, finish_reason: null }))),
+    chunk([choices[1], choices[0]].map(choice => ({ index: choice.index, delta: { tool_calls: [1, 0].map(index => ({ index, function: { arguments: choice.message.tool_calls[index].function.arguments.slice(5) } })) }, finish_reason: null }))),
+    chunk(choices.map(choice => ({ index: choice.index, delta: {}, finish_reason: choice.finish_reason }))),
+    { ...chunk([]), usage: finalUsage }];
+  if (conflict) chunks[1].provider_extension = { kept: ['changed-without-defined-merge'] };
+  if (identityMode) {
+    for (const choice of chunks[1].choices) for (const tool of choice.delta.tool_calls) {
+      const original = choices.find(value => value.index === choice.index).message.tool_calls[tool.index];
+      tool.id = original.id; tool.function.name = original.function.name;
+    }
+    if (identityMode === 'id') chunks[1].choices[0].delta.tool_calls[0].id = 'conflicting-id';
+    if (identityMode === 'name') chunks[1].choices[0].delta.tool_calls[0].function.name = 'conflicting-name';
+  }
+  return chunks.map(value => frame('', value)).join('') + frame('', '[DONE]');
+}
+const DETAIL_LOGPROBS = [{ token: '中文🙂', bytes: [228, 184, 173, 230, 150, 135, 240, 159, 153, 130], logprob: -0.125,
+  top_logprobs: [{ token: '中文', bytes: [228, 184, 173, 230, 150, 135], logprob: -0.5 }] }];
+function crossDetailJson(protocol, model, refusal = false) {
+  if (protocol === 'chat_completions') return { id: 'chatcmpl-details', object: 'chat.completion', created: 12345, model, service_tier: 'priority',
+    choices: [{ index: 0, message: { role: 'assistant', content: refusal ? null : '中文🙂', ...(refusal ? { refusal: '不能协助' } : {}) }, finish_reason: 'stop',
+      logprobs: { content: refusal ? null : DETAIL_LOGPROBS, refusal: refusal ? DETAIL_LOGPROBS : null } }], usage: usage.chat_completions };
+  return { id: 'resp_details', object: 'response', created_at: 12345, model, status: 'completed', service_tier: 'priority',
+    output: [{ id: 'msg_details', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: '中文🙂', annotations: [], logprobs: DETAIL_LOGPROBS }] }], usage: usage.responses };
+}
+function crossDetailStream(protocol, model, variant = '') {
+  const payload = crossDetailJson(protocol, model);
+  if (variant === 'no_usage') delete payload.usage;
+  const snapshotLogprobs = variant === 'order' ? [{ top_logprobs: [{ logprob: -0.5, bytes: [228, 184, 173, 230, 150, 135], token: '中文' }],
+    logprob: -0.125, bytes: [228, 184, 173, 230, 150, 135, 240, 159, 153, 130], token: '中文🙂' }]
+    : variant === 'conflict' ? [{ ...DETAIL_LOGPROBS[0], logprob: -9 }] : DETAIL_LOGPROBS;
+  if (protocol === 'chat_completions') return frame('', { id: payload.id, model, created: 12345, service_tier: 'priority',
+    choices: [{ index: 0, delta: { role: 'assistant', content: '中文🙂' }, logprobs: { content: DETAIL_LOGPROBS, refusal: null }, finish_reason: null }] })
+    + frame('', { id: payload.id, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: usage.chat_completions }) + frame('', '[DONE]');
+  return frame('response.created', { type: 'response.created', response: { ...payload, output: [], status: 'in_progress' } })
+    + frame('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: { ...payload.output[0], content: [], status: 'in_progress' } })
+    + frame('response.content_part.added', { type: 'response.content_part.added', output_index: 0, content_index: 0, item_id: 'msg_details', part: { type: 'output_text', text: '', annotations: [], logprobs: [] } })
+    + frame('response.output_text.delta', { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_details', delta: '中文🙂', logprobs: DETAIL_LOGPROBS })
+    + frame('response.output_text.done', { type: 'response.output_text.done', output_index: 0, content_index: 0, item_id: 'msg_details', text: '中文🙂', logprobs: snapshotLogprobs })
+    + frame('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: payload.output[0] })
+    + frame('response.completed', { type: 'response.completed', response: payload });
 }
 function responseJson(protocol, model, mode, id) {
   const text = mode === 'refusal' ? REFUSAL : TEXT;
@@ -188,6 +269,33 @@ test.before(async () => {
     if (!protocol) return json(res, 404, {});
     const mode = JSON.stringify(body).match(/MODE:(\w+)/)?.[1] || 'ok';
     calls.push({ protocol, path: req.url, body, mode }); serial++;
+    if (mode === 'cross_detail_json' || mode === 'cross_detail_refusal') return json(res, 200, crossDetailJson(protocol, body.model, mode === 'cross_detail_refusal'));
+    if (mode === 'cross_detail_sse') return splitUnicode(res, crossDetailStream(protocol, body.model));
+    if (mode === 'cross_detail_no_usage_sse') return splitUnicode(res, crossDetailStream(protocol, body.model, 'no_usage'));
+    if (mode === 'cross_detail_no_usage_json') { const payload = crossDetailJson(protocol, body.model); delete payload.usage; return json(res, 200, payload); }
+    if (mode === 'cross_detail_order' || mode === 'cross_detail_conflict') return splitUnicode(res, crossDetailStream(protocol, body.model, mode === 'cross_detail_order' ? 'order' : 'conflict'));
+    if (mode.startsWith('chat_output_')) {
+      const field = mode.slice('chat_output_'.length);
+      const values = { reasoning_content: '私有推理🙂', reasoning: { encrypted: 'private-state' }, audio: { id: 'audio-fixture', data: 'fixture-audio', transcript: '语音' }, function_call: { name: 'legacy', arguments: '{"n":1}' } };
+      const message = { role: 'assistant', content: TEXT, [field]: values[field] };
+      if (!body.stream) return json(res, 200, { id: 'chatcmpl-unsupported-output', object: 'chat.completion', model: body.model, choices: [{ index: 0, message, finish_reason: field === 'function_call' ? 'function_call' : 'stop' }], usage: usage.chat_completions });
+      return splitUnicode(res, frame('', { id: 'chatcmpl-unsupported-output', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta: message, finish_reason: null }] })
+        + frame('', { id: 'chatcmpl-unsupported-output', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta: {}, finish_reason: field === 'function_call' ? 'function_call' : 'stop' }], usage: usage.chat_completions }) + frame('', '[DONE]'));
+    }
+    if (mode === 'cross_many_choices') return splitUnicode(res,
+      frame('', { id: 'chatcmpl-cross-many', model: body.model, choices: [{ index: 0, delta: { role: 'assistant', content: TEXT }, finish_reason: null }] })
+      + frame('', { id: 'chatcmpl-cross-many', model: body.model, choices: [{ index: 1, delta: { role: 'assistant', content: '另一个候选' }, finish_reason: null }] })
+      + frame('', { id: 'chatcmpl-cross-many', model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + frame('', '[DONE]'));
+    if (mode === 'native_chat_json') return json(res, 200, nativeChatJson(body.model));
+    if (mode === 'native_chat_sse' || mode === 'native_chat_conflict') return splitUnicode(res, nativeChatStream(body.model, mode === 'native_chat_conflict'));
+    if (mode === 'native_chat_repeat_identity' || mode === 'native_chat_conflict_id' || mode === 'native_chat_conflict_name') return splitUnicode(res, nativeChatStream(body.model, false, mode === 'native_chat_repeat_identity' ? 'repeat' : mode.endsWith('_id') ? 'id' : 'name'));
+    if (mode === 'native_response_json' || mode === 'native_response_unknown') {
+      const payload = responseJson('responses', body.model, 'force_sse', serial);
+      payload.output[0].content[0].logprobs = CHAT_LOG;
+      payload.native_extension = { kept: true };
+      if (mode === 'native_response_unknown') payload.output.unshift({ type: 'web_search_call', id: 'ws-unknown', status: 'completed', action: { type: 'search', query: 'opaque native operation' } });
+      return json(res, 200, payload);
+    }
     if (mode.startsWith('no_terminal_')) {
       const wire = protocol === 'chat_completions'
         ? frame('', { id: 'chatcmpl-cut', model: body.model, choices: [{ index: 0, delta: { role: 'assistant', content: TEXT }, finish_reason: null }] })
@@ -267,6 +375,10 @@ test.before(async () => {
     eofRoutes.push({ id, entry_protocols: [protocol], targets: [{ id: 'cut', config_id: id, model: id, protocol }, { id: 'backup', config_id: 'backup', model: 'backup', protocol: 'chat_completions' }] });
   }
   const backup = { id: 'backup', config_id: 'backup', model: 'backup', protocol: 'chat_completions' };
+  eofRoutes.push({ id: 'fields-fallback-responses', entry_protocols: PROTOCOLS, targets: [
+    { id: 'incompatible-chat', config_id: 'chat_completions', model: 'backend-chat_completions', protocol: 'chat_completions' },
+    { id: 'native-responses', config_id: 'responses', model: 'backend-responses', protocol: 'responses' },
+  ] });
   const config = { auth_token: ADMIN, apikeys: [ENTRY], port, configs, routing: { max_attempts: 2, models: [...eofRoutes, ...PROTOCOLS.flatMap(protocol => [{ id: nativeRoute(protocol), entry_protocols: PROTOCOLS, targets: [{ id: 'primary', config_id: protocol, model: 'backend-' + protocol, protocol }, backup] }, { id: 'only-' + protocol, entry_protocols: PROTOCOLS, targets: [{ id: 'primary', config_id: protocol, model: 'backend-' + protocol, protocol }] }]), { id: 'pool-route', entry_protocols: PROTOCOLS, targets: [{ id: 'pool-target', config_id: 'pool', model: 'free', protocol: 'chat_completions' }, backup] }] } };
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config)); base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, [path.join(__dirname, '..', 'openai.js')], { cwd: path.join(__dirname, '..'), env: { ...process.env, CONFIG: path.join(dir, 'config.json'), AIROUTER_BIND_HOST: '127.0.0.1', QUOTA_CHECK_TIMEOUT_MS: '1000' }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -617,6 +729,7 @@ for (const entryProtocol of PROTOCOLS) for (const backendProtocol of PROTOCOLS) 
     test(`wire matrix ${entryProtocol} <- ${backendProtocol}: ${upstreamSse ? 'SSE' : 'JSON'} -> ${clientSse ? 'SSE' : 'JSON'}`, async () => {
       const route = nativeRoute(backendProtocol), mode = upstreamSse ? 'matrix_sse' : 'matrix_json';
       const body = toolHistory(entryProtocol, route); body.stream = clientSse;
+      if (entryProtocol === 'chat_completions' && clientSse) body.stream_options = { include_usage: true };
       const messages = entryProtocol === 'responses' ? body.input : body.messages;
       messages[0].content = `MODE:${mode}`;
       const before = calls.length; const response = await entry(entryProtocol, body);
@@ -739,3 +852,330 @@ for (const protocol of PROTOCOLS) for (const ending of ['clean', 'abrupt']) {
     assert.equal(calls.at(-1).protocol, protocol); await assertServiceAlive();
   });
 }
+
+for (const backend of ['chat_completions', 'responses']) for (const upstreamSse of [false, true]) for (const stream of [false, true]) {
+  const client = backend === 'chat_completions' ? 'responses' : 'chat_completions';
+  test(`cross detail ${client} <- ${backend}: ${upstreamSse ? 'SSE' : 'JSON'} -> ${stream ? 'SSE' : 'JSON'} preserves token logprobs and service tier`, async () => {
+    const body = input(client, nativeRoute(backend), upstreamSse ? 'cross_detail_sse' : 'cross_detail_json', stream);
+    body.service_tier = 'priority'; body.safety_identifier = 'safety-fixture';
+    if (client === 'chat_completions') { body.logprobs = true; body.top_logprobs = 1; if (stream) body.stream_options = { include_usage: true }; }
+    else { body.include = ['message.output_text.logprobs']; body.top_logprobs = 1; }
+    const before = calls.length, response = await entry(client, body), wire = await response.text();
+    assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+    assert.equal(calls.at(-1).protocol, backend);
+    assert.equal(calls.at(-1).body.service_tier, 'priority'); assert.equal(calls.at(-1).body.safety_identifier, 'safety-fixture');
+    assert.equal(calls.at(-1).body.top_logprobs, 1);
+    if (backend === 'responses') { assert.deepEqual(calls.at(-1).body.include, ['message.output_text.logprobs']); assert.equal(calls.at(-1).body.logprobs, undefined); }
+    else { assert.equal(calls.at(-1).body.logprobs, true); assert.equal(calls.at(-1).body.include, undefined); }
+    if (client === 'responses') {
+      const parsed = stream ? events(wire) : null;
+      const payload = stream ? parsed.find(value => value.type === 'response.completed')?.response : JSON.parse(wire);
+      assert.equal(payload.service_tier, 'priority');
+      assert.deepEqual(payload.output[0].content[0], { type: 'output_text', text: '中文🙂', annotations: [], logprobs: DETAIL_LOGPROBS });
+      if (stream) {
+        assert.deepEqual(parsed.filter(value => value.type === 'response.output_text.delta').flatMap(value => value.logprobs), DETAIL_LOGPROBS);
+        assert.deepEqual(parsed.find(value => value.type === 'response.output_text.done').logprobs, DETAIL_LOGPROBS);
+        assert.deepEqual(parsed.find(value => value.type === 'response.content_part.done').part.logprobs, DETAIL_LOGPROBS);
+      }
+    } else if (!stream) {
+      const payload = JSON.parse(wire); assert.equal(payload.service_tier, 'priority');
+      assert.equal(payload.choices[0].message.content, '中文🙂'); assert.deepEqual(payload.choices[0].logprobs, { content: DETAIL_LOGPROBS, refusal: null });
+    } else {
+      const parsed = events(wire), content = parsed.flatMap(value => value.choices || []).filter(choice => choice.delta?.content);
+      assert.equal(content.map(choice => choice.delta.content).join(''), '中文🙂');
+      assert.deepEqual(content.flatMap(choice => choice.logprobs?.content || []), DETAIL_LOGPROBS);
+      assert.ok(parsed.every(value => value.service_tier === 'priority'));
+      assert.deepEqual(parsed.find(value => Array.isArray(value.choices) && value.choices.length === 0)?.usage, usage.chat_completions);
+      assert.ok(parsed.filter(value => value.choices.length > 0).every(value => value.usage === null));
+    }
+  });
+}
+
+test('non-equivalent Chat refusal logprobs cannot be silently dropped or retried as Responses', async () => {
+  const before = calls.length;
+  const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'cross_detail_refusal', false));
+  const payload = await response.json(); assert.equal(response.status, 502, JSON.stringify(payload));
+  assert.equal(payload.error.code, 'upstream_response_not_representable'); assert.match(payload.error.message, /logprobs.*refusal|refusal.*logprobs/i);
+  assert.equal(calls.length, before + 1);
+});
+
+test('cross Chat streaming usage is opt-in and never exposes an unsolicited usage chunk', async () => {
+  for (const upstreamSse of [false, true]) for (const explicitFalse of [false, true]) {
+    const body = input('chat_completions', nativeRoute('responses'), upstreamSse ? 'cross_detail_sse' : 'cross_detail_json', true);
+    if (explicitFalse) body.stream_options = { include_usage: false };
+    const before = calls.length, response = await entry('chat_completions', body), wire = await response.text();
+    assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+    const parsed = events(wire); assert.equal(parsed.flatMap(x => x.choices || []).map(x => x.delta?.content || '').join(''), '中文🙂');
+    assert.ok(parsed.every(x => !Object.prototype.hasOwnProperty.call(x, 'usage')));
+    assert.ok(parsed.every(x => x.choices.length > 0)); assert.match(wire, /data: \[DONE\]/);
+  }
+});
+
+for (const stream of [false, true]) {
+  test(`Responses logprob snapshot object-key order preserves semantic values for ${stream ? 'SSE' : 'JSON'} clients`, async () => {
+    const before = calls.length;
+    const response = await entry('chat_completions', input('chat_completions', nativeRoute('responses'), 'cross_detail_order', stream));
+    const wire = await response.text(); assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+    if (stream) {
+      const parsed = events(wire); assert.ok(!parsed.some(value => value.error), wire);
+      assert.equal(parsed.flatMap(value => value.choices || []).map(choice => choice.delta?.content || '').join(''), '中文🙂');
+      assert.deepEqual(parsed.flatMap(value => value.choices || []).flatMap(choice => choice.logprobs?.content || []), DETAIL_LOGPROBS);
+      assert.deepEqual(parsed.flatMap(value => value.choices || []).map(choice => choice.finish_reason).filter(Boolean), ['stop']);
+      assert.match(wire, /data: \[DONE\]/);
+    } else {
+      const payload = JSON.parse(wire); assert.equal(payload.choices[0].message.content, '中文🙂');
+      assert.deepEqual(payload.choices[0].logprobs, { content: DETAIL_LOGPROBS, refusal: null });
+    }
+  });
+  test(`Responses logprob snapshot truly changed values still reject without replay for ${stream ? 'SSE' : 'JSON'} clients`, async () => {
+    const before = calls.length;
+    const response = await entry('chat_completions', input('chat_completions', nativeRoute('responses'), 'cross_detail_conflict', stream));
+    const wire = await response.text(); assert.equal(calls.length, before + 1);
+    if (stream) {
+      assert.equal(response.status, 200); const parsed = events(wire);
+      assert.match(wire, /logprobs.*不一致/); assert.ok(parsed.some(value => value.error));
+      assert.ok(!parsed.some(value => value.choices?.some(choice => choice.finish_reason === 'stop'))); assert.doesNotMatch(wire, /data: \[DONE\]/);
+    } else { assert.equal(response.status, 502); assert.match(JSON.parse(wire).error.message, /logprobs.*不一致/); }
+  });
+}
+
+test('different Chat choice indices arriving in separate SSE frames cannot merge into one Responses success', async () => {
+  const before = calls.length;
+  const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'cross_many_choices', true));
+  const received = await streamText(response); assert.equal(response.status, 200);
+  assert.match(received.text, /choices/); assert.ok(!events(received.text).some(x => x.type === 'response.completed'));
+  assert.equal(calls.length, before + 1);
+});
+
+for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']) for (const stream of [false, true]) {
+  test(`Chat output ${field} ${stream ? 'SSE' : 'JSON'} stays native and rejects both cross-protocol destinations without replay`, async () => {
+    const expected = { reasoning_content: '私有推理🙂', reasoning: { encrypted: 'private-state' }, audio: { id: 'audio-fixture', data: 'fixture-audio', transcript: '语音' }, function_call: { name: 'legacy', arguments: '{"n":1}' } }[field];
+    let before = calls.length;
+    const native = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'chat_output_' + field, stream));
+    const wire = await native.text(); assert.equal(native.status, 200); assert.equal(calls.length, before + 1);
+    const message = stream ? events(wire)[0].choices[0].delta : JSON.parse(wire).choices[0].message;
+    assert.deepEqual(message[field], expected); assert.equal(message.content, TEXT);
+    for (const client of ['responses', 'messages']) {
+      before = calls.length;
+      const body = input(client, nativeRoute('chat_completions'), 'chat_output_' + field, stream); delete body.store;
+      const response = await entry(client, body), payload = await response.json();
+      assert.equal(response.status, 502, JSON.stringify(payload)); assert.equal(calls.length, before + 1, 'must not retry another account after discovering unsupported source output');
+      assert.equal(payload.error.code || payload.error.type, 'upstream_response_not_representable');
+      assert.match(payload.error.message, new RegExp('choices.*' + field));
+    }
+    before = calls.length;
+    const healthy = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'ok', false));
+    assert.equal(healthy.status, 200, 'unsupported conversion must not cool native model'); await healthy.text();
+    assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'chat_completions');
+  });
+}
+
+for (const upstreamSse of [false, true]) for (const clientSse of [false, true]) {
+  test(`native Chat multi-choice raw details ${upstreamSse ? 'SSE' : 'JSON'} -> ${clientSse ? 'SSE' : 'JSON'}`, async () => {
+    const before = calls.length;
+    const body = input('chat_completions', nativeRoute('chat_completions'), upstreamSse ? 'native_chat_sse' : 'native_chat_json', clientSse);
+    if (clientSse) body.stream_options = { include_usage: true };
+    const response = await entry('chat_completions', body);
+    const wire = await response.text(); assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+    assert.equal(calls.at(-1).protocol, 'chat_completions');
+    if (!clientSse) return assert.deepEqual(JSON.parse(wire), nativeChatJson(nativeRoute('chat_completions')));
+    const parsed = events(wire);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/); assert.match(wire, /data: \[DONE\]\n\n$/);
+    const byIndex = new Map();
+    for (const value of parsed) {
+      assert.equal(value.id, 'chatcmpl-native-multi'); assert.equal(value.model, nativeRoute('chat_completions'));
+      assert.equal(value.service_tier, 'priority'); assert.equal(value.system_fingerprint, 'fp_fixture'); assert.deepEqual(value.provider_extension, { kept: ['opaque'] });
+      for (const choice of value.choices) {
+        let state = byIndex.get(choice.index); if (!state) { state = { text: '', refusal: '', tools: new Map(), ends: [], logContent: [], logRefusal: [] }; byIndex.set(choice.index, state); }
+        state.text += choice.delta.content || ''; state.refusal += choice.delta.refusal || '';
+        if (choice.finish_reason) state.ends.push(choice.finish_reason);
+        state.logContent.push(...(choice.logprobs?.content || [])); state.logRefusal.push(...(choice.logprobs?.refusal || []));
+        if (choice.vendor_choice) assert.equal(choice.vendor_choice, 'choice-two');
+        if (choice.delta.vendor_message) assert.deepEqual(choice.delta.vendor_message, { kept: true });
+        for (const tool of choice.delta.tool_calls || []) {
+          let call = state.tools.get(tool.index); if (!call) { call = { id: '', name: '', arguments: '' }; state.tools.set(tool.index, call); }
+          call.id += tool.id || ''; call.name += tool.function?.name || ''; call.arguments += tool.function?.arguments || '';
+        }
+      }
+    }
+    assert.deepEqual([...byIndex.keys()], [2, 7, 9]);
+    assert.equal(byIndex.get(2).text, TEXT); assert.deepEqual(byIndex.get(2).ends, ['tool_calls']); assert.deepEqual(byIndex.get(2).logContent, CHAT_LOG);
+    assert.equal(byIndex.get(7).text, '第二个'); assert.deepEqual(byIndex.get(7).ends, ['length']);
+    assert.equal(byIndex.get(9).text, ''); assert.equal(byIndex.get(9).refusal, REFUSAL); assert.deepEqual(byIndex.get(9).ends, ['content_filter']); assert.deepEqual(byIndex.get(9).logRefusal, CHAT_LOG);
+    assert.deepEqual([...byIndex.get(2).tools.values()], [{ id: 'a0', name: 'alpha', arguments: '{"n":1}' }, { id: 'a1', name: 'beta', arguments: '{"n":2}' }]);
+    assert.deepEqual([...byIndex.get(7).tools.values()], [{ id: 'b0', name: 'gamma', arguments: '{"n":3}' }, { id: 'b1', name: 'delta', arguments: '{"n":4}' }]);
+    assert.deepEqual(parsed.findLast(value => value.usage).usage, { ...usage.chat_completions, provider_usage: { kept: 17 } });
+  });
+}
+
+test('native Chat aggregation rejects conflicting opaque extensions without fallback or native cooldown', async () => {
+  const before = calls.length;
+  const rejected = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'native_chat_conflict', false));
+  const payload = await rejected.json(); assert.equal(rejected.status, 502, JSON.stringify(payload));
+  assert.equal(payload.error.code, 'upstream_response_not_representable'); assert.match(payload.error.message, /provider_extension/);
+  assert.equal(calls.length, before + 1);
+  const fresh = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'native_chat_json', false));
+  assert.equal(fresh.status, 200); assert.deepEqual(await fresh.json(), nativeChatJson(nativeRoute('chat_completions'))); assert.equal(calls.length, before + 2);
+});
+
+test('native Chat repeated tool identity fields remain stable while argument fragments append', async () => {
+  const before = calls.length;
+  const response = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'native_chat_repeat_identity', false));
+  const payload = await response.json(); assert.equal(response.status, 200, JSON.stringify(payload)); assert.equal(calls.length, before + 1);
+  assert.deepEqual(payload, nativeChatJson(nativeRoute('chat_completions')));
+});
+for (const field of ['id', 'name']) {
+  test(`native Chat conflicting tool ${field} fails explicitly without identity guessing or cooldown`, async () => {
+    const before = calls.length;
+    const response = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'native_chat_conflict_' + field, false));
+    const wire = await response.text(); assert.equal(response.status, 502, wire);
+    const payload = JSON.parse(wire); assert.equal(payload.error.code, 'upstream_response_not_representable');
+    assert.match(payload.error.message, field === 'id' ? /choices\[7\]\.tool_calls\[1\]\.id/ : /choices\[7\]\.tool_calls\[1\]\.function\.name/);
+    assert.equal(calls.length, before + 1, 'no retry after an ambiguous identity');
+    const healthy = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'native_chat_sse', false));
+    assert.equal(healthy.status, 200); assert.deepEqual(await healthy.json(), nativeChatJson(nativeRoute('chat_completions')));
+    assert.equal(calls.length, before + 2); assert.equal(calls.at(-1).protocol, 'chat_completions');
+  });
+}
+
+test('native Chat JSON to SSE honors explicit and omitted include_usage without inventing counters', async () => {
+  for (const include_usage of [undefined, false, true]) {
+    const body = input('chat_completions', nativeRoute('chat_completions'), 'native_chat_json', true);
+    if (include_usage !== undefined) body.stream_options = { include_usage };
+    const before = calls.length; const response = await entry('chat_completions', body);
+    const parsed = events(await response.text()); assert.equal(response.status, 200); assert.equal(calls.length, before + 1);
+    if (include_usage === true) {
+      assert.deepEqual(parsed.at(-1).choices, []);
+      assert.deepEqual(parsed.at(-1).usage, { ...usage.chat_completions, provider_usage: { kept: 17 } });
+      assert.ok(parsed.slice(0, -1).every(value => value.usage === null));
+    } else assert.ok(parsed.every(value => !Object.hasOwn(value, 'usage')), 'no usage is sent without opt-in');
+    assert.deepEqual(parsed.flatMap(value => value.choices).filter(value => value.finish_reason).map(value => [value.index, value.finish_reason]), [[2, 'tool_calls'], [7, 'length'], [9, 'content_filter']]);
+  }
+});
+
+test('native Responses JSON to SSE emits sequenced annotation and logprob events before the full terminal', async () => {
+  const before = calls.length;
+  const response = await entry('responses', input('responses', nativeRoute('responses'), 'native_response_json', true));
+  const wire = await response.text(); assert.equal(response.status, 200, wire); assert.equal(calls.length, before + 1);
+  const parsed = events(wire);
+  assert.deepEqual(parsed.map(value => value.sequence_number), parsed.map((_, index) => index));
+  const added = parsed.find(value => value.type === 'response.content_part.added');
+  assert.deepEqual(added.part, { type: 'output_text', text: '', annotations: [], logprobs: [] });
+  const delta = parsed.find(value => value.type === 'response.output_text.delta');
+  const done = parsed.find(value => value.type === 'response.output_text.done');
+  assert.equal(delta.delta, TEXT); assert.deepEqual(delta.logprobs, CHAT_LOG); assert.equal(done.text, TEXT); assert.deepEqual(done.logprobs, CHAT_LOG);
+  const annotation = parsed.find(value => value.type === 'response.output_text.annotation.added');
+  assert.ok(annotation); assert.equal(annotation.output_index, 0); assert.equal(annotation.content_index, 0); assert.equal(annotation.annotation_index, 0);
+  assert.deepEqual(annotation.annotation, { type: 'url_citation', start_index: 0, end_index: 2, url: 'https://example.invalid', title: 'fixture' });
+  assert.ok(parsed.indexOf(added) < parsed.indexOf(delta) && parsed.indexOf(delta) < parsed.indexOf(annotation) && parsed.indexOf(annotation) < parsed.indexOf(done));
+  assert.equal(parsed.at(-1).type, 'response.completed'); assert.deepEqual(parsed.at(-1).response.native_extension, { kept: true });
+  assert.deepEqual(parsed.at(-1).response.output[0].content[0].logprobs, CHAT_LOG); assert.deepEqual(parsed.at(-1).response.usage, usage.responses);
+});
+
+test('native Responses unimplemented item lifecycle rejects JSON to SSE explicitly and leaves raw JSON healthy', async () => {
+  const before = calls.length;
+  const rejected = await entry('responses', input('responses', nativeRoute('responses'), 'native_response_unknown', true));
+  const payload = await rejected.json(); assert.equal(rejected.status, 502, JSON.stringify(payload));
+  assert.equal(payload.error.code, 'upstream_response_not_representable'); assert.match(payload.error.message, /output\[0\].*web_search_call/);
+  assert.equal(calls.length, before + 1);
+  const raw = await entry('responses', input('responses', nativeRoute('responses'), 'native_response_unknown', false));
+  assert.equal(raw.status, 200); assert.deepEqual((await raw.json()).output[0], { type: 'web_search_call', id: 'ws-unknown', status: 'completed', action: { type: 'search', query: 'opaque native operation' } });
+  assert.equal(calls.length, before + 2);
+});
+
+test('native Chat and Responses reject requested obfuscation during JSON synthesis while preserving SSE passthrough', async () => {
+  for (const protocol of ['chat_completions', 'responses']) {
+    const body = input(protocol, nativeRoute(protocol), protocol === 'chat_completions' ? 'native_chat_json' : 'native_response_json', true);
+    body.stream_options = { include_obfuscation: true };
+    const before = calls.length; const rejected = await entry(protocol, body); const rejectedWire = await rejected.text();
+    assert.equal(rejected.status, 502, rejectedWire); const payload = JSON.parse(rejectedWire); assert.equal(payload.error.code, 'upstream_response_not_representable');
+    assert.match(payload.error.message, /stream_options\.include_obfuscation/); assert.equal(calls.length, before + 1);
+    const rawBody = input(protocol, nativeRoute(protocol), protocol === 'chat_completions' ? 'native_chat_sse' : 'force_sse', true);
+    rawBody.stream_options = { include_obfuscation: true };
+    const raw = await entry(protocol, rawBody); assert.equal(raw.status, 200); assert.match(await raw.text(), /中文/);
+    assert.equal(calls.length, before + 2); assert.deepEqual(calls.at(-1).body.stream_options, { include_obfuscation: true });
+  }
+});
+
+for (const [source, controls, field] of CONTROL_REJECTIONS) {
+  test(`HTTP cross-protocol field rule rejects ${source} ${field} before any attempt`, async () => {
+    const target = source === 'responses' ? 'chat_completions' : 'responses';
+    const before = calls.length;
+    const response = await entry(source, { ...input(source, 'only-' + target, 'ok'), ...controls });
+    const payload = await response.json();
+    assert.equal(response.status, 400, `${field} must not disappear: ${JSON.stringify(payload)}`);
+    assert.equal(payload.error.code || payload.error.type, 'unsupported_protocol_feature');
+    assert.ok(JSON.stringify(payload).includes(field), 'diagnostic must identify the exact field path: ' + JSON.stringify(payload));
+    assert.equal(calls.length, before, 'incompatibility cannot consume an upstream attempt');
+    const healthy = await entry(target, input(target, nativeRoute(target), 'ok'));
+    assert.equal(healthy.status, 200); await healthy.text();
+    assert.equal(calls.at(-1).protocol, target, 'no health cooldown from client compatibility');
+  });
+}
+
+for (const source of ['chat_completions', 'responses']) {
+  test(`HTTP equivalent controls and nested user data map completely ${source}`, async () => {
+    const target = source === 'responses' ? 'chat_completions' : 'responses';
+    const schema = { type: 'object', properties: { cache_control: { type: 'string' }, seed: { type: 'number' }, future_control: { type: 'object' } }, required: ['cache_control'], additionalProperties: false };
+    for (const type of ['text', 'json_object', 'json_schema']) {
+      const format = type === 'json_schema' ? { type, name: 'answer', description: 'exact original schema', strict: true, schema } : { type };
+      const body = { ...input(source, 'only-' + target, 'ok'), service_tier: 'flex', safety_identifier: 'safe-fixture', user: 'user-fixture', metadata: { cache_control: 'application data', future_control: 'application data' }, prompt_cache_key: 'field-fixture', prompt_cache_retention: '24h', prompt_cache_options: { mode: 'explicit', ttl: '5m' }, top_logprobs: 2, stream_options: { include_obfuscation: false } };
+      if (source === 'responses') { body.text = { verbosity: 'low', format }; body.include = ['message.output_text.logprobs']; body.max_output_tokens = 123; body.background = false; body.truncation = 'disabled'; }
+      else { body.verbosity = 'low'; body.response_format = type === 'json_schema' ? { type, json_schema: { name: 'answer', description: 'exact original schema', strict: true, schema } } : format; body.logprobs = true; body.max_completion_tokens = 123; }
+      const before = calls.length; const response = await entry(source, body); const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload)); assert.equal(calls.length, before + 1);
+      const sent = calls.at(-1).body; assert.equal(calls.at(-1).protocol, target);
+      for (const key of ['service_tier', 'safety_identifier', 'user', 'metadata', 'prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options', 'top_logprobs', 'stream_options']) assert.deepEqual(sent[key], body[key], key);
+      if (target === 'responses') {
+        assert.deepEqual(sent.text, { verbosity: 'low', format }); assert.deepEqual(sent.include, ['message.output_text.logprobs']); assert.equal(sent.max_output_tokens, 123);
+        for (const key of ['verbosity', 'response_format', 'logprobs', 'max_tokens', 'max_completion_tokens']) assert.equal(Object.hasOwn(sent, key), false, 'must not leak source control ' + key);
+      } else {
+        assert.equal(sent.verbosity, 'low'); assert.deepEqual(sent.response_format, type === 'json_schema' ? { type, json_schema: { name: 'answer', description: 'exact original schema', strict: true, schema } } : format);
+        assert.equal(sent.logprobs, true); assert.equal(sent.max_completion_tokens, 123); assert.equal(Object.hasOwn(sent, 'max_tokens'), false);
+        for (const key of ['text', 'include', 'background', 'truncation', 'max_output_tokens']) assert.equal(Object.hasOwn(sent, key), false, 'must not leak source control ' + key);
+      }
+    }
+  });
+  test(`HTTP same-protocol unknown and nested controls remain raw ${source}`, async () => {
+    const body = { ...input(source, nativeRoute(source), 'ok'), future_control: { opaque: true }, metadata: { name: 'user-data', cache_control: 'not an API directive' }, stream_options: { future_control: 'vendor-extension' } };
+    const response = await entry(source, body); assert.equal(response.status, 200); await response.json();
+    assert.deepEqual(calls.at(-1).body, { ...body, model: 'backend-' + source });
+  });
+}
+
+test('Responses output budget maps only to the destination protocol field', async () => {
+  for (const target of ['chat_completions', 'messages']) {
+    const before = calls.length;
+    const response = await entry('responses', { model: 'only-' + target, input: [{ role: 'user', content: 'MODE:ok' }], stream: false, max_output_tokens: 31 });
+    assert.equal(response.status, 200); await response.json(); assert.equal(calls.length, before + 1);
+    const sent = calls.at(-1).body; assert.equal(calls.at(-1).protocol, target);
+    assert.equal(sent[target === 'messages' ? 'max_tokens' : 'max_completion_tokens'], 31);
+    assert.equal(Object.hasOwn(sent, target === 'messages' ? 'max_completion_tokens' : 'max_tokens'), false);
+    assert.equal(Object.hasOwn(sent, 'max_output_tokens'), false);
+  }
+});
+
+for (const source of ['chat_completions', 'responses']) {
+  test(`field preflight skips the incompatible candidate and preserves the native fallback ${source}`, async () => {
+    const incompatible = source === 'chat_completions' ? 'responses' : 'chat_completions';
+    const body = { ...input(source, source === 'chat_completions' ? nativeRoute('responses') : 'fields-fallback-responses', 'ok'), future_control: { private_provider_option: 'keep' }, ...(source === 'chat_completions' ? { seed: 42 } : { background: false, truncation: 'disabled' }) };
+    const before = calls.length; const response = await entry(source, body); const payload = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(payload)); assert.equal(calls.length, before + 1);
+    assert.equal(calls.at(-1).protocol, source); assert.deepEqual(calls.at(-1).body.future_control, body.future_control);
+    if (source === 'chat_completions') assert.equal(calls.at(-1).body.seed, 42);
+    else { assert.equal(calls.at(-1).body.background, false); assert.equal(calls.at(-1).body.truncation, 'disabled'); }
+    const native = await entry(incompatible, input(incompatible, nativeRoute(incompatible), 'ok'));
+    assert.equal(native.status, 200); await native.json(); assert.equal(calls.at(-1).protocol, incompatible, 'skipped candidate is still healthy');
+  });
+}
+
+for (const upstream of ['json', 'sse']) test(`Chat include_usage preserves unknown source counters as null (${upstream})`, async () => {
+  const body = input('chat_completions', nativeRoute('responses'), 'cross_detail_no_usage_' + upstream, true); body.stream_options = { include_usage: true };
+  const before = calls.length, response = await entry('chat_completions', body), wire = await response.text();
+  assert.equal(response.status, 200); assert.equal(calls.length, before + 1);
+  const parsed = events(wire); assert.equal(parsed.flatMap(x => x.choices || []).map(x => x.delta?.content || '').join(''), '中文🙂');
+  const usageChunks = parsed.filter(x => x.choices.length === 0); assert.equal(usageChunks.length, 1);
+  assert.equal(usageChunks[0].usage, null); assert.equal(parsed.at(-1), usageChunks[0]);
+  assert.ok(parsed.filter(x => x.choices.length).every(x => x.usage === null));
+  assert.match(wire, /data: \[DONE\]\n\n$/);
+});

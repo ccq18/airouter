@@ -277,10 +277,11 @@ function detectRequestCapabilities(entryProtocol, body) {
   });
 
   if (entryProtocol === 'chat_completions') {
-    capabilities.structuredOutput = Boolean(payload.response_format);
+    capabilities.structuredOutput = Boolean(payload.response_format && payload.response_format.type !== 'text');
     collectCapabilities(payload.messages, capabilities);
   } else if (entryProtocol === 'responses') {
-    capabilities.structuredOutput = Boolean(payload.response_format || (payload.text && payload.text.format));
+    const format = payload.response_format || payload.text?.format;
+    capabilities.structuredOutput = Boolean(format && format.type !== 'text');
     collectCapabilities(payload.input, capabilities);
   } else if (entryProtocol === 'messages') {
     capabilities.structuredOutput = Boolean(payload.output_format || (payload.output_config && payload.output_config.format));
@@ -352,11 +353,22 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
     return 'capability_streaming_unsupported';
   }
 
+  // Run the exact converter used for forwarding before coarse capabilities so
+  // a rejected control reports its field path and never becomes a silent drop.
+  if (requestBody && target.protocol !== entryProtocol) {
+    try {
+      require('./protocol-bridge').transformRequestForTarget({ entryProtocol, targetProtocol: target.protocol,
+        body: requestBody, targetModel: target.model, stream: Boolean(requestCapabilities.streaming) });
+    } catch (error) {
+      if (error.name === 'UnsupportedProtocolFeatureError') return { reason: 'protocol_feature_unsupported', detail: error.message };
+      throw error;
+    }
+  }
   if (target.protocol !== entryProtocol) {
     if (requestCapabilities.reasoning) {
       return 'capability_reasoning_requires_same_protocol';
     }
-    if (requestCapabilities.structuredOutput) {
+    if (requestCapabilities.structuredOutput && (target.protocol === 'messages' || entryProtocol === 'messages' || !requestBody)) {
       return 'capability_structured_output_requires_same_protocol';
     }
     if (requestCapabilities.builtinTools) {
@@ -370,15 +382,6 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
     }
   }
 
-  if (requestBody && target.protocol !== entryProtocol) {
-    try {
-      require('./protocol-bridge').transformRequestForTarget({ entryProtocol, targetProtocol: target.protocol,
-        body: requestBody, targetModel: target.model, stream: Boolean(requestCapabilities.streaming) });
-    } catch (error) {
-      if (error.name === 'UnsupportedProtocolFeatureError') return { reason: 'protocol_feature_unsupported', detail: error.message };
-      throw error;
-    }
-  }
   return null;
 }
 

@@ -172,8 +172,8 @@ test('same-protocol requests only change model and stream settings', () => {
   });
 });
 
-test('cross-protocol structured output and files fail clearly instead of being dropped', () => {
-  assert.throws(() => transformRequestForTarget({
+test('Chat/Responses structured output maps exactly while unsupported files fail clearly', () => {
+  const structured = transformRequestForTarget({
     entryProtocol: 'chat_completions',
     targetProtocol: 'responses',
     body: {
@@ -183,7 +183,9 @@ test('cross-protocol structured output and files fail clearly instead of being d
     },
     targetModel: 'gpt-backend',
     stream: false,
-  }), error => error instanceof UnsupportedProtocolFeatureError && /结构化输出/.test(error.message));
+  });
+  assert.deepEqual(structured.text, { format: { type: 'json_object' } });
+  assert.equal(Object.hasOwn(structured, 'response_format'), false);
 
   assert.throws(() => transformRequestForTarget({
     entryProtocol: 'messages',
