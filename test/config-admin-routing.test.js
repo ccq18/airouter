@@ -281,7 +281,10 @@ function testAdminHarness(fetch) {
   const admin = routingAdmin.createRoutingAdmin({ document, window: {
     location: { search: '?auth_token=test-admin', origin: 'http://localhost:3009' }, fetch,
   } });
-  admin.state.upstreams = { configs: [{ id: 'account-a', description: 'Account A' }] };
+  admin.state.upstreams = { configs: [{ id: 'account-a', description: 'Account A', models: [
+    { id: 'backend-1', protocols: ['responses'] },
+    { id: 'backend-2', protocols: ['chat_completions'] },
+  ] }] };
   admin.state.routes = { models: [{ id: 'public-id', entry_protocols: ['responses', 'chat_completions'], targets: [
     { id: 'target-1', config_id: 'account-a', model: 'backend-1' },
     { id: 'target-2', config_id: 'account-a', model: 'backend-2' },
@@ -399,6 +402,71 @@ test('saving a route omits candidate protocol and displays all declared native m
   const cards = nodes.get('modelRoutesList').innerHTML;
   assert.match(cards, /Chat Completions/); assert.match(cards, /Claude Messages/);
   assert.doesNotMatch(cards, /undefined/);
+});
+
+test('route badges and test choices use referenced model protocol union, independent of quota and old target protocol', () => {
+  const { admin, nodes, configs } = poolHarness();
+  configs[0].models.push({ id: 'unused-responses', protocols: ['responses'] });
+  configs.push({ id: 'glm', enabled: false, models: [{ id: 'glm-5.3', protocols: ['chat_completions', 'messages'] }] });
+  admin.state.routes = { models: [{ id: 'deepseek', entry_protocols: ['chat_completions', 'responses', 'messages'], targets: [
+    { id: 'go', config_id: 'go', model: 'paid-model', protocol: 'responses' },
+    { id: 'glm', config_id: 'glm', model: 'glm-5.3' },
+    { id: 'pool', config_id: 'pool-a', model: 'free' },
+  ] }] };
+  admin.renderRoutes();
+  const meta = between(nodes.get('modelRoutesList').innerHTML, '<div class="route-meta">', '</div>');
+  assert.deepEqual([...meta.matchAll(/<span class="tag">([^<]+)<\/span>/g)].map(m => m[1]), ['Chat Completions', 'Claude Messages', '已启用']);
+  admin.openRouteTest('deepseek');
+  assert.deepEqual([...nodes.get('routeTestProtocol').innerHTML.matchAll(/value="([^"]+)"/g)].map(m => m[1]), ['chat_completions', 'messages']);
+  assert.equal(nodes.get('routeTestRunButton').disabled, false);
+});
+
+test('route protocol union updates after model edits and respects explicitly disabled entry protocols', () => {
+  const { admin, nodes, configs } = poolHarness();
+  const route = { id: 'changing', entry_protocols: ['chat_completions', 'responses', 'messages'], targets: [{ id: 'go', config_id: 'go', model: 'paid-model' }] };
+  admin.state.routes = { models: [route] };
+  for (const [declared, enabled, expected] of [
+    [['chat_completions', 'messages'], route.entry_protocols, ['Chat Completions', 'Claude Messages']],
+    [['chat_completions'], route.entry_protocols, ['Chat Completions']],
+    [['chat_completions', 'responses'], route.entry_protocols, ['Chat Completions', 'Responses']],
+    [['chat_completions', 'messages'], ['messages'], ['Claude Messages']],
+  ]) {
+    configs[0].models[0].protocols = declared;
+    route.entry_protocols = enabled;
+    admin.renderRoutes();
+    const meta = between(nodes.get('modelRoutesList').innerHTML, '<div class="route-meta">', '</div>');
+    assert.deepEqual([...meta.matchAll(/<span class="tag">([^<]+)<\/span>/g)].map(m => m[1]), [...expected, '已启用']);
+    admin.openRouteTest('changing');
+    assert.deepEqual([...nodes.get('routeTestProtocol').innerHTML.matchAll(/<option[^>]*>([^<]+)<\/option>/g)].map(m => m[1]), expected);
+  }
+});
+
+test('route protocol badges use normalized backend declarations when raw model protocols are absent', () => {
+  const { admin, nodes, configs } = poolHarness();
+  delete configs[0].models[0].protocols;
+  admin.state.routes = { models: [{ id: 'defaulted', targets: [{ id: 'go', config_id: 'go', model: 'paid-model' }] }],
+    route_status: { defaulted: { chat_completions: { targets: [{ target_id: 'go', supported_protocols: ['chat_completions'], available: false, reason: 'quota_exhausted' }] } } } };
+  admin.renderRoutes();
+  const meta = between(nodes.get('modelRoutesList').innerHTML, '<div class="route-meta">', '</div>');
+  assert.match(meta, /Chat Completions/);
+  assert.doesNotMatch(meta, /Responses|Claude Messages/);
+});
+
+test('a route with no supported enabled protocol cannot launch a fabricated Chat test', async () => {
+  const { admin, nodes, calls } = poolHarness();
+  admin.state.routes = { models: [{ id: 'missing-model', entry_protocols: ['chat_completions', 'responses', 'messages'], targets: [{ id: 'missing', config_id: 'go', model: 'gone' }] }] };
+  admin.renderRoutes();
+  const meta = between(nodes.get('modelRoutesList').innerHTML, '<div class="route-meta">', '</div>');
+  assert.match(meta, /暂无支持的原生协议/);
+  assert.doesNotMatch(meta, /Chat Completions|Responses|Claude Messages/);
+  admin.openRouteTest('missing-model');
+  assert.doesNotMatch(nodes.get('routeTestProtocol').innerHTML, /value="chat_completions"/);
+  assert.equal(nodes.get('routeTestRunButton').disabled, true);
+  assert.equal(nodes.get('routeTestAllButton').disabled, true);
+  nodes.get('routeTestInput').value = 'must not send';
+  nodes.get('routeTestProtocol').value = 'chat_completions';
+  await admin.runRouteTest('route');
+  assert.equal(calls.length, 0);
 });
 
 test('pool editor reuses saved credentials, hides editable model lists, and saves fixed free', async () => {

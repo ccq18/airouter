@@ -1354,8 +1354,27 @@
       renderRouteTargets();
     }
 
+    function targetProtocols(route, target) {
+      // The server's declaration includes model defaults used by actual routing.
+      // Availability/quota is transient and must not change supported protocols.
+      for (const protocol of PROTOCOLS) {
+        const status = state.routes?.route_status?.[route.id]?.[protocol]?.targets
+          ?.find(item => item.target_id === target.id);
+        if (Array.isArray(status?.supported_protocols)) return status.supported_protocols;
+      }
+      const model = getAccountOptions().find(account => account.id === target.config_id)
+        ?.models.find(model => model.id === target.model);
+      return model?.protocols || [];
+    }
+
+    function routeProtocols(route) {
+      if (!route) return [];
+      const supported = new Set((route.targets || []).flatMap(target => targetProtocols(route, target)));
+      return (route.entry_protocols || PROTOCOLS).filter(protocol => supported.has(protocol));
+    }
+
     function statusForRoute(route) {
-      const protocol = (route.entry_protocols || ['chat_completions'])[0];
+      const protocol = routeProtocols(route)[0];
       return state.routes?.route_status?.[route.id]?.[protocol] || null;
     }
 
@@ -1368,7 +1387,7 @@
             <div>
               <h3 class="route-id">${escapeHtml(route.id)}</h3>
               <div class="route-meta">
-                ${(route.entry_protocols || []).map(protocol => `<span class="tag">${escapeHtml(protocolLabel(protocol))}</span>`).join('')}
+                ${routeProtocols(route).map(protocol => `<span class="tag">${escapeHtml(protocolLabel(protocol))}</span>`).join('') || '<span class="tag">暂无支持的原生协议</span>'}
                 <span class="tag">${route.enabled === false ? '已停用' : '已启用'}</span>
               </div>
             </div>
@@ -1380,7 +1399,6 @@
           </div>
           <ol class="route-chain">
             ${targets.map((target, index) => {
-              const model = getAccountOptions().find(account => account.id === target.config_id)?.models.find(model => model.id === target.model);
               const targetStatus = (status?.targets || []).find(item => item.target_id === target.id);
               const selected = targetStatus?.selected;
               const available = targetStatus?.available;
@@ -1391,7 +1409,7 @@
                   <div class="route-candidate-copy">
                     <strong>${escapeHtml(accountLabel(target.config_id))}</strong>
                     <span class="mono">${escapeHtml(target.model)}</span>
-                    <span class="tag">支持协议：${escapeHtml((model?.protocols || []).map(protocolLabel).join('、') || '未声明')}</span>
+                    <span class="tag">支持协议：${escapeHtml(targetProtocols(route, target).map(protocolLabel).join('、') || '未声明')}</span>
                     ${!selected && targetStatus?.reason ? `<span class="quota-detail">${escapeHtml(statusLabel(targetStatus.reason))}</span>` : ''}
                   </div>
                   <div class="route-candidate-flags">
@@ -1431,15 +1449,16 @@
     function renderTestResults() {
       if (!dom.testResults) return;
       const { running, stopped, items } = state.testRun;
-      dom.testRouteButton.disabled = running;
-      dom.testCandidatesButton.disabled = running || !state.testRoute?.targets?.length;
+      const hasProtocol = routeProtocols(state.testRoute).length > 0;
+      dom.testRouteButton.disabled = running || !hasProtocol;
+      dom.testCandidatesButton.disabled = running || !hasProtocol || !state.testRoute?.targets?.length;
       dom.testInput.disabled = running;
-      dom.testProtocol.disabled = running;
+      dom.testProtocol.disabled = running || !hasProtocol;
       dom.testStopButton.hidden = !running;
       const completed = items.filter(item => item.state === 'done').length;
       dom.testStatus.textContent = stopped ? `已停止，完成 ${completed} / ${items.length} 项。` : running
         ? `正在测试 ${Math.min(completed + 1, items.length)} / ${items.length} 项…`
-        : items.length ? `测试完成，共 ${completed} 项。` : '输入内容后选择测试方式。';
+        : items.length ? `测试完成，共 ${completed} 项。` : hasProtocol ? '输入内容后选择测试方式。' : '暂无支持的原生协议，请检查候选模型及入口设置。';
       dom.testResults.innerHTML = items.map((item, index) => {
         const result = item.result;
         const label = item.state === 'waiting' ? '等待中' : item.state === 'running' ? '请求中' : item.state === 'cancelled' ? '已取消'
@@ -1467,8 +1486,9 @@
       state.testRun = { running: false, stopped: false, items: [] };
       dom.testRouteId.textContent = route.id;
       dom.testInput.value = '';
-      const protocols = route.entry_protocols?.length ? route.entry_protocols : ['chat_completions'];
-      dom.testProtocol.innerHTML = protocols.map(protocol => `<option value="${escapeHtml(protocol)}">${escapeHtml(protocolLabel(protocol))}</option>`).join('');
+      const protocols = routeProtocols(route);
+      dom.testProtocol.innerHTML = protocols.map(protocol => `<option value="${escapeHtml(protocol)}">${escapeHtml(protocolLabel(protocol))}</option>`).join('')
+        || '<option value="">暂无支持的原生协议</option>';
       renderTestResults();
       openLayer('routeTestDialog');
       dom.testInput.focus();
@@ -1476,6 +1496,10 @@
 
     function runRouteTest(mode) {
       if (state.testRun.running || !state.testRoute) return;
+      if (!routeProtocols(state.testRoute).includes(dom.testProtocol.value)) {
+        dom.testStatus.textContent = '没有匹配的原生协议，请检查候选模型及入口设置。';
+        return;
+      }
       const input = dom.testInput.value;
       if (!input.trim()) {
         dom.testStatus.textContent = '请先输入要发送给模型的内容。';
