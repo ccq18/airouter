@@ -450,3 +450,25 @@ test('account identity replacement invalidates private response bindings', () =>
   contexts.forgetConfig('old-account');
   assert.equal(contexts.resolve('resp-fixture', 'caller'), null);
 });
+
+test('a reasoning-bound ordinary route cannot switch to a different backend model', () => {
+  const router = createRouter();
+  const valid = router.select('public-model', 'chat_completions', { onlyTargetId: 't-glm', onlyBackendModel: 'glm-5.3' });
+  assert.equal(valid.lease.target.model, 'glm-5.3'); valid.lease.release();
+  const mismatch = router.select('public-model', 'chat_completions', { onlyTargetId: 't-glm', onlyBackendModel: 'another-model' });
+  assert.equal(mismatch.lease, null); assert.ok(mismatch.skipped.some(item => item.reason === 'context_bound_to_other_model'));
+});
+
+test('a reasoning-bound pool filters concrete models before its attempt limit and never changes member', () => {
+  const { createRuntimeConfigs } = require('../app/openai-config');
+  const parsed = { configs: [{ id: 'pool', type: 'apikey', preset: 'openrouter-free', apikey: 'fixture-pool-key', pool: { max_attempts: 1 } }],
+    routing: { max_attempts: 2, models: [{ id: 'any', entry_protocols: ['chat_completions'], targets: [{ id: 'outer', config_id: 'pool', model: 'free', protocol: 'chat_completions' }] }] } };
+  let models = ['a', 'b', 'c'].map(id => ({ id, protocols: ['chat_completions'], capabilities: {}, context_window: 32000 }));
+  const poolEngine = { getCandidates: () => models, fingerprint: () => 'identity', isCurrent: () => true };
+  const router = createModelRouter({ parsed, runtimeConfigs: createRuntimeConfigs(parsed), poolEngine });
+  const bound = router.select('any', 'chat_completions', { onlyTargetId: 'outer', onlyBackendModel: 'b' });
+  assert.equal(bound.lease.target.model, 'b'); assert.equal(bound.lease.outerTargetId, 'outer'); bound.lease.release();
+  models = models.filter(model => model.id !== 'b');
+  assert.equal(router.select('any', 'chat_completions', { onlyTargetId: 'outer', onlyBackendModel: 'b' }).lease, null);
+  assert.equal(router.select('any', 'chat_completions').lease.target.model, 'a', 'ordinary routing remains priority based');
+});

@@ -1167,7 +1167,7 @@ test('200 JSON errors and pre-output SSE errors fail over without empty success'
       messages: [{ role: 'user', content: 'policy' }],
     }),
   });
-  assert.equal(response.status, 400);
+  assert.equal(response.status, 403);
   assert.equal(fakeB.stats.chatRequests.length, beforePolicyB);
 
   const beforeMidB = fakeB.stats.chatRequests.length;

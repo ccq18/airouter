@@ -86,6 +86,7 @@ function createRouteTestHandler(options) {
     const testContext = createRoutingContextStore();
     const handler = createExplicitRoutingHandler({
       ...forwarding, entryProtocol: protocol,
+      preserveNativeJson: false,
       getRouter: () => router,
       ...(target ? { getQuotaEngine: () => null } : {}),
       getContextStore: () => testContext,

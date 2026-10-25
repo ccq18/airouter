@@ -110,16 +110,16 @@ function mapCrossProtocolControls({ entryProtocol: from, targetProtocol: to, bod
     if (!object(message)) return;
     const path = (from === 'responses' ? 'input' : 'messages') + `[${index}]`;
     if (own(message, 'name') && message.type !== 'function_call') reject(path + '.name', '参与者名称是模型可见语义，目标没有等价字段');
-    if (from === 'chat_completions') keys(message, ['role', 'content', 'tool_calls', 'tool_call_id', 'refusal'], path);
+    if (from === 'chat_completions') keys(message, ['role', 'content', 'tool_calls', 'tool_call_id', 'refusal', 'reasoning_content', 'reasoning', 'reasoning_text', 'reasoning_details', 'airouter_upstream_reasoning'], path);
     else if (from === 'messages') keys(message, ['role', 'content'], path);
     else {
-      const allowed = message.type === 'function_call' ? ['type', 'id', 'call_id', 'name', 'arguments', 'status'] : message.type === 'function_call_output' ? ['type', 'id', 'call_id', 'output', 'status'] : ['type', 'id', 'role', 'content', 'status'];
+      const allowed = message.type === 'reasoning' ? ['type', 'id', 'content', 'summary', 'encrypted_content', 'status', 'airouter_upstream_reasoning'] : message.type === 'function_call' ? ['type', 'id', 'call_id', 'name', 'arguments', 'status'] : message.type === 'function_call_output' ? ['type', 'id', 'call_id', 'output', 'status'] : ['type', 'id', 'role', 'content', 'status'];
       keys(message, allowed, path);
     }
     if (Array.isArray(message.content)) message.content.forEach((part, partIndex) => {
       if (!object(part)) return;
       const partPath = `${path}.content[${partIndex}]`;
-      const fields = { text: ['type', 'text', 'cache_control', 'prompt_cache_breakpoint'], input_text: ['type', 'text', 'prompt_cache_breakpoint'], output_text: ['type', 'text', 'annotations', 'logprobs', 'prompt_cache_breakpoint'], image_url: ['type', 'image_url', 'prompt_cache_breakpoint'], input_image: ['type', 'image_url', 'detail', 'file_id', 'prompt_cache_breakpoint'], image: ['type', 'source', 'cache_control'], refusal: ['type', 'refusal'], tool_use: ['type', 'id', 'name', 'input', 'cache_control'], tool_result: ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'] }[part.type];
+      const fields = { reasoning_text: ['type', 'text'], thinking: ['type', 'thinking', 'signature', 'airouter_upstream_reasoning'], redacted_thinking: ['type', 'data', 'airouter_upstream_reasoning'], text: ['type', 'text', 'cache_control', 'prompt_cache_breakpoint'], input_text: ['type', 'text', 'prompt_cache_breakpoint'], output_text: ['type', 'text', 'annotations', 'logprobs', 'prompt_cache_breakpoint'], image_url: ['type', 'image_url', 'prompt_cache_breakpoint'], input_image: ['type', 'image_url', 'detail', 'file_id', 'prompt_cache_breakpoint'], image: ['type', 'source', 'cache_control'], refusal: ['type', 'refusal'], tool_use: ['type', 'id', 'name', 'input', 'cache_control'], tool_result: ['type', 'tool_use_id', 'content', 'is_error', 'cache_control'] }[part.type];
       if (fields) keys(part, fields, partPath);
       else reject(partPath + '.type', `未实现内容块 ${part.type} 的完整跨协议转换（文件、音频、私有状态等需要同协议）`);
       if (object(part.image_url)) keys(part.image_url, ['url', 'detail'], partPath + '.image_url');

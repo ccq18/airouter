@@ -186,3 +186,112 @@ Node 22.19.0：`npm run test:protocol` 为 **247/247**，完整 `npm test` 为 *
 - 服务端存储/续接沿用第 6.3 节未验证边界；本轮没有改造 Conversations、后台任务管理、持久本地会话，也没有放宽账号身份、路由代际、TTL/重启/迟到响应保护。
 
 脱敏真实结果保留于 `/tmp/airouter-protocol-followup-live/supplier-results.json` 与 `boundary-results.json`。部署仍必须保持持久配置校验值；线上应分别记录原生成功和明确受限路径，不能把可控测试通过当作供应商全部兼容。
+
+## 8. 接口边界契约测试补充
+
+本节是测试补充，保留前文历史执行结果；不把测试注册完整等同于实现已通过。入口为 `test/protocol-boundary-contract.integration.test.js`，已由 `npm run test:protocol` 和完整 `npm test` 包含。测试启动真实 Airouter 子进程，使用临时配置、随机回环端口和受控 HTTP 供应商；只检查客户端实际响应和供应商实际收到的请求，不导入业务转换函数、生产 SSE 解析器或路由实现来生成预期。
+
+### 8.1 必须无空项的核心矩阵
+
+箭头为客户端入口到后端协议。下表每格都有六个独立语义用例：文本及完整缓存读写统计、拒绝、截断、未报告 usage、部分 usage、两轮并行工具及逆序结果配对。
+
+| 入口 → 后端 | JSON → JSON | JSON → SSE | SSE → JSON | SSE → SSE |
+| --- | --- | --- | --- | --- |
+| Chat → Chat | 6 项 | 6 项 | 6 项 | 6 项 |
+| Chat → Responses | 6 项 | 6 项 | 6 项 | 6 项 |
+| Chat → Messages | 6 项 | 6 项 | 6 项 | 6 项 |
+| Responses → Chat | 6 项 | 6 项 | 6 项 | 6 项 |
+| Responses → Responses | 6 项 | 6 项 | 6 项 | 6 项 |
+| Responses → Messages | 6 项 | 6 项 | 6 项 | 6 项 |
+| Messages → Chat | 6 项 | 6 项 | 6 项 | 6 项 |
+| Messages → Responses | 6 项 | 6 项 | 6 项 | 6 项 |
+| Messages → Messages | 6 项 | 6 项 | 6 项 | 6 项 |
+
+共 216 项，另有 `MATRIX coverage audit` 检查每一方向、格式和语义的注册键，禁止重复键并防止空项。每个工具用例实际发送两轮 HTTP 请求，检查最终回答、call ID、函数名、参数原字符串/对象、结果顺序和尝试次数；不是单次构造历史后只看 200。
+
+### 8.2 核心矩阵之外的专项边界
+
+| 用例前缀 | 覆盖内容 |
+| --- | --- |
+| `HTTP boundary` | 原生完整请求/响应对象、多 choices、工具索引、概率、未知扩展，以及原生 Responses 的概率与 sequence 事件 |
+| `REQUEST` / `FIELD` | 采样、预算、metadata、缓存控制、结构化输出、思考控制、stop、默认值、未知字段；逐字段的保留/映射/发送前拒绝；auto/none/required/指定函数、strict、并行开关；图片与指令顺序；文件和音频的原生保留或跨协议拒绝；Schema 中的应用字段不能误当 API 控制 |
+| `INPUT` / `AUTH` | 字符串/内容块、Responses 简写及显式 message、developer 与中途 system；非法 JSON、未知公开模型、无效入口 Key；错误不得调用上游或泄露其凭证 |
+| `PROBABILITY` | Chat/Responses 四个协议对 × 四种格式路径，检查 token、bytes、logprob、top_logprobs 和请求控制；概率只发一次；Messages 无等价请求能力时明确拒绝 |
+| `STATE` / `REJECTION` | store 的保留或拒绝；未归属 previous response/conversation；三种私有历史形式不得跨协议默默删除；未知输出项不能伪造 SSE 生命周期。合法原生存储、调用者/账号身份、代际、TTL、重启和迟到结果继续由 `responses-state.integration.test.js` 等既有专项测试负责 |
+| `ID` | 九种协议对 × 四种格式路径，每格依次使用七个含不同前缀、标点、Unicode 的上游 ID；不同响应不碰撞，单流 ID 一致，原生 ID 不改写 |
+| `TOOL` | 无效 JSON 参数和不安全整数：OpenAI 原始字符串保持精确，Messages 不可无损表示时明确失败；工具结果 is_error 不得丢失 |
+| `FAULT` | 九种协议对分别验证 429 切换、403 策略拒绝、HTTP 200 内错误、可见输出后错误、clean EOF、socket 异常断开；配置真实后备，检查调用次数和实际落点，不允许绕过策略或在已输出后重放 |
+| `CANCEL` | 九种协议对都取消真实 HTTP 流，确认供应商连接被中止；随后新请求仍选择原主账号，取消不能误冷却 |
+| `NATIVE precision` | 同协议未知 JSON 扩展中的大整数不得因模型字段改写而被舍入成另一个值 |
+| `PRODUCT acceptance` | 已观察的 DeepSeek 默认 reasoning_content、Responses 加密 reasoning、Claude 缓存统计形态；另有明确标记为合成的 Claude thinking/signature 示例。普通使用要求成功、最终答案不混入思考/密文、源数据单独保留，不以 502 作为成功验收 |
+
+原样 JSON/SSE 透传比较完整对象/事件；JSON/SSE 格式互转检查必要生命周期、字段内容、顺序、终态和次数，允许合法的分片差异与未完成状态占位。Claude 流可能直到终态才声明拒绝，因此已经发出的文字不能撤回，但必须补明确拒绝语义且不重复文本。图片内嵌样例使用有效 PNG，并依据 [Claude 图片输入契约](https://platform.claude.com/docs/en/build-with-claude/vision) 区分 base64 数据与在线 URL。
+
+### 8.3 不适用项与证据边界
+
+Responses 没有 stop 请求字段，Messages 没有 OpenAI 标准概率请求字段：分别验证相关跨协议拒绝，不用无断言的占位测试假装覆盖。未实现能力必须显式拒绝或跳过候选；普通已公开路由的日常请求失败则属于 `PRODUCT acceptance` 失败，两类结果不能合并宣传为兼容成功。
+
+样本 `test/fixtures/supplier-response-shapes.json` 明确记录来源：部分结构及 usage 数字来自主会话的脱敏观测，ID、回答、思考和密文为合成值；Claude 签名思考例也是合成协议样例。它们不是完整供应商原始录包，不证明新的真实调用、实际缓存命中或全部供应商/模型均支持。UTF-8 的每字节/固定种子分片、配置/额度/免费池/状态竞争等专项继续纳入既有完整测试门禁。
+
+### 8.4 本次测试补充的运行结果
+
+2026-10-25，Node 22.19.0：接口契约文件 **778 项，776 通过、2 失败、零跳过**；完整 `npm test` **1428 项，1418 通过、10 失败、零跳过**。两项接口失败是 Responses `store:true` 指向 Chat/Messages：请求没有发送到供应商，但返回 503 `no_available_upstream`，预期应为请求语义不支持的 400，不能伪装成上游暂时不可用。完整测试另有八项来自既有私有状态/思考及故障切换用例，留待主会话核对实现和有效契约，不在本次测试补充中改业务代码或降低断言。
+
+日志分别为 `/tmp/airouter-interface-matrix-final.log` 与 `/tmp/airouter-interface-full-final.log`。运行前后核对 `app/*.js`、`openai.js`、本契约测试及样本的 SHA256，确认期间未变化，清单为 `/tmp/airouter-interface-final-before.json` 与 `after.json`。这是共享工作区当时源码的自动化快照，不是一次提交、部署或真实供应商验收。
+
+## 9. 默认思考内容及来源状态传输修复
+
+本节为 2026-10-25 当前实现，更新第 7.4 节当时仍返回 502 的默认 reasoning 边界；前述历史失败证据保留。普通 DeepSeek 请求不再因出现公开 `reasoning_content` 而被整体拒绝。不通过关闭思考、删除思考字段、混入最终回答或切换供应商规避问题。
+
+### 9.1 字段与来源契约
+
+| 来源内容 | 当前表示与回传 | 限制 |
+| --- | --- | --- |
+| Chat 文本 `reasoning_content` / 字符串 `reasoning` / `reasoning_text` | 独立 canonical reasoning；Responses 使用 `content[].reasoning_text`，Messages 使用独立 thinking 与 `airouter-text-v1:` 公开标记；Chat 保留原别名 | 不把完整文本伪称摘要；别名冲突明确拒绝；公开文本不绑定账号，仍可正常优先级切换 |
+| Responses reasoning，包括 `summary`、`content`、`encrypted_content` | 原生保持原始字段；跨协议保留源块并签发 `airouter-state-v1:` 随机句柄 | 密文不解密；只恢复给原来源，不能作为另一供应商的有效私有状态 |
+| Messages thinking/signature、redacted_thinking | 保留原块、文本和签名；跨协议输出可验证的来源句柄 | 网关签名标记不是 Claude 签名，绝不向原生 Claude 伪造签名；保持原有块顺序 |
+| Chat `reasoning_details` | 识别 text、summary、encrypted 的供应商扩展，保留 id/format/index 等来源字段 | `airouter-bridge-v1` 是明确网关扩展，不宣称为 OpenAI Chat 标准 |
+
+跨协议完整源字段单独放在 `airouter_upstream_reasoning`，用于保真及诊断，不混入答案。客户端应回传完整 reasoning/assistant 内容；公开 provenance 扩展可省略，但若回传则验证其与来源一致。不透明句柄必须保留。删除句柄或仅回传答案不能保证私有多轮继续可用。
+
+协议依据：[DeepSeek thinking/tool 历史要求](https://api-docs.deepseek.com/guides/thinking_mode/)、[Responses 输入输出结构](https://developers.openai.com/api/reference/resources/responses/methods/create)、[Responses 流事件](https://developers.openai.com/api/reference/resources/responses/streaming-events)、[Claude thinking](https://platform.claude.com/docs/en/build-with-claude/thinking)、[OpenRouter reasoning 扩展](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。网关标记及来源校验是 Airouter 自身契约，不是供应商原生能力。
+
+### 9.2 生命周期、路由与状态保护
+
+- `app/reasoning-content.js` 处理字段保留和请求还原；`app/protocol-bridge.js` 处理 JSON/SSE、文本/摘要/工具顺序及完成时状态。思考增量立即输出；cipher/signature 只采用完整完成块，不能把 incomplete added 快照当成最终状态。
+- 原生 Responses JSON→SSE 支持 reasoning item 的 added/done、summary part/text 生命周期、reasoning text delta/done，最终 item 与密文完整保留，sequence 连续。未知输出项仍明确拒绝。原生格式互转若会舍入数字（包括扩展中的大整数/精细小数、溢出/下溢）明确拒绝，原始 JSON→JSON / SSE→SSE 保留数字原文。验收已从旧“必须 502”升级为完整 200、逐项事件顺序/字段/密文/一次调用断言。
+- `app/reasoning-transport.js` 复用原上下文存储，另设有界内存记录：默认最多 1000 条、8 MiB，沿用上下文 TTL。句柄绑定调用者、公开路由、入口、原账号、具体后端模型/协议、前置消息/system/tools、块分组和顺序；免费池同时绑定具体成员与凭证来源。pending 句柄在合法完成前不可回传。
+- 重启、TTL、账号/路由变化、篡改、混合来源、块重排均拒绝。`app/credential-context.js` 同时失效凭证引用的依赖池，防止 A→B→A 后旧状态或迟到请求复活；相同原生密文出现不同来源后持续标为歧义，重复观察不能清除。
+- 公开思考历史继续按普通候选优先级选路；携带已验证不透明历史时仅能选择原目标/成员。没有给 `auto` 添加特殊逻辑，免费池的目录、资格、健康和耗尽恢复规则不变。
+- 这与服务端 `previous_response_id` 分开：完整加密历史可在 `store:false` 下原样手动回传；它不建立服务端保存绑定，不扩大 conversation、后台任务、持久续接或跨账号迁移能力。显式 reasoning effort 等控制仍受既有同协议要求约束。
+
+### 9.3 复现与自动化证据
+
+| 确认问题 | 修复前证据 | 修复后断言与位置 |
+| --- | --- | --- |
+| 普通 Chat 思考导致跨协议整体拒绝；JSON/SSE 历史回传缺口 | `reasoning-content.test.js` 初始 6 项失败；实际 HTTP 回归出现默认思考/opaque 的 502 | helper、`protocol-reasoning.integration.test.js` 九条路径/格式转换、源块精确回传、工具结果配对、不同调用者零上游调用 |
+| 思考流被缓冲到答案；来源明细缺失 | async HTTP 回归 3 项中 2 项先失败；provenance 回归先失败 | `protocol-reasoning-stream.test.js` 和 HTTP 回归检查先到达思考、晚到密文、顺序、完成、断流不激活；用户 `PRODUCT acceptance` 检查源命名字段独立存在 |
+| 凭证引用池 A→B→A、来源歧义被第三次观察清除 | `reasoning-transport-security.test.js` 3 项先失败，退出码 1 | 相同 3 项转绿；另补原生 Chat SSE 按 choice 注册完整 opaque 的先红后绿，不提前激活 |
+| base64 data URL 错发成 Claude URL | 用户相关 HTTP 21 项中 5 项先失败，含图片及精度缺口 | 三入口实际请求体检查 `source.type=base64`、media_type、data |
+| 同协议 JSON 模型改写舍入扩展大整数 | 同上，原始响应 `9007199254740993` 被舍入 | `app/json-wire.js` 只替换约定 model token；原生 SSE 同样保留 data JSON 的数字词法；`json-wire.test.js` 验证整数、小数、指数、嵌套和转义，用户三协议 HTTP 精度验收 |
+| 同协议 SSE 扩展数字舍入 | 三协议 raw SSE HTTP 回归均先失败（`airouter-native-sse-precision-red.log`，退出码 1） | 同样使用 token 改写，event 保留，多行 data 按 SSE 重新加前缀；三项修复后通过；另有六项 JSON↔SSE 大数互转先红后绿，不能无损重建时明确 502，不返回舍入后的成功 |
+| 200 错误载荷中的策略拒绝分类 | 严格 403 HTTP 新回归先失败，退出码 1 | `content_policy_violation`→403，不重试/不误冷却；其他错误分类保持原规则 |
+| store:true 跨协议被粗能力检查分类为 503 | 用户 HTTP 两项确实失败 | 先运行共同转换预检，400 附 store 字段原因，零供应商调用，不改变请求保存语义 |
+
+日志为本机 `/tmp/airouter-reasoning-*.log`。历史负向断言只在本轮确实实现对应能力后升级为完整内容和无重放正向验收；audio、旧 function_call、对象型私有 reasoning、未知输出类型、无归属历史继续验证明确拒绝。用户补充的 fixtures 与矩阵保持独立预期，不用转换器生成预期。
+
+### 9.4 真实供应商验证及未验证边界
+
+本地当前代码用服务器最新配置的受保护临时副本验证，未修改线上账号、路由、凭证。证据在 `/tmp/airouter-reasoning-live/` 的脱敏 JSON；临时凭证副本在交付前删除。
+
+- `supplier-final-results.json`：Go DeepSeek 在 Chat、Responses、Messages 三入口的 JSON/SSE 均成功，最终答案为 `中文🙂`，思考独立保留；Responses 和 Messages 工具两轮都原样携带第一轮思考并得到 `30`。模型有时不返回思考，不能要求每次必须存在。
+- Go 原生 gpt-6-luna Responses 经 Chat/Messages 的工具两轮也成功。但这些工具调用实际没有返回加密 reasoning，因此不把它们计作真实跨协议密文回传证据。
+- `native-state-results.json`：原生 Responses 显式 low effort + encrypted include，第一轮收到 1572 字符密文；`store:false` 完整手动历史第二轮得到 `1592`。使用第一轮 ID 作 `previous_response_id` 返回 409，未伪造保存成功。
+- `supplier.log` 保留首个缓存实验：输入 3815、首轮 cached_tokens=0，重复 cached_tokens=3712；后续复验仍为 3712。直接报告供应商 usage，不由回答成功推断缓存，不把读取再次加进 prompt 总数。
+- `auto` 通过普通 Responses 入口真实请求成功。没有为验收人为耗尽付费额度、篡改线上健康或强制切换付费账号；耗尽接替、池内故障切换及高优先级恢复回切由受控 HTTP/免费池回归证明。
+
+真实跨协议 opaque 句柄回传、Claude 真实签名多轮及所有供应商的概率/格式组合仍未完成全面真实验证；相应转换和归属规则由自动化证明。持久服务端续接、conversation、后台任务、重启后的本地句柄恢复仍未实现。外部 OpenCode CLI 未在本轮启动，遵守当前用户禁止调用外部 AI 工具的约定；本轮使用真实 HTTP 客户端验证普通 `auto` 路由。
+
+### 9.5 当前交付门禁
+
+Node v22.19.0；`npm run test:protocol` **1188/1188**，完整 `npm test` **1440/1440**，真实退出码均为 0，无 skip/cancel/todo。日志分别为 `/tmp/airouter-reasoning-protocol-final.log` 与 `/tmp/airouter-reasoning-full-final.log`。专项命令已包含新增的 reasoning、来源安全、HTTP 与原始 JSON token 测试，并继续包含原有三协议、状态、取消、免费池和恢复切回回归。

@@ -1,4 +1,5 @@
 const { isFreePool, normalizePoolOptions } = require('./free-pool-config');
+const { randomBytes } = require('node:crypto');
 const {
   parseRoutingConfig,
   resolveRoute,
@@ -160,25 +161,85 @@ function createRoutingContextStore(options = {}) {
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   const ttlMs = Number.isFinite(options.ttlMs) ? options.ttlMs : DEFAULT_CONTEXT_TTL_MS;
   const bindings = new Map();
+  // Transported provider reasoning is not a saved Responses resource. Keep a
+  // separate namespace and budget so store:false never gains server continuation semantics.
+  const reasoning = new Map();
+  const reasoningMaxEntries = Number.isInteger(options.reasoningMaxEntries) && options.reasoningMaxEntries > 0 ? options.reasoningMaxEntries : 1000;
+  const reasoningMaxBytes = Number.isFinite(options.reasoningMaxBytes) && options.reasoningMaxBytes > 0 ? options.reasoningMaxBytes : 8 * 1024 * 1024;
+  let reasoningBytes = 0;
   const accounts = new Map();
   let lifecycle = 0;
   const targetEpochs = new Map();
   let targets = new Map();
   const targetKey = (publicModel, targetId) => JSON.stringify([publicModel, targetId]);
   const epoch = (configId, publicModel, targetId) => `${lifecycle}:${accounts.get(configId) || 0}:${targetEpochs.get(targetKey(publicModel, targetId)) || 0}`;
+  const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+  const reasoningKey = (namespace, id) => `${namespace}\u0000${id}`;
+  const reasoningCurrent = record => record.expected_epoch === epoch(record.config_id, record.public_model, record.target_id);
+  function removeReasoning(key) {
+    const entry = reasoning.get(key);
+    if (entry) { reasoningBytes -= entry.bytes; reasoning.delete(key); }
+  }
   function prune() {
     for (const [id, binding] of bindings) if (binding.expiresAt <= now()) bindings.delete(id);
+    for (const [key, entry] of reasoning) if (entry.record.expiresAt <= now() || !reasoningCurrent(entry.record)) removeReasoning(key);
+  }
+  function registerReasoning(namespace, id, details) {
+    id = normalizeString(id);
+    if (!id || !details || typeof details !== 'object') return null;
+    const currentEpoch = epoch(details.config_id, details.public_model, details.target_id);
+    if (details.expected_epoch !== undefined && details.expected_epoch !== currentEpoch) return null;
+    prune();
+    const timestamp = now();
+    const record = { id, ...(namespace === 'issued' ? { token: id } : { native_key: id }),
+      config_id: normalizeString(details.config_id), target_id: normalizeString(details.target_id),
+      model: normalizeString(details.model), protocol: normalizeString(details.protocol),
+      public_model: normalizeString(details.public_model), entry_protocol: normalizeString(details.entry_protocol),
+      auth_hash: normalizeString(details.auth_hash), part: clone(details.part),
+      viewHash: normalizeString(details.viewHash), prefixHash: normalizeString(details.prefixHash),
+      pool_fingerprint: clone(details.pool_fingerprint), expected_epoch: currentEpoch,
+      pending: namespace === 'issued' && details.pending === true,
+      created_at: timestamp, expiresAt: timestamp + ttlMs };
+    // Reserve the active form's extra byte (false vs true) before admission.
+    const bytes = Buffer.byteLength(JSON.stringify({ ...record, pending: false }));
+    if (bytes > reasoningMaxBytes) return null;
+    const key = reasoningKey(namespace, id);
+    removeReasoning(key);
+    while (reasoning.size >= reasoningMaxEntries || reasoningBytes + bytes > reasoningMaxBytes) removeReasoning(reasoning.keys().next().value);
+    reasoning.set(key, { record, bytes }); reasoningBytes += bytes;
+    return clone(record);
+  }
+  function resolveReasoning(namespace, id, allowPending = false) {
+    prune();
+    const entry = reasoning.get(reasoningKey(namespace, normalizeString(id)));
+    if (!entry || (!allowPending && entry.record.pending)) return null;
+    return clone(entry.record);
   }
   return {
     getEpoch: epoch,
     forgetResponse(responseId) { bindings.delete(normalizeString(responseId)); },
+    issueReasoning(details) {
+      let token;
+      do { token = `airouter-state-v1:${randomBytes(32).toString('base64url')}`; } while (reasoning.has(reasoningKey('issued', token)));
+      return registerReasoning('issued', token, details);
+    },
+    resolveReasoning(token) { return resolveReasoning('issued', token); },
+    activateReasoning(token) {
+      const record = resolveReasoning('issued', token, true);
+      if (!record) return null;
+      const entry = reasoning.get(reasoningKey('issued', normalizeString(token)));
+      entry.record.pending = false;
+      return clone(entry.record);
+    },
+    registerNativeReasoning(key, details) { return registerReasoning('native', key, details); },
+    resolveNativeReasoning(key) { return resolveReasoning('native', key); },
     // Keep monotonic tombstones: switching an account or target A -> B -> A
     // must not make a request from the first A current again.
     syncRoutes(parsed) {
       const next = new Map();
       for (const route of parsed.routing?.models || []) {
         for (const target of route.targets || []) next.set(targetKey(route.id, target.id), JSON.stringify([
-          route.enabled !== false, (route.entry_protocols || ['responses', 'chat_completions', 'messages']).includes('responses'),
+          route.enabled !== false, [...(route.entry_protocols || ['responses', 'chat_completions', 'messages'])].sort(),
           target.config_id, target.model, target.protocol,
         ]));
       }
@@ -186,6 +247,7 @@ function createRoutingContextStore(options = {}) {
         if (targets.get(key) === next.get(key)) continue;
         targetEpochs.set(key, (targetEpochs.get(key) || 0) + 1);
         for (const [id, binding] of bindings) if (targetKey(binding.public_model, binding.target_id) === key) bindings.delete(id);
+        for (const [id, entry] of reasoning) if (targetKey(entry.record.public_model, entry.record.target_id) === key) removeReasoning(id);
       }
       targets = next;
     },
@@ -204,11 +266,13 @@ function createRoutingContextStore(options = {}) {
     forgetConfig(configId) {
       accounts.set(configId, (accounts.get(configId) || 0) + 1);
       for (const [id, binding] of bindings) if (binding.config_id === configId) bindings.delete(id);
+      for (const [id, entry] of reasoning) if (entry.record.config_id === configId) removeReasoning(id);
     },
     clear() {
       lifecycle += 1;
       for (const key of new Set([...targets.keys(), ...targetEpochs.keys()])) targetEpochs.set(key, (targetEpochs.get(key) || 0) + 1);
       bindings.clear();
+      reasoning.clear(); reasoningBytes = 0;
     },
     get size() { prune(); return bindings.size; },
   };
@@ -334,8 +398,6 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
     return 'protocol_endpoint_unsupported';
   }
 
-  if (requestCapabilities.storedResponse && (target.protocol !== 'responses' || config.type !== 'apikey')) return 'capability_persistent_responses_unsupported';
-
   const modelCapabilities = configModel.capabilities || {};
   if (requestCapabilities.images && getCapabilityValue(modelCapabilities, 'images') === false) {
     return 'capability_images_unsupported';
@@ -364,6 +426,7 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
       throw error;
     }
   }
+  if (requestCapabilities.storedResponse && (target.protocol !== 'responses' || config.type !== 'apikey')) return 'capability_persistent_responses_unsupported';
   if (target.protocol !== entryProtocol) {
     if (requestCapabilities.reasoning) {
       return 'capability_reasoning_requires_same_protocol';
@@ -519,6 +582,7 @@ function createModelRouter(options = {}) {
     if (!route.entry_protocols.includes(entryProtocol)) return { lease: null, skipped: [], route, error: { code: 'entry_protocol_not_supported' } };
     const excluded = new Set(selectionOptions.excludeTargetIds || []);
     const onlyTargetId = selectionOptions.onlyTargetId || '';
+    const onlyBackendModel = normalizeString(selectionOptions.onlyBackendModel);
     const requestCapabilities = selectionOptions.capabilities || detectRequestCapabilities(entryProtocol, selectionOptions.body || {});
     const attempted = selectionOptions.attemptedTargetIds;
     const skipped = [];
@@ -528,6 +592,9 @@ function createModelRouter(options = {}) {
       if (onlyTargetId && outer.id !== onlyTargetId) {
         skipped.push({ target_id: outer.id, reason: 'context_bound_to_other_target' }); continue;
       }
+      if (!pool && onlyBackendModel && outer.model !== onlyBackendModel) {
+        skipped.push({ target_id: outer.id, config_id: outer.config_id, model: outer.model, reason: 'context_bound_to_other_model' }); continue;
+      }
       // An outer pool consumes one normal route attempt. Its bounded concrete
       // candidates may retry inside that slot; no later outer slot is unlocked.
       if (attempted && attempted.size >= getMaxAttempts(route) && !(pool && attempted.has(outer.id))) continue;
@@ -535,7 +602,7 @@ function createModelRouter(options = {}) {
       const poolUsed = pool ? [...excluded].filter(id => {
         try { const value = JSON.parse(id); return Array.isArray(value) && value[0] === outer.id; } catch (_) { return false; }
       }).length : 0;
-      const models = pool ? (poolEngine?.getCandidates(config, requestCapabilities, selectionOptions.body || {}) || []).filter(model => !excluded.has(JSON.stringify([outer.id, model.id]))).slice(0, Math.max(0, normalizePoolOptions(config.pool).max_attempts - poolUsed)) : [null];
+      const models = pool ? (poolEngine?.getCandidates(config, requestCapabilities, selectionOptions.body || {}) || []).filter(model => (!onlyBackendModel || model.id === onlyBackendModel) && !excluded.has(JSON.stringify([outer.id, model.id]))).slice(0, Math.max(0, normalizePoolOptions(config.pool).max_attempts - poolUsed)) : [null];
       if (!models.length) skipped.push({ target_id: outer.id, config_id: outer.config_id, model: outer.model, protocol: outer.protocol, reason: 'pool_unavailable' });
       for (const model of models) {
         const target = model ? { ...outer, id: JSON.stringify([outer.id, model.id]), model: model.id, pool_target_id: outer.id } : outer;

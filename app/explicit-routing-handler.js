@@ -23,6 +23,8 @@ const {
 })();
 const { normalizeResponsesRequestBody } = require('./responses-defaults');
 const { nativeChatToSse, createNativeChatAccumulator } = require('./native-chat-bridge');
+const { createReasoningSession } = require('./reasoning-transport');
+const { rewriteJsonModels, assertRepresentableJsonNumbers } = require('./json-wire');
 
 const RETRYABLE_STATUS_CODES = new Set([401, 402, 403, 404, 408, 409, 425, 429]);
 const MAX_UPSTREAM_ERROR_BODY_BYTES = 512 * 1024;
@@ -55,7 +57,6 @@ function hasOpaqueServerState(body) {
 
   if (Array.isArray(body.input)) {
     return body.input.some(item => item && typeof item === 'object' && (
-      item.type === 'reasoning' ||
       item.type === 'item_reference' ||
       item.type === 'computer_call_output' ||
       item.type === 'local_shell_call_output'
@@ -78,6 +79,7 @@ function validateResponsesState(body) {
 
 function observeUpstreamState(lease, payload) {
   if (!payload || typeof payload !== 'object') return;
+  lease.reasoningSession?.observe(payload);
   const response = payload.response && typeof payload.response === 'object' ? payload.response : payload;
   if (lease.target.protocol === 'responses' && typeof response.store === 'boolean') lease.responseStorage = response.store;
   const choice = payload.choices?.[0];
@@ -224,6 +226,8 @@ function classifyUpstreamErrorPayload(payload) {
     statusCode = 429;
   } else if (/unauthor|invalid.*(?:api.?key|token)|authentication|auth_failed/.test(text)) {
     statusCode = 401;
+  } else if (/^content_policy_violation$/i.test(errorCode)) {
+    statusCode = 403;
   } else if (/invalid_request|invalid_argument|invalid_prompt|content_policy|content_filter|refusal|policy_violation|context_length/.test(text)) {
     statusCode = 400;
   }
@@ -233,6 +237,7 @@ function classifyUpstreamErrorPayload(payload) {
     code: errorCode,
     metadata,
     statusCode,
+    nonRetryable: /^content_policy_violation$/i.test(errorCode),
   };
 }
 
@@ -277,6 +282,7 @@ function isMeaningfulStreamEntry(entry, entryProtocol) {
       return true;
     }
     const delta = choice.delta || {};
+    if (['reasoning_content', 'reasoning_text', 'reasoning'].some(key => typeof delta[key] === 'string' && delta[key].length > 0) || Array.isArray(delta.reasoning_details) && delta.reasoning_details.length) return true;
     if (typeof delta.content === 'string' && delta.content.length > 0) {
       return true;
     }
@@ -295,6 +301,9 @@ function isMeaningfulStreamEntry(entry, entryProtocol) {
 
   return Boolean(
     entry.event === 'response.refusal.delta' ||
+    entry.event === 'response.reasoning_text.delta' ||
+    entry.event === 'response.reasoning_summary_text.delta' ||
+    entry.event === 'response.output_item.done' && data.item?.type === 'reasoning' ||
     entry.event === 'response.output_text.delta' ||
     entry.event === 'response.function_call_arguments.delta' ||
     entry.event === 'response.output_item.added' && data.item && data.item.type === 'function_call' ||
@@ -360,7 +369,8 @@ function writeSse(res, entry) {
   if (entry.event) {
     res.write(`event: ${entry.event}\n`);
   }
-  res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+  const wire = entry.wireData ?? JSON.stringify(entry.data);
+  res.write(wire.split('\n').map(line => `data: ${line}`).join('\n') + '\n\n');
 }
 
 function consumeStreamToBuffer(response, maxBytes = MAX_UPSTREAM_ERROR_BODY_BYTES) {
@@ -428,6 +438,7 @@ function applyStreamHeaders(res) {
 
 function bindResponseContext(contextStore, entryProtocol, responseId, lease, publicModel, authHash) {
   if (lease && lease.isCurrent && !lease.isCurrent()) return;
+  lease.reasoningSession?.commit();
   if (entryProtocol !== 'responses' || !contextStore || !normalizeString(responseId) ||
       lease.target.protocol !== 'responses' || lease.runtime.type !== 'apikey' ||
       lease.requestedStore === false || lease.responseStorage !== true) {
@@ -451,8 +462,8 @@ function nativeResponsesToSse(payload, publicModel, streamOptions = {}) {
   if (!['completed', 'incomplete', 'failed'].includes(response.status)) throw new UnsupportedProtocolFeatureError('原生 JSON 响应尚未到可表示的终态，不能伪造已完成的流');
   const events = [{ event: 'response.created', data: { type: 'response.created', response: { ...response, status: 'in_progress', output: [], usage: null, ...(Object.hasOwn(response, 'incomplete_details') ? { incomplete_details: null } : {}), ...(Object.hasOwn(response, 'error') ? { error: null } : {}) } } }];
   for (const [output_index, item] of (response.output || []).entries()) {
-    if (!['message', 'function_call'].includes(item.type)) throw new UnsupportedProtocolFeatureError(`output[${output_index}].type: ${item.type} 的原生流式生命周期尚未实现；请保持原生 JSON 或 SSE 透传`);
-    const initial = { ...item, ...(item.status ? { status: 'in_progress' } : {}), ...(item.type === 'message' ? { content: [] } : {}), ...(item.type === 'function_call' ? { arguments: '' } : {}) };
+    if (!['message', 'function_call', 'reasoning'].includes(item.type)) throw new UnsupportedProtocolFeatureError(`output[${output_index}].type: ${item.type} 的原生流式生命周期尚未实现；请保持原生 JSON 或 SSE 透传`);
+    const initial = { ...item, ...(item.status ? { status: 'in_progress' } : {}), ...(item.type === 'message' ? { content: [] } : {}), ...(item.type === 'function_call' ? { arguments: '' } : {}), ...(item.type === 'reasoning' ? { summary: [], ...(Object.hasOwn(item, 'content') ? { content: [] } : {}), ...(Object.hasOwn(item, 'encrypted_content') ? { encrypted_content: null } : {}) } : {}) };
     events.push({ event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index, item: initial } });
     if (item.type === 'message') {
       for (const [content_index, part] of (item.content || []).entries()) {
@@ -470,6 +481,21 @@ function nativeResponsesToSse(payload, publicModel, streamOptions = {}) {
           events.push({ event: `response.${name}.done`, data: { type: `response.${name}.done`, ...common, ...(part.type === 'refusal' ? { refusal: text } : { text, ...logprobs }) } });
         }
         events.push({ event: 'response.content_part.done', data: { type: 'response.content_part.done', ...common, part } });
+      }
+    } else if (item.type === 'reasoning') {
+      for (const [summary_index, part] of (item.summary || []).entries()) {
+        if (part.type !== 'summary_text' || typeof part.text !== 'string') throw new UnsupportedProtocolFeatureError(`output[${output_index}].summary[${summary_index}]: 未知推理摘要类型`);
+        const common = { item_id: item.id, output_index, summary_index };
+        events.push({ event: 'response.reasoning_summary_part.added', data: { type: 'response.reasoning_summary_part.added', ...common, part: { ...part, text: '' } } });
+        events.push({ event: 'response.reasoning_summary_text.delta', data: { type: 'response.reasoning_summary_text.delta', ...common, delta: part.text } });
+        events.push({ event: 'response.reasoning_summary_text.done', data: { type: 'response.reasoning_summary_text.done', ...common, text: part.text } });
+        events.push({ event: 'response.reasoning_summary_part.done', data: { type: 'response.reasoning_summary_part.done', ...common, part } });
+      }
+      for (const [content_index, part] of (item.content || []).entries()) {
+        if (part.type !== 'reasoning_text' || typeof part.text !== 'string') throw new UnsupportedProtocolFeatureError(`output[${output_index}].content[${content_index}]: 未知推理文本类型`);
+        const common = { item_id: item.id, output_index, content_index };
+        events.push({ event: 'response.reasoning_text.delta', data: { type: 'response.reasoning_text.delta', ...common, delta: part.text } });
+        events.push({ event: 'response.reasoning_text.done', data: { type: 'response.reasoning_text.done', ...common, text: part.text } });
       }
     } else if (item.type === 'function_call') {
       const common = { item_id: item.id, output_index };
@@ -622,6 +648,14 @@ function createExplicitRoutingHandler(options = {}) {
     if (req.aborted || res.destroyed || res.writableEnded) return;
 
     let forcedTargetId = '';
+    let forcedBackendModel = '';
+    const reasoningSession = createReasoningSession({ store: getContextStore(), router, route, entryProtocol, body, authHash: requestAuthHash, publicModel });
+    try {
+      const origin = reasoningSession.inspect();
+      if (origin) { forcedTargetId = origin.targetId; forcedBackendModel = origin.model; }
+    } catch (err) {
+      sendProtocolError(res, entryProtocol, err.statusCode || 400, err.code || 'unsupported_protocol_feature', err.message); return;
+    }
     const previousResponseId = entryProtocol === 'responses' ? normalizeString(body.previous_response_id) : '';
     if (previousResponseId) {
       const contextStore = getContextStore();
@@ -657,7 +691,9 @@ function createExplicitRoutingHandler(options = {}) {
         );
         return;
       }
+      if (forcedTargetId && (forcedTargetId !== boundTarget.id || forcedBackendModel !== boundTarget.model)) { sendProtocolError(res, entryProtocol, 409, 'upstream_context_unavailable', 'previous_response_id 与思考状态来自不同来源'); return; }
       forcedTargetId = boundTarget.id;
+      forcedBackendModel = boundTarget.model;
     }
 
     if (entryProtocol === 'responses' && !previousResponseId && hasOpaqueServerState(body)) {
@@ -753,6 +789,7 @@ function createExplicitRoutingHandler(options = {}) {
         capabilities, body, attemptedTargetIds,
         excludeTargetIds: forcedTargetId ? [] : excludeTargetIds,
         onlyTargetId: forcedTargetId,
+        onlyBackendModel: forcedBackendModel,
       });
       lastSkipped = selection.skipped;
 
@@ -780,7 +817,8 @@ function createExplicitRoutingHandler(options = {}) {
       const target = lease.target;
       const targetProtocol = target.protocol;
       lease.requestedStore = body.store;
-      lease.contextEpoch = getContextStore()?.getEpoch?.(lease.config.id, publicModel, lease.target.id);
+      lease.contextEpoch = getContextStore()?.getEpoch?.(lease.config.id, publicModel, lease.outerTargetId || lease.target.id);
+      lease.reasoningSession = reasoningSession.forLease(lease);
 
       try {
       if (previousResponseId && targetProtocol !== 'responses') {
@@ -839,6 +877,7 @@ function createExplicitRoutingHandler(options = {}) {
           body: sourceBody,
           targetModel: target.model,
           stream: targetStream,
+          reasoningTransport: lease.reasoningSession,
         });
 
         if (targetProtocol === 'responses' && runtime && runtime.type === 'token') {
@@ -996,7 +1035,7 @@ function createExplicitRoutingHandler(options = {}) {
             : null;
           const bridge = rewriter
             ? null
-            : createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, includeUsage: entryProtocol === 'chat_completions' ? body.stream_options?.include_usage === true : undefined });
+            : createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, reasoningTransport: lease.reasoningSession, includeUsage: entryProtocol === 'chat_completions' ? body.stream_options?.include_usage === true : undefined });
           let pendingEntries = [];
           let downstreamResponseId = '';
           let sawTerminal = false;
@@ -1065,6 +1104,9 @@ function createExplicitRoutingHandler(options = {}) {
             const entries = rewriter
               ? rewriter.accept(parsed.event, parsed.data)
               : bridge.accept(parsed.event, parsed.data);
+            // Native SSE needs only model identity substitution. Preserve the
+            // original JSON number tokens just as on the native JSON path.
+            if (rewriter && entries.length === 1 && typeof parsed.dataText === 'string') entries[0].wireData = rewriteJsonModels(parsed.dataText, publicModel);
             processEntries(entries);
             if (bridge && bridge.isComplete()) {
               sawTerminal = true;
@@ -1320,7 +1362,7 @@ function createExplicitRoutingHandler(options = {}) {
             reason: descriptor.code || 'upstream_error_payload',
           });
           releaseLease();
-          if (retryable(descriptor.statusCode, lease, descriptor.message)) {
+          if (!descriptor.nonRetryable && retryable(descriptor.statusCode, lease, descriptor.message)) {
             excludeTargetIds.push(target.id);
             lastFailure = { statusCode: descriptor.statusCode, message: descriptor.message, code: descriptor.code };
             continue;
@@ -1332,11 +1374,13 @@ function createExplicitRoutingHandler(options = {}) {
         let entryPayload;
         let canonical;
         try {
+          if (entryProtocol === targetProtocol) assertRepresentableJsonNumbers(responseBody);
           entryPayload = transformResponseForEntry({
             entryProtocol,
             targetProtocol,
             payload: parsedPayload,
             publicModel,
+            reasoningTransport: lease.reasoningSession,
           });
           if (entryProtocol !== targetProtocol) canonical = require('./protocol-bridge').parseTargetResponse(targetProtocol, parsedPayload);
         } catch (err) {
@@ -1353,7 +1397,7 @@ function createExplicitRoutingHandler(options = {}) {
         const entries = entryProtocol === 'responses' && targetProtocol === 'responses'
           ? nativeResponsesToSse(entryPayload, publicModel, body.stream_options) : entryProtocol === 'messages' && targetProtocol === 'messages'
             ? nativeMessagesToSse(entryPayload, publicModel) : entryProtocol === 'chat_completions' && targetProtocol === 'chat_completions'
-              ? nativeChatToSse(entryPayload, publicModel, { includeUsage: body.stream_options?.include_usage === true, includeObfuscation: body.stream_options?.include_obfuscation === true }) : responseToEntrySse(entryProtocol, canonical, publicModel, { includeUsage: entryProtocol === 'chat_completions' ? body.stream_options?.include_usage === true : undefined });
+              ? nativeChatToSse(entryPayload, publicModel, { includeUsage: body.stream_options?.include_usage === true, includeObfuscation: body.stream_options?.include_obfuscation === true }) : responseToEntrySse(entryProtocol, canonical, publicModel, { reasoningTransport: lease.reasoningSession, includeUsage: entryProtocol === 'chat_completions' ? body.stream_options?.include_usage === true : undefined });
         applyStreamHeaders(res);
         committed = true;
         for (const entry of entries) {
@@ -1371,7 +1415,7 @@ function createExplicitRoutingHandler(options = {}) {
       // Non-stream client.
       if (isSse) {
         const parser = createSseEventParser();
-        const bridge = createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel });
+        const bridge = createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, reasoningTransport: lease.reasoningSession });
         let streamError = null;
         let sawDone = false;
         const nativeResponses = entryProtocol === 'responses' && targetProtocol === 'responses';
@@ -1380,6 +1424,7 @@ function createExplicitRoutingHandler(options = {}) {
         let nativeFinalResponse = null;
         const acceptPayload = parsed => {
           observeUpstreamState(lease, parsed.data);
+          if (entryProtocol === targetProtocol) assertRepresentableJsonNumbers(parsed.dataText);
           if (nativeResponses && ['response.completed', 'response.incomplete'].includes(parsed.data.type || parsed.event) && parsed.data.response) nativeFinalResponse = parsed.data.response;
           if (nativeChat) nativeChat.accept(parsed.data);
           else if (nativeMessages) nativeMessages.accept(parsed.event, parsed.data);
@@ -1508,7 +1553,7 @@ function createExplicitRoutingHandler(options = {}) {
             reason: streamError.code || 'upstream_stream_error',
           });
           releaseLease();
-          if (retryable(streamError.statusCode, lease, streamError.message)) {
+          if (!streamError.nonRetryable && retryable(streamError.statusCode, lease, streamError.message)) {
             excludeTargetIds.push(target.id);
             lastFailure = {
               statusCode: streamError.statusCode,
@@ -1546,8 +1591,8 @@ function createExplicitRoutingHandler(options = {}) {
         }
 
         const payload = nativeResponses
-          ? transformResponseForEntry({ entryProtocol, targetProtocol, payload: nativeFinalResponse, publicModel })
-          : nativeMessages ? nativeMessages.build() : nativeChat ? nativeChat.build() : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel); })();
+          ? transformResponseForEntry({ entryProtocol, targetProtocol, payload: nativeFinalResponse, publicModel, reasoningTransport: lease.reasoningSession })
+          : nativeMessages ? nativeMessages.build() : nativeChat ? nativeChat.build() : (() => { bridge.finish(); return serializeCanonicalResponse(entryProtocol, bridge.getCanonicalResponse(), publicModel, { reasoningTransport: lease.reasoningSession }); })();
         res.status(200).json(payload);
         router.markSuccess(lease);
         bindResponseContext(getContextStore(), entryProtocol, payload.id, lease, publicModel, requestAuthHash);
@@ -1605,7 +1650,7 @@ function createExplicitRoutingHandler(options = {}) {
           reason: descriptor.code || 'upstream_error_payload',
         });
         releaseLease();
-        if (retryable(descriptor.statusCode, lease, descriptor.message)) {
+        if (!descriptor.nonRetryable && retryable(descriptor.statusCode, lease, descriptor.message)) {
           excludeTargetIds.push(target.id);
           lastFailure = {
             statusCode: descriptor.statusCode,
@@ -1631,6 +1676,7 @@ function createExplicitRoutingHandler(options = {}) {
           targetProtocol,
           payload: parsedPayload,
           publicModel,
+          reasoningTransport: lease.reasoningSession,
         });
       } catch (err) {
         if (err instanceof UnsupportedProtocolFeatureError || lease.policyObserved) {
@@ -1651,7 +1697,11 @@ function createExplicitRoutingHandler(options = {}) {
         continue;
       }
 
-      res.status(200).json(payload);
+      if (entryProtocol === targetProtocol && options.preserveNativeJson !== false) {
+        res.status(200);
+        res.setHeader('content-type', 'application/json; charset=utf-8');
+        res.end(rewriteJsonModels(responseBody, publicModel));
+      } else res.status(200).json(payload);
       router.markSuccess(lease);
       bindResponseContext(getContextStore(), entryProtocol, payload.id, lease, publicModel, requestAuthHash);
       releaseLease();

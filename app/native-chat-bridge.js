@@ -51,7 +51,7 @@ function createNativeChatAccumulator(publicModel) {
         const delta = choice.delta || choice.message || {};
         if (state.value.finish_reason && Object.keys(delta).length) unsupported(`${path}.delta`, '该 choice 已结束后仍有内容');
         for (const [key, value] of Object.entries(delta)) {
-          if (['content', 'refusal'].includes(key)) appendString(state.value.message, key, value, `${path}.delta.${key}`);
+          if (['content', 'refusal', 'reasoning_content', 'reasoning_text'].includes(key) || key === 'reasoning' && typeof value === 'string') appendString(state.value.message, key, value, `${path}.delta.${key}`);
           else if (key === 'tool_calls') {
             if (!Array.isArray(value)) unsupported(`${path}.delta.tool_calls`, '必须是数组');
             for (const tool of value) {

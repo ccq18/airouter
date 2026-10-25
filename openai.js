@@ -13,6 +13,7 @@ const {
 const { ensureConfigIds, parseRoutingConfig, getPublicModelIds, getRoutingRevision, validateConfigModels } = require('./app/routing-config');
 const { listProviderPresets, getProviderPreset, normalizeSub2ApiBaseUrl, buildDiscoveryRequest, parseModelCatalog, diffModelCatalog } = require('./app/provider-presets');
 const { createQuotaEngine } = require('./app/quota-engine');
+const { credentialContextInvalidations } = require('./app/credential-context');
 const { createModelRouter, createRoutingHealthStore, createRoutingContextStore } = require('./app/model-router');
 const { createExplicitRoutingHandler } = require('./app/explicit-routing-handler');
 const { createRouteTestHandler } = require('./app/route-testing');
@@ -77,9 +78,10 @@ function applyProxyEnvironment(config) {
 function applyConfig(config) {
   const runtimes = createRuntimeConfigs(config);
   parseRoutingConfig(config);
+  const invalidated = credentialContextInvalidations(parsedConfig?.configs || [], config.configs, quotaEngine.syncConfigs(config.configs));
   parsedConfig = config;
   runtimeConfigs = runtimes;
-  for (const id of quotaEngine.syncConfigs(config.configs)) {
+  for (const id of invalidated) {
     healthStore.forget(id);
     contextStore.forgetConfig(id);
   }

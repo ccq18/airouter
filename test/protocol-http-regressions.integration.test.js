@@ -748,7 +748,7 @@ for (const entryProtocol of PROTOCOLS) for (const backendProtocol of PROTOCOLS) 
 
 
 for (const backend of ['messages', 'responses']) {
-  test(`opaque ${backend} state preserves native wires and rejects cross conversion without fallback or cooldown`, async () => {
+  test(`opaque ${backend} state preserves native wires and transports verified cross-protocol state without fallback or cooldown`, async () => {
     for (const stream of [false, true]) {
       const native = input(backend, nativeRoute(backend), 'private', stream);
       const before = calls.length; const response = await entry(backend, native); const wire = await response.text();
@@ -756,10 +756,22 @@ for (const backend of ['messages', 'responses']) {
       assert.match(wire, backend === 'messages' ? /signed-state/ : /encrypted-state/);
       for (const client of PROTOCOLS.filter(value => value !== backend)) {
         const body = input(client, nativeRoute(backend), 'private', stream); delete body.store;
-        const before = calls.length; const rejected = await entry(client, body); const payload = await rejected.json();
-        assert.equal(rejected.status, 502, JSON.stringify(payload)); assert.equal(calls.length, before + 1, 'no retry to bypass unsupported state');
-        assert.equal(payload.error.code || payload.error.type, 'upstream_response_not_representable');
-        assert.match(payload.error.message, /reasoning|thinking|signature|推理|思考|内容块/);
+        const before = calls.length; const converted = await entry(client, body); const wire = await converted.text();
+        assert.equal(converted.status, 200, wire); assert.equal(calls.length, before + 1, 'one generation, no replay');
+        const values = stream ? events(wire) : [JSON.parse(wire)];
+        assert.ok(!values.some(value => value.error), wire);
+        assert.match(wire, backend === 'messages' ? /signed-state/ : /encrypted-state/);
+        assert.match(wire, /airouter-state-v1:/, 'opaque data has an explicit verifiable replay handle');
+        const provenance = [];
+        function inspect(value) {
+          if (!value || typeof value !== 'object') return;
+          if (value.airouter_upstream_reasoning) provenance.push(value.airouter_upstream_reasoning);
+          for (const nested of Object.values(value)) inspect(nested);
+        }
+        inspect(values);
+        const original = backend === 'messages' ? { type: 'thinking', thinking: 'private reasoning', signature: 'signed-state', protocol: 'messages' }
+          : { id: 'rs-private', type: 'reasoning', encrypted_content: 'encrypted-state', summary: [], protocol: 'responses' };
+        assert.ok(provenance.some(value => { try { assert.deepEqual(value, original); return true; } catch (_) { return false; } }), 'complete original source state remains separate from answer');
         assert.equal(calls.at(-1).protocol, backend);
       }
       const healthy = await entry(backend, native); assert.equal(healthy.status, 200, 'gateway conversion rejection must not cool native support'); await healthy.text();
@@ -767,12 +779,15 @@ for (const backend of ['messages', 'responses']) {
     }
   });
 }
-test('unsupported private state discovered after text emits an error and never replays or completes', async () => {
+test('signed thinking discovered after text retains ordering and completes without replay', async () => {
   const before = calls.length;
   const response = await entry('chat_completions', input('chat_completions', nativeRoute('messages'), 'private_late', true));
   assert.equal(response.status, 200); const received = await streamText(response);
-  assert.match(received.text, /中文/); assert.match(received.text, /thinking|signature|内容块/);
-  assert.ok(!events(received.text).some(value => value.choices?.some(choice => choice.finish_reason === 'stop')));
+  const parsed = events(received.text);
+  assert.equal(parsed.flatMap(value => value.choices || []).map(choice => choice.delta?.content || '').join(''), TEXT);
+  assert.match(received.text, /signed-state/); assert.match(received.text, /airouter-state-v1:/);
+  assert.ok(!parsed.some(value => value.error));
+  assert.equal(parsed.flatMap(value => value.choices || []).filter(choice => choice.finish_reason === 'stop').length, 1);
   assert.equal(calls.length, before + 1); await assertServiceAlive();
 });
 
@@ -948,7 +963,7 @@ test('different Chat choice indices arriving in separate SSE frames cannot merge
 });
 
 for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']) for (const stream of [false, true]) {
-  test(`Chat output ${field} ${stream ? 'SSE' : 'JSON'} stays native and rejects both cross-protocol destinations without replay`, async () => {
+  test(`Chat output ${field} ${stream ? 'SSE' : 'JSON'} preserves public reasoning or rejects unsupported private structures without replay`, async () => {
     const expected = { reasoning_content: '私有推理🙂', reasoning: { encrypted: 'private-state' }, audio: { id: 'audio-fixture', data: 'fixture-audio', transcript: '语音' }, function_call: { name: 'legacy', arguments: '{"n":1}' } }[field];
     let before = calls.length;
     const native = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'chat_output_' + field, stream));
@@ -958,10 +973,32 @@ for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']
     for (const client of ['responses', 'messages']) {
       before = calls.length;
       const body = input(client, nativeRoute('chat_completions'), 'chat_output_' + field, stream); delete body.store;
-      const response = await entry(client, body), payload = await response.json();
-      assert.equal(response.status, 502, JSON.stringify(payload)); assert.equal(calls.length, before + 1, 'must not retry another account after discovering unsupported source output');
-      assert.equal(payload.error.code || payload.error.type, 'upstream_response_not_representable');
-      assert.match(payload.error.message, new RegExp('choices.*' + field));
+      const response = await entry(client, body), wire = await response.text();
+      assert.equal(calls.length, before + 1, 'must not retry after receiving source output');
+      if (field === 'reasoning_content') {
+        assert.equal(response.status, 200, wire);
+        const values = stream ? events(wire) : [JSON.parse(wire)];
+        assert.ok(!values.some(value => value.error));
+        if (client === 'responses') {
+          const payload = stream ? values.findLast(value => value.type === 'response.completed')?.response : values[0];
+          assert.equal(payload.output[0].type, 'reasoning');
+          assert.deepEqual(payload.output[0].content, [{ type: 'reasoning_text', text: expected }]);
+          assert.equal(payload.output[1].content[0].text, TEXT);
+          assert.deepEqual(payload.output[0].airouter_upstream_reasoning, { protocol: 'chat_completions', reasoning_content: expected });
+        } else if (!stream) {
+          assert.equal(values[0].content[0].thinking, expected); assert.match(values[0].content[0].signature, /^airouter-text-v1:/);
+          assert.equal(values[0].content[1].text, TEXT);
+        } else {
+          assert.equal(values.filter(value => value.delta?.type === 'thinking_delta').map(value => value.delta.thinking).join(''), expected);
+          assert.equal(values.filter(value => value.delta?.type === 'text_delta').map(value => value.delta.text).join(''), TEXT);
+          assert.equal(values.filter(value => value.type === 'message_stop').length, 1);
+        }
+      } else {
+        const payload = JSON.parse(wire);
+        assert.equal(response.status, 502, wire);
+        assert.equal(payload.error.code || payload.error.type, 'upstream_response_not_representable');
+        assert.match(payload.error.message, new RegExp('choices.*' + field));
+      }
     }
     before = calls.length;
     const healthy = await entry('chat_completions', input('chat_completions', nativeRoute('chat_completions'), 'ok', false));
@@ -1178,4 +1215,16 @@ for (const upstream of ['json', 'sse']) test(`Chat include_usage preserves unkno
   assert.equal(usageChunks[0].usage, null); assert.equal(parsed.at(-1), usageChunks[0]);
   assert.ok(parsed.filter(x => x.choices.length).every(x => x.usage === null));
   assert.match(wire, /data: \[DONE\]\n\n$/);
+});
+
+test('HTTP 200 content-policy error payload returns 403 without another provider attempt', async () => {
+  const before = calls.length;
+  const response = await entry('responses', input('responses', nativeRoute('chat_completions'), 'filter200'));
+  const payload = await response.json();
+  assert.equal(response.status, 403);
+  assert.equal(payload.error.code, 'content_policy_violation');
+  assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'chat_completions');
+  const healthy = await entry('responses', input('responses', nativeRoute('chat_completions'), 'ok'));
+  assert.equal(healthy.status, 200); await healthy.json();
+  assert.equal(calls.length, before + 2); assert.equal(calls.at(-1).body.model, 'backend-chat_completions', 'policy rejection must not cool the original model');
 });

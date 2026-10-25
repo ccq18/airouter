@@ -13,15 +13,9 @@ const { StringDecoder } = require('node:string_decoder');
 const { randomUUID } = require('node:crypto');
 const { isDeepStrictEqual } = require('node:util');
 const { mapCrossProtocolControls } = require('./protocol-request-controls');
+const { UnsupportedProtocolFeatureError } = require('./protocol-errors');
+const { REASONING_TRANSPORT, parseSourceReasoning, renderReasoning, parseClientReasoning, hasBridgeReasoning, restoreReasoning } = require('./reasoning-content');
 const SUPPORTED_PROTOCOLS = ['chat_completions', 'responses', 'messages'];
-
-class UnsupportedProtocolFeatureError extends Error {
-  constructor(message, code = 'unsupported_protocol_feature') {
-    super(message);
-    this.name = 'UnsupportedProtocolFeatureError';
-    this.code = code;
-  }
-}
 
 function normalizeEntryProtocol(pathOrProtocol) {
   if (SUPPORTED_PROTOCOLS.includes(pathOrProtocol)) {
@@ -528,7 +522,7 @@ function validateToolRounds(canonical) {
   }
 }
 
-function parseChatRequest(body) {
+function parseChatRequest(body, options = {}) {
   const canonical = {
     model: body.model,
     system: '',
@@ -557,7 +551,9 @@ function parseChatRequest(body) {
       continue;
     }
 
-    const parts = parseChatContent(message.content, message.role);
+    const reasoning = parseClientReasoning('chat_completions', message, options.reasoningTransport);
+    if (reasoning.length && message.role !== 'assistant') throw new UnsupportedProtocolFeatureError('reasoning 只能附于 assistant 历史');
+    const parts = [...reasoning, ...parseChatContent(message.content, message.role)];
     for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
       if (call.type && call.type !== 'function') throw new UnsupportedProtocolFeatureError('跨协议路由不能将自定义工具调用当作函数');
       parts.push(requestToolUse(call.id, call.function && call.function.name, call.function && call.function.arguments));
@@ -581,7 +577,7 @@ function parseChatRequest(body) {
   return canonical;
 }
 
-function parseMessagesRequest(body) {
+function parseMessagesRequest(body, options = {}) {
   const canonical = {
     model: body.model,
     system: typeof body.system === 'string' ? body.system : '',
@@ -621,7 +617,8 @@ function parseMessagesRequest(body) {
           content: requestToolResultContent(block.content),
         });
       } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
-        throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移 thinking/encrypted reasoning 内容');
+        if (message.role !== 'assistant') throw new UnsupportedProtocolFeatureError('thinking 只能附于 assistant 历史');
+        parts.push(...parseClientReasoning('messages', block, options.reasoningTransport));
       } else {
         throw new UnsupportedProtocolFeatureError(`跨协议路由无法保留 Claude 内容块: ${block.type}`);
       }
@@ -675,7 +672,7 @@ function parseResponsesContent(content, role) {
   return parts;
 }
 
-function parseResponsesRequest(body) {
+function parseResponsesRequest(body, options = {}) {
   const canonical = {
     model: body.model,
     system: typeof body.instructions === 'string' ? body.instructions : '',
@@ -702,7 +699,7 @@ function parseResponsesRequest(body) {
           parts: parseResponsesContent(item.content, item.role),
         };
         const previous = canonical.messages[canonical.messages.length - 1];
-        if (message.role === 'assistant' && previous?.role === 'assistant' && previous.parts.some(part => part.type === 'tool_use')) previous.parts.push(...message.parts);
+        if (message.role === 'assistant' && previous?.role === 'assistant' && previous.parts.some(part => part.type === 'tool_use' || part.type === 'reasoning')) previous.parts.push(...message.parts);
         else canonical.messages.push(message);
       } else if (item.type === 'function_call') {
         const part = requestToolUse(item.call_id, item.name, item.arguments);
@@ -721,8 +718,13 @@ function parseResponsesRequest(body) {
         const previous = canonical.messages[canonical.messages.length - 1];
         if (previous && previous.role === 'user' && previous.parts.every(part => part.type === 'tool_result')) previous.parts.push(...result.parts);
         else canonical.messages.push(result);
-      } else if (item.type === 'reasoning' || item.type === 'item_reference') {
-        throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移服务端 reasoning/item_reference 状态');
+      } else if (item.type === 'reasoning') {
+        const parts = parseClientReasoning('responses', item, options.reasoningTransport);
+        const previous = canonical.messages[canonical.messages.length - 1];
+        if (previous?.role === 'assistant') previous.parts.push(...parts);
+        else canonical.messages.push({ role: 'assistant', parts });
+      } else if (item.type === 'item_reference') {
+        throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移服务端 item_reference 状态');
       } else {
         throw new UnsupportedProtocolFeatureError(`跨协议路由无法保留 Responses 输入类型: ${item.type}`);
       }
@@ -746,15 +748,15 @@ function parseResponsesRequest(body) {
   return canonical;
 }
 
-function parseEntryRequest(entryProtocol, body) {
+function parseEntryRequest(entryProtocol, body, options = {}) {
   if (entryProtocol === 'chat_completions') {
-    return parseChatRequest(body);
+    return parseChatRequest(body, options);
   }
   if (entryProtocol === 'messages') {
-    return parseMessagesRequest(body);
+    return parseMessagesRequest(body, options);
   }
   if (entryProtocol === 'responses') {
-    return parseResponsesRequest(body);
+    return parseResponsesRequest(body, options);
   }
   throw new UnsupportedProtocolFeatureError(`不支持的入口协议: ${entryProtocol}`);
 }
@@ -827,6 +829,15 @@ function canonicalImageUrl(part) {
   throw new UnsupportedProtocolFeatureError('图片缺少可序列化的 URL 或 base64 数据');
 }
 
+function mergeChatReasoning(message, value) {
+  for (const [key, field] of Object.entries(value)) {
+    if (key === 'reasoning_details') message[key] = [...(message[key] || []), ...cloneJson(field)];
+    else if (key === 'airouter_upstream_reasoning') message[key] = message[key] ? [...(Array.isArray(message[key]) ? message[key] : [message[key]]), ...(Array.isArray(field) ? cloneJson(field) : [cloneJson(field)])] : cloneJson(field);
+    else if (typeof field === 'string') message[key] = (message[key] || '') + field;
+    else throw new UnsupportedProtocolFeatureError(`reasoning: 无法保真合并 ${key}`);
+  }
+}
+
 function serializeChatRequest(canonical, targetModel, stream) {
   const messages = [];
   if (canonical.system) {
@@ -836,18 +847,22 @@ function serializeChatRequest(canonical, targetModel, stream) {
   for (const message of canonical.messages) {
     const textParts = [];
     const toolCalls = [];
+    const reasoningParts = [];
     let refusal;
     function flushMessage() {
-      if (!textParts.length && !toolCalls.length && refusal === undefined) return;
+      if (!textParts.length && !toolCalls.length && !reasoningParts.length && refusal === undefined) return;
       const onlyText = textParts.length === 1 && textParts[0].type === 'text' && !Object.prototype.hasOwnProperty.call(textParts[0], 'prompt_cache_breakpoint');
       const payload = { role: message.role, content: onlyText ? textParts[0].text : textParts.length ? [...textParts] : null };
       if (toolCalls.length) payload.tool_calls = [...toolCalls];
       if (refusal !== undefined) payload.refusal = refusal;
+      for (const part of reasoningParts) mergeChatReasoning(payload, restoreReasoning('chat_completions', part));
       messages.push(payload);
-      textParts.length = 0; toolCalls.length = 0; refusal = undefined;
+      textParts.length = 0; toolCalls.length = 0; reasoningParts.length = 0; refusal = undefined;
     }
     for (const part of message.parts) {
-      if (part.type === 'text') {
+      if (part.type === 'reasoning') {
+        reasoningParts.push(part);
+      } else if (part.type === 'text') {
         textParts.push(requestContentPart(part, { type: 'text', text: part.text }));
       } else if (part.type === 'image') {
         textParts.push(requestContentPart(part, { type: 'image_url', image_url: { url: canonicalImageUrl(part), ...(part.detail ? { detail: part.detail } : {}) } }));
@@ -933,7 +948,9 @@ function serializeMessagesRequest(canonical, targetModel, stream) {
     dialogueStarted = true;
     const content = [];
     for (const part of message.parts) {
-      if (part.type === 'text') {
+      if (part.type === 'reasoning') {
+        content.push(restoreReasoning('messages', part));
+      } else if (part.type === 'text') {
         content.push({ type: 'text', text: part.text });
       } else if (part.type === 'image') {
         if (part.data && part.mediaType) {
@@ -941,6 +958,10 @@ function serializeMessagesRequest(canonical, targetModel, stream) {
             type: 'image',
             source: { type: 'base64', media_type: part.mediaType, data: part.data },
           });
+        } else if (/^data:/i.test(part.url || '')) {
+          const embedded = /^data:([^;,]+);base64,([\s\S]*)$/i.exec(part.url);
+          if (!embedded) throw new UnsupportedProtocolFeatureError('Messages 图片 data URL 必须使用明确 media_type 的 base64 编码');
+          content.push({ type: 'image', source: { type: 'base64', media_type: embedded[1], data: embedded[2] } });
         } else {
           content.push({ type: 'image', source: { type: 'url', url: part.url } });
         }
@@ -1007,7 +1028,10 @@ function serializeResponsesRequest(canonical, targetModel, stream) {
       content.length = 0;
     }
     for (const part of message.parts) {
-      if (part.type === 'text') {
+      if (part.type === 'reasoning') {
+        flushContent();
+        input.push(restoreReasoning('responses', part));
+      } else if (part.type === 'text') {
         content.push(requestContentPart(part, {
           type: message.role === 'assistant' ? 'output_text' : 'input_text',
           text: part.text,
@@ -1101,7 +1125,8 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
   const controls = mapCrossProtocolControls({ entryProtocol, targetProtocol, body,
     fail: message => new UnsupportedProtocolFeatureError(message) });
   if (hasStructuredOutput(body) && (entryProtocol === 'messages' || targetProtocol === 'messages')) {
-    throw new UnsupportedProtocolFeatureError('跨协议路由不支持结构化输出，请改用同协议候选');
+    const path = body.response_format ? 'response_format' : body.text?.format ? 'text.format' : body.output_config?.format ? 'output_config.format' : 'output_format';
+    throw new UnsupportedProtocolFeatureError(`${path}: 跨 Messages 协议无法保留该结构化输出控制，请改用同协议候选`);
   }
   if (hasBuiltinTools(body)) {
     throw new UnsupportedProtocolFeatureError('跨协议路由不支持内置服务端工具，请改用同协议候选');
@@ -1118,16 +1143,16 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
     if (crossesMessages && Object.prototype.hasOwnProperty.call(value, 'prompt_cache_breakpoint')) throw new UnsupportedProtocolFeatureError('Messages 无法保留 OpenAI prompt_cache_breakpoint 缓存边界');
     for (const [name, nested] of Object.entries(value)) {
       // Application metadata and tool schemas/arguments are user data, not API controls.
-      if (['metadata', 'parameters', 'input_schema', 'schema'].includes(name) || (value.type === 'tool_use' && name === 'input')) continue;
+      if (['metadata', 'parameters', 'input_schema', 'schema', 'airouter_upstream_reasoning'].includes(name) || (value.type === 'tool_use' && name === 'input')) continue;
       checkCache(nested);
     }
   }
   checkCache(body);
   const cacheKeys = ['prompt_cache_key', 'prompt_cache_retention', 'prompt_cache_options'];
-  if (crossesMessages && cacheKeys.some(name => Object.prototype.hasOwnProperty.call(body, name))) throw new UnsupportedProtocolFeatureError('OpenAI prompt 缓存控制无法准确映射到 Claude cache_control');
+  if (crossesMessages && cacheKeys.some(name => Object.prototype.hasOwnProperty.call(body, name))) throw new UnsupportedProtocolFeatureError(`${cacheKeys.filter(name => Object.prototype.hasOwnProperty.call(body, name)).join(', ')}: OpenAI prompt 缓存控制无法准确映射到 Claude cache_control`);
   if (body.prompt_cache_options && Object.keys(body.prompt_cache_options).some(name => !['mode', 'ttl'].includes(name))) throw new UnsupportedProtocolFeatureError('跨 Chat/Responses 只支持共有的 prompt_cache_options mode/ttl，不迁移预热或比较响应 ID');
   if (Object.prototype.hasOwnProperty.call(body, 'store')) {
-    if (typeof body.store !== 'boolean' || body.store || crossesMessages) throw new UnsupportedProtocolFeatureError('跨协议无法保留请求的服务端保存/续接语义');
+    if (typeof body.store !== 'boolean' || body.store || crossesMessages) throw new UnsupportedProtocolFeatureError('store: 跨协议无法保留请求的服务端保存/续接语义');
   }
   const stop = entryProtocol === 'messages' ? body.stop_sequences : body.stop;
   if (stop != null) {
@@ -1140,12 +1165,13 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
   return controls;
 }
 
-function transformRequestForTarget({ entryProtocol, targetProtocol, body, targetModel, stream }) {
+function transformRequestForTarget({ entryProtocol, targetProtocol, body, targetModel, stream, reasoningTransport = body?.[REASONING_TRANSPORT] }) {
   if (!SUPPORTED_PROTOCOLS.includes(entryProtocol) || !SUPPORTED_PROTOCOLS.includes(targetProtocol)) {
     throw new UnsupportedProtocolFeatureError('不支持的协议转换');
   }
 
-  if (entryProtocol === targetProtocol) {
+  const nativeBridgeHistory = entryProtocol === targetProtocol && hasBridgeReasoning(body);
+  if (entryProtocol === targetProtocol && !nativeBridgeHistory) {
     const result = cloneJson(body);
     result.model = targetModel;
     if (targetProtocol !== 'messages' && !Object.prototype.hasOwnProperty.call(result, 'stream')) {
@@ -1158,8 +1184,8 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
     return result;
   }
 
-  const controls = assertCrossProtocolSupported(entryProtocol, targetProtocol, body);
-  const canonical = parseEntryRequest(entryProtocol, body);
+  const controls = nativeBridgeHistory ? {} : assertCrossProtocolSupported(entryProtocol, targetProtocol, body);
+  const canonical = parseEntryRequest(entryProtocol, body, { reasoningTransport });
   validateToolRounds(canonical);
   const result = targetProtocol === 'chat_completions'
     ? serializeChatRequest(canonical, targetModel, stream)
@@ -1170,24 +1196,29 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
   return Object.assign(result, controls);
 }
 
-// Opaque reasoning/signature state cannot be moved into another protocol.
-// Native JSON and native SSE bypass canonical conversion and retain it verbatim.
+// Native payloads retain provider state verbatim. Cross-protocol reasoning needs
+// an explicit transport; unknown provider structures remain unsupported.
 function assertResponseContentSupported(protocol, payload) {
   if (protocol === 'chat_completions') {
     for (const [index, choice] of (payload?.choices || []).entries()) {
       const kind = choice.message ? 'message' : 'delta';
       const message = choice[kind] || {};
-      for (const field of ['reasoning_content', 'reasoning', 'audio', 'function_call']) {
+      for (const field of ['audio', 'function_call']) {
         if (message[field] !== undefined && message[field] !== null && message[field] !== '') throw new UnsupportedProtocolFeatureError(`choices[${index}].${kind}.${field}: 私有或未实现的 Chat 输出没有无损跨协议映射，请使用同协议候选`);
+      }
+      try { parseSourceReasoning('chat_completions', message); }
+      catch (error) {
+        if (!(error instanceof UnsupportedProtocolFeatureError)) throw error;
+        throw new UnsupportedProtocolFeatureError(`choices[${index}].${kind}.${error.message}`);
       }
     }
   } else if (protocol === 'messages') {
     for (const block of payload?.content || []) {
-      if (block && !['text', 'tool_use'].includes(block.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Messages 内容块 ${block.type}（thinking/signature 等私有状态不能跨协议迁移）`);
+      if (block && !['text', 'tool_use', 'thinking', 'redacted_thinking'].includes(block.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Messages 内容块 ${block.type}`);
     }
   } else if (protocol === 'responses') {
     for (const item of payload?.output || []) {
-      if (item && !['message', 'function_call'].includes(item.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses 内容项 ${item.type}（reasoning/encrypted_content 等私有状态不能跨协议迁移）`);
+      if (item && !['message', 'function_call', 'reasoning'].includes(item.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses 内容项 ${item.type}`);
       if (item?.type === 'message') for (const block of item.content || []) {
         if (block && !['output_text', 'refusal'].includes(block.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses 内容块 ${block.type}`);
       }
@@ -1202,8 +1233,8 @@ function parseChatResponse(payload) {
   if (!choice) {
     throw new UnsupportedProtocolFeatureError('上游 chat.completions 响应缺少 choices');
   }
-  const parts = [];
   const message = choice.message || {};
+  const parts = parseSourceReasoning('chat_completions', message);
   const text = contentToText(message.content);
   if (text) {
     parts.push({ type: 'text', text, ...(Array.isArray(choice.logprobs?.content) ? { logprobs: cloneJson(choice.logprobs.content) } : {}) });
@@ -1243,6 +1274,8 @@ function parseMessagesResponse(payload) {
       parts.push({ type: payload.stop_reason === 'refusal' ? 'refusal' : 'text', text: block.text });
     } else if (block.type === 'tool_use') {
       parts.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input || {} });
+    } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+      parts.push(...parseSourceReasoning('messages', block));
     }
   }
   return {
@@ -1267,7 +1300,9 @@ function parseResponsesResponse(payload) {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    if (item.type === 'message') {
+    if (item.type === 'reasoning') {
+      parts.push(...parseSourceReasoning('responses', item));
+    } else if (item.type === 'message') {
       for (const block of Array.isArray(item.content) ? item.content : []) {
         if (block?.type === 'output_text') {
           if (block.text) parts.push({ type: 'text', text: block.text, ...(Array.isArray(block.logprobs) ? { logprobs: cloneJson(block.logprobs) } : {}) });
@@ -1345,12 +1380,13 @@ function chatToolCalls(parts) {
     }));
 }
 
-function serializeChatResponse(entryProtocol, canonical, publicModel) {
+function serializeChatResponse(entryProtocol, canonical, publicModel, reasoningTransport) {
   const text = canonical.parts.filter(part => part.type === 'text').map(part => part.text).join('');
   const toolCalls = chatToolCalls(canonical.parts);
   const message = { role: 'assistant', content: text || null };
   const refusal = canonical.parts.filter(part => part.type === 'refusal').map(part => part.text).join('');
   if (refusal) message.refusal = refusal;
+  for (const part of canonical.parts.filter(part => part.type === 'reasoning')) mergeChatReasoning(message, renderReasoning('chat_completions', part, reasoningTransport));
   if (toolCalls.length) {
     message.tool_calls = toolCalls;
   }
@@ -1370,9 +1406,10 @@ function serializeChatResponse(entryProtocol, canonical, publicModel) {
   };
 }
 
-function serializeMessagesResponse(entryProtocol, canonical, publicModel) {
+function serializeMessagesResponse(entryProtocol, canonical, publicModel, reasoningTransport) {
   if (canonical.logprobs?.content?.length || canonical.logprobs?.refusal?.length) throw new UnsupportedProtocolFeatureError('logprobs: Messages 无等价的 token 概率字段');
   const content = canonical.parts.map(part => {
+    if (part.type === 'reasoning') return renderReasoning('messages', part, reasoningTransport);
     if (part.type === 'text' || part.type === 'refusal') {
       return { type: 'text', text: part.text };
     }
@@ -1390,31 +1427,29 @@ function serializeMessagesResponse(entryProtocol, canonical, publicModel) {
   };
 }
 
-function serializeResponsesResponse(entryProtocol, canonical, publicModel) {
+function serializeResponsesResponse(entryProtocol, canonical, publicModel, reasoningTransport) {
   if (canonical.logprobs?.refusal?.length) throw new UnsupportedProtocolFeatureError('logprobs.refusal: Responses refusal 没有等价概率字段，不能静默丢弃');
   if (!['end_turn', 'stop_sequence', 'max_tokens', 'tool_use', 'refusal', 'content_filter', undefined, null].includes(canonical.stopReason)) throw new UnsupportedProtocolFeatureError(`无法保真转换为 Responses 终态: ${canonical.stopReason}`);
   const output = [];
   const text = canonical.parts.filter(part => part.type === 'text').map(part => part.text).join('');
-  const refusal = canonical.parts.filter(part => part.type === 'refusal').map(part => part.text).join('');
-  if (text || refusal) {
-    output.push({
-      id: `msg_${responseIdFor('responses', canonical.id, canonical.sourceProtocol).replace(/^resp_/, '')}`,
-      type: 'message',
-      status: 'completed',
-      role: 'assistant',
-      content: [...(text ? [{ type: 'output_text', text, annotations: [], ...(Array.isArray(canonical.logprobs?.content) ? { logprobs: cloneJson(canonical.logprobs.content) } : {}) }] : []), ...(refusal ? [{ type: 'refusal', refusal }] : [])],
-    });
+  let content = [], messageIndex = 0;
+  function flushContent() {
+    if (!content.length) return;
+    const base = `msg_${responseIdFor('responses', canonical.id, canonical.sourceProtocol).replace(/^resp_/, '')}`;
+    output.push({ id: messageIndex ? `${base}_${messageIndex}` : base, type: 'message', status: 'completed', role: 'assistant', content });
+    messageIndex++; content = [];
   }
-  for (const part of canonical.parts.filter(item => item.type === 'tool_use')) {
-    output.push({
-      id: part.id,
-      type: 'function_call',
-      status: 'completed',
-      call_id: part.id,
-      name: part.name,
-      arguments: typeof part.arguments === 'string' ? part.arguments : JSON.stringify(part.input || {}),
-    });
+  for (const part of canonical.parts) {
+    if (part.type === 'text') content.push({ type: 'output_text', text: part.text, annotations: [], ...(Array.isArray(part.logprobs) ? { logprobs: cloneJson(part.logprobs) } : Array.isArray(canonical.logprobs?.content) && canonical.parts.filter(value => value.type === 'text').length === 1 ? { logprobs: cloneJson(canonical.logprobs.content) } : {}) });
+    else if (part.type === 'refusal') content.push({ type: 'refusal', refusal: part.text });
+    else if (part.type === 'reasoning') { flushContent(); output.push(renderReasoning('responses', part, reasoningTransport)); }
+    else if (part.type === 'tool_use') {
+      flushContent();
+      output.push({ id: part.id, type: 'function_call', status: 'completed', call_id: part.id, name: part.name,
+        arguments: typeof part.arguments === 'string' ? part.arguments : JSON.stringify(part.input || {}) });
+    }
   }
+  flushContent();
   return {
     id: responseIdFor('responses', canonical.id, canonical.sourceProtocol),
     object: 'response',
@@ -1437,7 +1472,7 @@ function responseToolInput(part) {
   return requestToolInput(part);
 }
 
-function transformResponseForEntry({ entryProtocol, targetProtocol, payload, publicModel }) {
+function transformResponseForEntry({ entryProtocol, targetProtocol, payload, publicModel, reasoningTransport }) {
   if (entryProtocol === targetProtocol) {
     const result = cloneJson(payload);
     rewriteModelInPayload(entryProtocol, result, publicModel);
@@ -1445,17 +1480,17 @@ function transformResponseForEntry({ entryProtocol, targetProtocol, payload, pub
   }
 
   const canonical = parseTargetResponse(targetProtocol, payload);
-  return serializeCanonicalResponse(entryProtocol, canonical, publicModel);
+  return serializeCanonicalResponse(entryProtocol, canonical, publicModel, { reasoningTransport });
 }
 
-function serializeCanonicalResponse(entryProtocol, canonical, publicModel) {
+function serializeCanonicalResponse(entryProtocol, canonical, publicModel, { reasoningTransport } = {}) {
   if (entryProtocol === 'chat_completions') {
-    return serializeChatResponse(entryProtocol, canonical, publicModel);
+    return serializeChatResponse(entryProtocol, canonical, publicModel, reasoningTransport);
   }
   if (entryProtocol === 'messages') {
-    return serializeMessagesResponse(entryProtocol, canonical, publicModel);
+    return serializeMessagesResponse(entryProtocol, canonical, publicModel, reasoningTransport);
   }
-  return serializeResponsesResponse(entryProtocol, canonical, publicModel);
+  return serializeResponsesResponse(entryProtocol, canonical, publicModel, reasoningTransport);
 }
 
 function rewriteModelInPayload(protocol, payload, publicModel) {
@@ -1674,15 +1709,42 @@ function accumulateCanonicalEvent(accumulator, event) {
     accumulator.model = event.model || accumulator.model;
   } else if (event.type === 'text_delta') {
     accumulator.text += event.text || '';
+    const previous = accumulator.orderedParts?.at(-1);
+    if (previous?.type === 'text') previous.text += event.text || '';
+    else accumulator.orderedParts?.push({ type: 'text', text: event.text || '' });
   } else if (event.type === 'refusal_delta') {
     accumulator.refusal += event.text || '';
+    const previous = accumulator.orderedParts?.at(-1);
+    if (previous?.type === 'refusal') previous.text += event.text || '';
+    else accumulator.orderedParts?.push({ type: 'refusal', text: event.text || '' });
+  } else if (event.type === 'reasoning_start') {
+    if (!accumulator.reasoning.has(event.index)) {
+      const part = cloneJson(event.part);
+      accumulator.reasoning.set(event.index, part);
+      accumulator.orderedParts.push(part);
+    }
+  } else if (event.type === 'reasoning_delta') {
+    const part = accumulator.reasoning.get(event.index);
+    if (part) {
+      if (event.kind === 'summary') {
+        const index = event.summaryIndex || 0;
+        if (!part.summary[index]) part.summary[index] = { type: 'summary_text', text: '' };
+        part.summary[index].text += event.text || '';
+      } else part.text += event.text || '';
+    }
+  } else if (event.type === 'reasoning_end') {
+    const part = accumulator.reasoning.get(event.index);
+    if (part) Object.assign(part, cloneJson(event.part));
   } else if (event.type === 'tool_start') {
     const index = Number(event.index);
     if (!accumulator.tools.has(index)) {
       accumulator.toolOrder.push(index);
     }
     const previous = accumulator.tools.get(index);
-    accumulator.tools.set(index, { id: event.id || previous?.id, name: event.name || previous?.name, arguments: previous?.arguments || '' });
+    const tool = previous || { type: 'tool_use', id: event.id, name: event.name, arguments: '' };
+    tool.id = event.id || tool.id; tool.name = event.name || tool.name;
+    accumulator.tools.set(index, tool);
+    if (!previous) accumulator.orderedParts?.push(tool);
   } else if (event.type === 'tool_args_delta') {
     const tool = accumulator.tools.get(Number(event.index));
     if (tool) {
@@ -1708,6 +1770,8 @@ function createCanonicalAccumulator(publicModel, sourceProtocol) {
     refusal: '',
     tools: new Map(),
     toolOrder: [],
+    reasoning: new Map(),
+    orderedParts: [],
     stopReason: 'end_turn',
     usage: null,
     finished: false,
@@ -1722,22 +1786,11 @@ function createCanonicalAccumulator(publicModel, sourceProtocol) {
       accumulateCanonicalEvent(accumulator, event);
     },
     build() {
-      const parts = [];
-      if (accumulator.text) {
-        parts.push({ type: accumulator.stopReason === 'refusal' ? 'refusal' : 'text', text: accumulator.text });
-      }
-      if (accumulator.refusal) parts.push({ type: 'refusal', text: accumulator.refusal });
-      for (const index of accumulator.toolOrder) {
-        const tool = accumulator.tools.get(index);
-        if (tool) {
-          parts.push({
-            type: 'tool_use',
-            id: tool.id,
-            name: tool.name,
-            arguments: tool.arguments,
-          });
-        }
-      }
+      const parts = accumulator.orderedParts.filter(part => part.type !== 'text' || part.text).map(part => {
+        const value = cloneJson(part);
+        if (value.type === 'text' && accumulator.stopReason === 'refusal') value.type = 'refusal';
+        return value;
+      });
       const stopReason = accumulator.stopReason === 'end_turn' && accumulator.toolOrder.length
         ? 'tool_use'
         : accumulator.stopReason;
@@ -1772,8 +1825,42 @@ function createTargetEventParser(targetProtocol, publicModel) {
   let nextToolIndex = 0;
   let sawFinish = false;
   let pendingChatFinish = null;
+  let chatReasoningSegment = 0;
+  let activeChatReasoning = null;
   let chatChoiceIndex;
   const responseLogprobs = new Map();
+  const reasoning = new Map();
+  let nextReasoningIndex = 0;
+  function reasoningStart(events, key, raw) {
+    key = String(key);
+    if (reasoning.has(key)) return reasoning.get(key);
+    const source = require('./reasoning-content').parseSourceReasoning(targetProtocol, raw)[0]
+      || { type: 'reasoning', text: '', summary: [], originProtocol: targetProtocol, originBlock: cloneJson(raw), opaque: false };
+    const part = { ...source, text: '', summary: (source.summary || []).map(value => ({ ...value, text: '' })) };
+    const state = { index: nextReasoningIndex++, raw: cloneJson(raw), text: '', summary: [], ended: false };
+    reasoning.set(key, state); events.push({ type: 'reasoning_start', index: state.index, part }); return state;
+  }
+  function reasoningDelta(events, state, text, kind = 'text', summaryIndex = 0) {
+    if (typeof text !== 'string' || !text) return;
+    if (state.ended) throw new UnsupportedProtocolFeatureError('reasoning: 已结束的思考块不能继续追加');
+    if (kind === 'summary') state.summary[summaryIndex] = (state.summary[summaryIndex] || '') + text;
+    else state.text += text;
+    events.push({ type: 'reasoning_delta', index: state.index, text, kind, summaryIndex });
+  }
+  function reasoningEnd(events, state, raw = state.raw) {
+    const part = require('./reasoning-content').parseSourceReasoning(targetProtocol, raw)[0];
+    if (!part) return;
+    if (state.ended) return;
+    if (!part.text.startsWith(state.text)) throw new UnsupportedProtocolFeatureError('reasoning: 完成文本与已输出思考分片不一致');
+    reasoningDelta(events, state, part.text.slice(state.text.length));
+    for (const [index, summary] of (part.summary || []).entries()) {
+      const previous = state.summary[index] || '';
+      if (!summary.text.startsWith(previous)) throw new UnsupportedProtocolFeatureError('reasoning.summary: 完成摘要与已输出分片不一致');
+      reasoningDelta(events, state, summary.text.slice(previous.length), 'summary', index);
+    }
+    state.raw = cloneJson(raw); state.ended = true;
+    events.push({ type: 'reasoning_end', index: state.index, part });
+  }
   function responseProbabilityEvents(events, payload, snapshot = false) {
     if (!Object.prototype.hasOwnProperty.call(payload, 'logprobs')) return;
     if (!Array.isArray(payload.logprobs)) throw new UnsupportedProtocolFeatureError('logprobs: Responses 流 token 概率必须为数组');
@@ -1837,6 +1924,36 @@ function createTargetEventParser(targetProtocol, publicModel) {
         if (chatChoiceIndex !== undefined && chatChoiceIndex !== sourceIndex) throw new UnsupportedProtocolFeatureError('choices: 多个 Chat choice.index 不能合并为单次跨协议响应');
         chatChoiceIndex = sourceIndex;
         const delta = choice.delta || choice.message || {};
+        const thought = typeof delta.reasoning_content === 'string' ? delta.reasoning_content : typeof delta.reasoning === 'string' ? delta.reasoning : '';
+        const mirroredDetailText = Array.isArray(delta.reasoning_details) && delta.reasoning_details.filter(item => item?.type === 'reasoning.text').map(item => item.text || '').join('');
+        if (thought && mirroredDetailText !== thought) {
+          if (!activeChatReasoning || activeChatReasoning.ended) activeChatReasoning = reasoningStart(events, `chat-text:${chatReasoningSegment++}`, { reasoning_content: '' });
+          const state = activeChatReasoning;
+          reasoningDelta(events, state, thought);
+          state.raw.reasoning_content = state.text;
+        }
+        if ((delta.content || delta.refusal || delta.tool_calls?.length || choice.finish_reason) && activeChatReasoning && !activeChatReasoning.ended) reasoningEnd(events, activeChatReasoning);
+        if (Array.isArray(delta.reasoning_details)) {
+          for (const [detailIndex, detail] of delta.reasoning_details.entries()) {
+            const key = `chat-detail:${detail.index ?? detailIndex}`;
+            const empty = { ...detail, ...(detail.type === 'reasoning.text' ? { text: '' } : {}), ...(detail.type === 'reasoning.summary' ? { summary: '' } : {}) };
+            const state = reasoningStart(events, key, { reasoning_details: [empty] });
+            const previous = state.raw.reasoning_details[0];
+            for (const [name, value] of Object.entries(detail)) {
+              if (name === 'text' && detail.type === 'reasoning.text') {
+                previous.text = (previous.text || '') + value;
+                reasoningDelta(events, state, value);
+              } else if (name === 'summary' && detail.type === 'reasoning.summary') {
+                previous.summary = (previous.summary || '') + value;
+                reasoningDelta(events, state, value, 'summary');
+              } else {
+                if (Object.prototype.hasOwnProperty.call(previous, name) && !isDeepStrictEqual(previous[name], value)) throw new UnsupportedProtocolFeatureError(`reasoning_details.${name}: 没有已核实的不透明分片合并规则，不能覆盖或猜测拼接`);
+                previous[name] = cloneJson(value);
+              }
+            }
+            if (choice.finish_reason) reasoningEnd(events, state);
+          }
+        }
         const text = contentToText(delta.content);
         if (text || Array.isArray(choice.logprobs?.content)) {
           events.push({ type: 'text_delta', text, ...(Array.isArray(choice.logprobs?.content) ? { logprobs: cloneJson(choice.logprobs.content) } : {}) });
@@ -1857,6 +1974,7 @@ function createTargetEventParser(targetProtocol, publicModel) {
           }
         }
         if (choice.finish_reason) {
+          for (const state of reasoning.values()) if (!state.ended) reasoningEnd(events, state);
           pendingChatFinish = {
             stopReason: choice.finish_reason === 'content_filter' ? 'content_filter' : delta.refusal || accumulator.accumulator.refusal ? 'refusal' : mapChatStopToCanonical(choice.finish_reason),
           };
@@ -1892,7 +2010,6 @@ function createTargetEventParser(targetProtocol, publicModel) {
       if (payload.response && Object.prototype.hasOwnProperty.call(payload.response, 'service_tier')) events.push({ type: 'metadata', serviceTier: cloneJson(payload.response.service_tier) });
       if (payload.response) assertResponseContentSupported('responses', payload.response);
       if (payload.item) assertResponseContentSupported('responses', { output: [payload.item] });
-      if (/^response\.reasoning/.test(type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Responses reasoning 事件 ${type}`);
       if (type === 'response.created' || type === 'response.in_progress') {
         events.push(...canonicalEventStart(accumulator.accumulator, payload.response || payload));
       } else if (type === 'response.output_item.added') {
@@ -1900,7 +2017,9 @@ function createTargetEventParser(targetProtocol, publicModel) {
           events.push(...canonicalEventStart(accumulator.accumulator, payload.response || {}));
         }
         const item = payload.item || {};
-        if (item.type === 'function_call') {
+        if (item.type === 'reasoning') {
+          reasoningStart(events, item.id || payload.output_index, item);
+        } else if (item.type === 'function_call') {
           events.push({
             type: 'tool_start',
             index: resolveToolIndex(item.id || item.call_id || payload.output_index),
@@ -1908,6 +2027,10 @@ function createTargetEventParser(targetProtocol, publicModel) {
             name: item.name,
           });
         }
+      } else if (type === 'response.reasoning_text.delta' || type === 'response.reasoning_summary_text.delta') {
+        const key = payload.item_id || payload.output_index;
+        const state = reasoning.get(String(key)) || reasoningStart(events, key, { id: payload.item_id, type: 'reasoning', summary: [] });
+        reasoningDelta(events, state, payload.delta || '', type.includes('summary') ? 'summary' : 'text', payload.summary_index || 0);
       } else if (type === 'response.output_text.delta') {
         events.push({ type: 'text_delta', text: payload.delta || '' });
         responseProbabilityEvents(events, payload);
@@ -1928,7 +2051,10 @@ function createTargetEventParser(targetProtocol, publicModel) {
         });
       } else if (type === 'response.output_item.done') {
         const item = payload.item || {};
-        if (item.type === 'function_call') {
+        if (item.type === 'reasoning') {
+          const state = reasoning.get(String(item.id || payload.output_index)) || reasoningStart(events, item.id || payload.output_index, item);
+          reasoningEnd(events, state, item);
+        } else if (item.type === 'function_call') {
           const index = resolveToolIndex(item.id || item.call_id || payload.output_index);
           if (!accumulator.accumulator.tools.get(index)?.arguments && item.arguments) {
             events.push({ type: 'tool_args_delta', index, partial: item.arguments });
@@ -1937,6 +2063,32 @@ function createTargetEventParser(targetProtocol, publicModel) {
         }
       } else if (type === 'response.completed' || type === 'response.incomplete') {
         const response = payload.response || {};
+        if (!accumulator.accumulator.orderedParts.length && response.output?.some(item => item?.type === 'reasoning')) {
+          // Some compatible endpoints send only a complete terminal snapshot.
+          // Replay its logical items in source order, never in type buckets.
+          const canonical = parseResponsesResponse(response);
+          if (!accumulator.accumulator.id) events.push(...canonicalEventStart(accumulator.accumulator, response));
+          for (const [partIndex, part] of canonical.parts.entries()) {
+            if (part.type === 'reasoning') {
+              const key = part.originBlock.id || `terminal:${partIndex}`;
+              const state = reasoningStart(events, key, part.originBlock);
+              reasoningEnd(events, state, part.originBlock);
+            } else if (part.type === 'text') events.push({ type: 'text_delta', text: part.text, ...(Object.prototype.hasOwnProperty.call(part, 'logprobs') ? { logprobs: cloneJson(part.logprobs) } : {}) });
+            else if (part.type === 'refusal') events.push({ type: 'refusal_delta', text: part.text });
+            else if (part.type === 'tool_use') {
+              const index = resolveToolIndex(part.id);
+              events.push({ type: 'tool_start', index, id: part.id, name: part.name }, { type: 'tool_args_delta', index, partial: part.arguments }, { type: 'tool_end', index });
+            }
+          }
+          sawFinish = true;
+          events.push({ type: 'finish', stopReason: canonical.stopReason, usage: canonical.usage });
+          return emit(events);
+        }
+        for (const [outputIndex, item] of (response.output || []).entries()) if (item?.type === 'reasoning') {
+          const key = item.id || outputIndex;
+          const state = reasoning.get(String(key)) || reasoningStart(events, key, item);
+          reasoningEnd(events, state, item);
+        }
         for (const [output_index, item] of (response.output || []).entries()) for (const [content_index, block] of (item.content || []).entries()) {
           if (block.type === 'output_text') responseProbabilityEvents(events, { ...block, output_index, content_index }, true);
         }
@@ -2004,7 +2156,9 @@ function createTargetEventParser(targetProtocol, publicModel) {
       }
       const block = payload.content_block || {};
       assertResponseContentSupported('messages', { content: [block] });
-      if (block.type === 'tool_use') {
+      if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+        reasoningStart(events, payload.index, block);
+      } else if (block.type === 'tool_use') {
         events.push({
           type: 'tool_start',
           index: resolveToolIndex(payload.index),
@@ -2016,8 +2170,14 @@ function createTargetEventParser(targetProtocol, publicModel) {
       }
     } else if (type === 'content_block_delta') {
       const delta = payload.delta || {};
-      if (['thinking_delta', 'signature_delta'].includes(delta.type)) throw new UnsupportedProtocolFeatureError(`无法保真转换 Messages thinking/signature 事件 ${delta.type}`);
-      if (delta.type === 'text_delta') {
+      if (['thinking_delta', 'signature_delta'].includes(delta.type)) {
+        const state = reasoning.get(String(payload.index));
+        if (!state || state.ended) throw new UnsupportedProtocolFeatureError('thinking/signature 分片没有对应活动思考块');
+        if (delta.type === 'thinking_delta') {
+          state.raw.thinking = (state.raw.thinking || '') + (delta.thinking || '');
+          reasoningDelta(events, state, delta.thinking || '', 'summary');
+        } else state.raw.signature = (state.raw.signature || '') + (delta.signature || '');
+      } else if (delta.type === 'text_delta') {
         events.push({ type: 'text_delta', text: delta.text || '' });
       } else if (delta.type === 'input_json_delta') {
         events.push({
@@ -2027,11 +2187,17 @@ function createTargetEventParser(targetProtocol, publicModel) {
         });
       }
     } else if (type === 'content_block_stop') {
+      const thought = reasoning.get(String(payload.index));
+      if (thought) reasoningEnd(events, thought);
       const index = toolIndexes.get(String(payload.index));
       if (typeof index === 'number') {
         events.push({ type: 'tool_end', index });
       }
     } else if (type === 'message_delta') {
+      if (payload.delta?.stop_reason && [...reasoning.values()].some(state => !state.ended)) {
+        sawFinish = true;
+        return emit([{ type: 'error', code: 'incomplete_upstream_stream', message: 'Messages 思考块在终态前缺少完整结束事件' }]);
+      }
       accumulator.accumulator.usage = usageFromMessages(payload.usage, accumulator.accumulator.usage);
       if (payload.delta?.stop_reason) events.push({
         type: 'finish',
@@ -2076,7 +2242,9 @@ function createTargetEventParser(targetProtocol, publicModel) {
           usage: accumulator.accumulator.usage,
         };
         pendingChatFinish = null;
-        return emit([finish]);
+        const events = [];
+        for (const state of reasoning.values()) if (!state.ended) reasoningEnd(events, state);
+        return emit([...events, finish]);
       }
       sawFinish = true;
       return emit([{ type: 'error', code: 'incomplete_upstream_stream', message: '上游流在有效终态前结束' }]);
@@ -2107,11 +2275,15 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
     textBlockIndex: null,
     toolBlockIndexes: new Map(),
     responseOutputItems: new Map(),
+    reasoning: new Map(),
+    segmentText: '',
+    textItemCount: 0,
     nextOutputIndex: 0,
     textOutputIndex: null,
     textItemId: null,
     usage: null,
     stopReason: 'end_turn',
+    nextSequence: 0,
   };
 
   function decorate(entries, canonicalEvent = {}) {
@@ -2124,6 +2296,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
           for (const choice of entry.data.choices) if (choice.delta && Object.prototype.hasOwnProperty.call(choice.delta, 'content')) choice.logprobs = { content: cloneJson(canonicalEvent.logprobs), refusal: null };
         }
       } else if (entryProtocol === 'responses') {
+        if (entry.data && typeof entry.data === 'object' && entry.event) entry.data.sequence_number = state.nextSequence++;
         if (entry.data?.response && Object.prototype.hasOwnProperty.call(state, 'serviceTier')) entry.data.response.service_tier = cloneJson(state.serviceTier);
         if (entry.event === 'response.output_text.delta' && Object.prototype.hasOwnProperty.call(canonicalEvent, 'logprobs')) entry.data.logprobs = cloneJson(canonicalEvent.logprobs);
       }
@@ -2201,9 +2374,118 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
     return state.textBlockIndex;
   }
 
+  function closeText() {
+    const events = [];
+    if (entryProtocol === 'messages' && state.textBlockIndex !== null) {
+      events.push({ event: 'content_block_stop', data: { type: 'content_block_stop', index: state.textBlockIndex } });
+      state.textBlockIndex = null;
+    } else if (entryProtocol === 'responses' && state.textOutputIndex !== null) {
+      const common = { item_id: state.textItemId, output_index: state.textOutputIndex, content_index: 0 };
+      const part = { type: 'output_text', text: state.segmentText, annotations: [] };
+      const item = { id: state.textItemId, type: 'message', status: 'completed', role: 'assistant', content: [part] };
+      events.push({ event: 'response.output_text.done', data: { type: 'response.output_text.done', ...common, text: part.text } });
+      events.push({ event: 'response.content_part.done', data: { type: 'response.content_part.done', ...common, part } });
+      events.push({ event: 'response.output_item.done', data: { type: 'response.output_item.done', output_index: common.output_index, item } });
+      state.responseOutputItems.set(common.output_index, item);
+      state.textOutputIndex = null;
+    }
+    state.segmentText = '';
+    return events;
+  }
+
+  function handleReasoningStart(event) {
+    if (state.reasoning.has(event.index)) return [];
+    const events = [...ensureStarted(), ...closeText()];
+    const block = { part: cloneJson(event.part), ended: false, summaryStarted: new Set(), text: '', emittedText: '', summaries: [] };
+    state.reasoning.set(event.index, block);
+    if (entryProtocol === 'responses') {
+      block.outputIndex = state.nextOutputIndex++;
+      block.itemId = block.part.originProtocol === 'responses' && entryProtocol === sourceProtocol && block.part.originBlock?.id
+        || `rs_${state.responseId.replace(/^resp_/, '')}_${block.outputIndex}`;
+      events.push({ event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index: block.outputIndex,
+        item: { id: block.itemId, type: 'reasoning', status: 'in_progress', summary: [], content: [] } } });
+    } else if (entryProtocol === 'messages') {
+      block.blockIndex = state.nextBlockIndex++;
+      if (block.part.originBlock?.type !== 'redacted_thinking') events.push({ event: 'content_block_start', data: { type: 'content_block_start', index: block.blockIndex, content_block: { type: 'thinking', thinking: '' } } });
+    }
+    return events;
+  }
+
+  function handleReasoningDelta(event) {
+    const block = state.reasoning.get(event.index);
+    if (!block || block.ended) throw new UnsupportedProtocolFeatureError('reasoning: 分片没有对应活动块');
+    const text = event.text || '';
+    if (event.kind === 'summary') block.summaries[event.summaryIndex || 0] = (block.summaries[event.summaryIndex || 0] || '') + text;
+    else block.text += text;
+    if (entryProtocol === 'chat_completions') {
+      // Opaque text and summaries are emitted together with their origin ticket
+      // at block completion. Plain DeepSeek text can stream immediately.
+      if (event.kind === 'summary' || block.part.opaque) return [];
+      block.emittedText += text;
+      return [{ event: null, data: { id: state.responseId, object: 'chat.completion.chunk', created: state.createdAt, model: publicModel,
+        choices: [{ index: 0, delta: { reasoning_content: text }, finish_reason: null }] } }];
+    }
+    if (entryProtocol === 'messages') return [];
+    const common = { item_id: block.itemId, output_index: block.outputIndex };
+    if (event.kind === 'summary') {
+      const index = event.summaryIndex || 0, events = [];
+      if (!block.summaryStarted.has(index)) {
+        block.summaryStarted.add(index);
+        events.push({ event: 'response.reasoning_summary_part.added', data: { type: 'response.reasoning_summary_part.added', ...common, summary_index: index, part: { type: 'summary_text', text: '' } } });
+      }
+      events.push({ event: 'response.reasoning_summary_text.delta', data: { type: 'response.reasoning_summary_text.delta', ...common, summary_index: index, delta: text } });
+      return events;
+    }
+    return [{ event: 'response.reasoning_text.delta', data: { type: 'response.reasoning_text.delta', ...common, content_index: 0, delta: text } }];
+  }
+
+  function handleReasoningEnd(event) {
+    const block = state.reasoning.get(event.index);
+    if (!block || block.ended) return [];
+    block.ended = true;
+    block.part = cloneJson(event.part);
+    const wire = require('./reasoning-content').renderReasoning(entryProtocol, block.part, options.reasoningTransport);
+    // Preserve readable source names separately from the answer and the opaque
+    // transport ticket. Only completed blocks reach this point.
+    const upstreamReasoning = wire.airouter_upstream_reasoning || { ...cloneJson(block.part.originBlock), protocol: block.part.originProtocol };
+    wire.airouter_upstream_reasoning = upstreamReasoning;
+    const events = [];
+    if (entryProtocol === 'chat_completions') {
+      const delta = { ...wire };
+      if (!block.part.opaque && typeof delta.reasoning_content === 'string') {
+        if (!delta.reasoning_content.startsWith(block.emittedText)) throw new UnsupportedProtocolFeatureError('reasoning: 完成文本与已输出分片不一致');
+        delta.reasoning_content = delta.reasoning_content.slice(block.emittedText.length);
+        if (!delta.reasoning_content) delete delta.reasoning_content;
+      }
+      if (Object.keys(delta).length) events.push({ event: null, data: { id: state.responseId, object: 'chat.completion.chunk', created: state.createdAt, model: publicModel,
+        choices: [{ index: 0, delta, finish_reason: null }] } });
+    } else if (entryProtocol === 'messages') {
+      if (wire.type === 'redacted_thinking') events.push({ event: 'content_block_start', data: { type: 'content_block_start', index: block.blockIndex, content_block: wire } });
+      else {
+        events.push({ event: 'content_block_delta', data: { type: 'content_block_delta', index: block.blockIndex, delta: { type: 'thinking_delta', thinking: wire.thinking } } });
+        if (typeof wire.signature === 'string') events.push({ event: 'content_block_delta', data: { type: 'content_block_delta', index: block.blockIndex, delta: { type: 'signature_delta', signature: wire.signature } } });
+      }
+      events.push({ event: 'content_block_stop', data: { type: 'content_block_stop', index: block.blockIndex, airouter_upstream_reasoning: upstreamReasoning } });
+    } else {
+      wire.id = block.itemId;
+      wire.status = 'completed';
+      const common = { item_id: block.itemId, output_index: block.outputIndex };
+      if (block.part.text) events.push({ event: 'response.reasoning_text.done', data: { type: 'response.reasoning_text.done', ...common, content_index: 0, text: block.part.text } });
+      for (const [index, part] of (wire.summary || []).entries()) {
+        if (!block.summaryStarted.has(index)) events.push({ event: 'response.reasoning_summary_part.added', data: { type: 'response.reasoning_summary_part.added', ...common, summary_index: index, part: { type: 'summary_text', text: '' } } });
+        events.push({ event: 'response.reasoning_summary_text.done', data: { type: 'response.reasoning_summary_text.done', ...common, summary_index: index, text: part.text } });
+        events.push({ event: 'response.reasoning_summary_part.done', data: { type: 'response.reasoning_summary_part.done', ...common, summary_index: index, part } });
+      }
+      events.push({ event: 'response.output_item.done', data: { type: 'response.output_item.done', output_index: block.outputIndex, item: wire } });
+      state.responseOutputItems.set(block.outputIndex, wire);
+    }
+    return events;
+  }
+
   function handleText(text) {
     const events = ensureStarted();
     state.text += text;
+    state.segmentText += text;
     if (entryProtocol === 'chat_completions') {
       events.push({
         event: null,
@@ -2235,7 +2517,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
     } else {
       if (state.textOutputIndex === null) {
         state.textOutputIndex = state.nextOutputIndex++;
-        state.textItemId = `msg_${state.responseId.replace(/^resp_/, '')}`;
+        state.textItemId = `msg_${state.responseId.replace(/^resp_/, '')}${state.textItemCount++ ? `_${state.textOutputIndex}` : ''}`;
         events.push({
           event: 'response.output_item.added',
           data: {
@@ -2276,7 +2558,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
   }
 
   function handleToolStart(event) {
-    const events = ensureStarted();
+    const events = [...ensureStarted(), ...closeText()];
     if (state.tools.has(event.index)) {
       const existing = state.tools.get(event.index);
       existing.id = event.id || existing.id;
@@ -2430,6 +2712,8 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
         data: { type: 'content_block_stop', index: blockIndex },
       });
     } else if (entryProtocol === 'responses') {
+      const item = { id: tool.id, type: 'function_call', status: 'completed', call_id: tool.id, name: tool.name, arguments: tool.args };
+      state.responseOutputItems.set(tool.outputIndex, item);
       events.push({
         event: 'response.output_item.done',
         data: {
@@ -2453,6 +2737,10 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
     if (state.finished) {
       return [];
     }
+    if ([...state.reasoning.values()].some(block => !block.ended)) {
+      state.finished = true;
+      return [{ event: 'error', data: { type: 'error', error: { code: 'incomplete_upstream_stream', message: '思考块缺少完整终态，不能伪造成功响应' } } }];
+    }
     if (entryProtocol !== 'messages' && !['end_turn', 'stop_sequence', 'max_tokens', 'tool_use', 'refusal', 'content_filter', ...(entryProtocol === 'chat_completions' ? ['model_context_window_exceeded'] : [])].includes(event.stopReason || 'end_turn')) {
       state.finished = true;
       return [{ event: 'error', data: { type: 'error', error: { code: 'unsupported_protocol_feature', message: `无法保真转换上游终态 ${event.stopReason}` } } }];
@@ -2474,7 +2762,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
     // Chat has no per-call end event; close each still-open tool exactly once
     // before the response terminal (also covers Responses completion-only tools).
     for (const index of state.toolOrder) events.push(...handleToolEnd({ index }));
-    const text = state.text;
+    const text = state.segmentText;
 
     if (entryProtocol === 'chat_completions') {
       events.push({
@@ -2566,6 +2854,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
         role: 'assistant',
         content: [{ type: 'output_text', text, annotations: [], ...(Array.isArray(state.logprobs?.content) ? { logprobs: cloneJson(state.logprobs.content) } : {}) }],
       });
+      state.responseOutputItems.set(state.textOutputIndex, output.at(-1));
     }
     for (const index of state.toolOrder) {
       const tool = state.tools.get(index);
@@ -2578,6 +2867,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
           name: tool.name,
           arguments: tool.args,
         });
+        state.responseOutputItems.set(tool.outputIndex, output.at(-1));
       }
     }
     if (state.refusalOutputIndex !== null) {
@@ -2588,6 +2878,7 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
       events.push({ event: 'response.content_part.done', data: { type: 'response.content_part.done', ...position, part: content } });
       events.push({ event: 'response.output_item.done', data: { type: 'response.output_item.done', output_index: state.refusalOutputIndex, item } });
       output.push(item);
+      state.responseOutputItems.set(state.refusalOutputIndex, item);
     }
     const incomplete = ['max_tokens', 'content_filter'].includes(state.stopReason);
     events.push({
@@ -2601,8 +2892,8 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
           status: incomplete ? 'incomplete' : 'completed',
           ...(incomplete ? { incomplete_details: { reason: state.stopReason === 'content_filter' ? 'content_filter' : 'max_output_tokens' } } : {}),
           model: publicModel,
-          output,
-          output_text: text,
+          output: [...state.responseOutputItems.entries()].sort(([a], [b]) => a - b).map(([, item]) => item),
+          output_text: state.text,
           ...(state.usage ? { usage: serializeUsage(state.usage, 'responses') } : {}),
         },
       },
@@ -2628,6 +2919,9 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
       if (event.type === 'start') {
         return decorate(ensureStarted(event), event);
       }
+      if (event.type === 'reasoning_start') return decorate(handleReasoningStart(event), event);
+      if (event.type === 'reasoning_delta') return decorate(handleReasoningDelta(event), event);
+      if (event.type === 'reasoning_end') return decorate(handleReasoningEnd(event), event);
       if (event.type === 'text_delta') {
         return decorate(handleText(event.text || ''), event);
       }
@@ -2646,21 +2940,21 @@ function createEntryEventSerializer(entryProtocol, publicModel, sourceProtocol, 
       }
       if (event.type === 'error') {
         state.finished = true;
-        return [{ event: 'error', data: { type: 'error', error: { type: 'upstream_error', message: event.message, code: event.code } } }];
+        return decorate([{ event: 'error', data: { type: 'error', error: { type: 'upstream_error', message: event.message, code: event.code } } }]);
       }
       return [];
     },
     finish() {
       if (state.finished) return [];
       state.finished = true;
-      return [{ event: 'error', data: { type: 'error', error: { code: 'incomplete_upstream_stream', message: '上游流在有效终态前结束' } } }];
+      return decorate([{ event: 'error', data: { type: 'error', error: { code: 'incomplete_upstream_stream', message: '上游流在有效终态前结束' } } }]);
     },
   };
 }
 
-function createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, includeUsage }) {
+function createProtocolStreamBridge({ entryProtocol, targetProtocol, publicModel, includeUsage, reasoningTransport }) {
   const targetParser = createTargetEventParser(targetProtocol, publicModel);
-  const entrySerializer = createEntryEventSerializer(entryProtocol, publicModel, targetProtocol, { includeUsage });
+  const entrySerializer = createEntryEventSerializer(entryProtocol, publicModel, targetProtocol, { includeUsage, reasoningTransport });
   let finished = false;
 
   return {
@@ -2718,8 +3012,15 @@ function responseToEntrySse(entryProtocol, canonicalResponse, publicModel, optio
   }));
 
   let toolIndex = 0;
+  let reasoningIndex = 0;
   for (const part of canonicalResponse.parts || []) {
-    if (part.type === 'text') {
+    if (part.type === 'reasoning') {
+      const index = reasoningIndex++;
+      events.push(...serializer.handle({ type: 'reasoning_start', index, part }));
+      if (part.text) events.push(...serializer.handle({ type: 'reasoning_delta', index, text: part.text }));
+      for (const [summaryIndex, summary] of (part.summary || []).entries()) events.push(...serializer.handle({ type: 'reasoning_delta', index, text: summary.text, kind: 'summary', summaryIndex }));
+      events.push(...serializer.handle({ type: 'reasoning_end', index, part }));
+    } else if (part.type === 'text') {
       events.push(...serializer.handle({ type: 'text_delta', text: part.text, ...(Object.prototype.hasOwnProperty.call(part, 'logprobs') ? { logprobs: cloneJson(part.logprobs) } : {}) }));
     } else if (part.type === 'refusal') {
       events.push(...serializer.handle({ type: 'refusal_delta', text: part.text }));
