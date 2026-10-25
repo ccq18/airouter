@@ -247,3 +247,18 @@ for (const from of PROTOCOLS) for (const to of PROTOCOLS) {
     }
   });
 }
+
+test('standalone effort keeps each official value and null exactly; unsupported subfields never disappear', () => {
+  for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', null]) {
+    assert.deepEqual(bridge('chat_completions', 'responses', { messages: [], reasoning_effort: effort }).reasoning, { effort });
+    const sent = bridge('responses', 'chat_completions', { input: [], reasoning: { effort } });
+    assert.equal(sent.reasoning_effort, effort); assert.ok(!Object.hasOwn(sent, 'reasoning'));
+  }
+  for (const effort of ['automatic', 1, true, {}, []]) {
+    assert.throws(() => bridge('chat_completions', 'responses', { messages: [], reasoning_effort: effort }), /reasoning_effort/);
+    assert.throws(() => bridge('responses', 'chat_completions', { input: [], reasoning: { effort } }), /reasoning.effort/);
+  }
+  for (const field of ['summary', 'encrypted_content', 'generate_summary', 'context', 'future_control']) {
+    assert.throws(() => bridge('responses', 'chat_completions', { input: [], reasoning: { effort: 'low', [field]: null } }), new RegExp('reasoning.' + field));
+  }
+});

@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
+const compatibility = require('../scripts/protocol-compatibility-catalog');
 
 // Public HTTP contracts only. Do not import a router, bridge, serializer or
 // production SSE parser here. The provider fixtures and expected wire bodies
@@ -933,7 +934,7 @@ function assertMappedUsage(source, usage, variant) {
 const MATRIX_FEATURES = ['text-cache', 'refusal', 'truncation', 'usage-absent', 'usage-partial', 'parallel-tools-two-rounds'];
 for (const source of INTERFACES) for (const backend of INTERFACES) for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
   for (const feature of MATRIX_FEATURES.filter(value => value !== 'parallel-tools-two-rounds')) {
-    matrixCase(feature, source, backend, wire, stream, async () => {
+    matrixCase(feature, source, backend, wire, stream, async t => {
       const variant = feature === 'text-cache' ? 'text' : feature;
       plan = contractFixture(backend, wire, contractPayload(backend, variant));
       const body = supplierRequest(source, routeFor(backend), stream), before = calls.length;
@@ -952,7 +953,24 @@ for (const source of INTERFACES) for (const backend of INTERFACES) for (const wi
         assert.equal(view.terminal, feature === 'truncation' ? source === CHAT ? 'length' : source === RESPONSES ? 'incomplete' : 'max_tokens' : source === CHAT ? 'stop' : source === RESPONSES ? 'completed' : 'end_turn');
         if (feature === 'truncation' && source === RESPONSES) assert.equal(view.reason, 'max_output_tokens');
       }
-      assertMappedUsage(source, view.usage, feature);
+      if (feature === 'text-cache') {
+        for (const field of compatibility.usagePoints) {
+          const cell = { point: 'response.usage.' + field, source, backend, wire, stream };
+          await t.test(compatibility.caseName(cell), () => {
+            const usage = view.usage;
+            assert.ok(usage, 'provider supplied usage must survive');
+            const input = source === CHAT ? usage.prompt_tokens : usage.input_tokens;
+            const output = source === CHAT ? usage.completion_tokens : usage.output_tokens;
+            const read = source === CHAT ? usage.prompt_tokens_details?.cached_tokens : source === RESPONSES ? usage.input_tokens_details?.cached_tokens : usage.cache_read_input_tokens;
+            const write = source === CHAT ? usage.prompt_tokens_details?.cache_write_tokens : source === RESPONSES ? usage.input_tokens_details?.cache_write_tokens : usage.cache_creation_input_tokens;
+            if (field === 'input') assert.equal(input, source === MESSAGES ? 5 : 15, 'input base must retain its protocol meaning');
+            if (field === 'output') assert.equal(output, 2);
+            if (field === 'total') assert.equal(source === MESSAGES ? input + read + write + output : usage.total_tokens, 17, 'cache tokens are not added twice');
+            if (field === 'cache-read') assert.equal(read, 6);
+            if (field === 'cache-write') assert.equal(write, 4);
+          });
+        }
+      } else assertMappedUsage(source, view.usage, feature);
       if (backend === MESSAGES && !['usage-absent', 'usage-partial'].includes(feature)) {
         assert.ok(fieldValues(view.usage, 'cache_creation').some(value => value?.ephemeral_5m_input_tokens === 1 && value?.ephemeral_1h_input_tokens === 3), 'cache write TTL breakdown must survive natively or as source-qualified usage detail');
       }
@@ -1079,8 +1097,9 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
         else if (source === RESPONSES) body.reasoning = { effort: 'high', summary: 'auto' };
         else { body.thinking = { type: 'enabled', budget_tokens: 1024 }; body.max_tokens = 2048; }
         field = source === CHAT ? 'reasoning' : source === RESPONSES ? 'reasoning' : 'thinking';
-        // Rich reasoning/summary/budget semantics have no implemented full
-        // cross-protocol lifecycle. Do not bless silently reduced controls.
+        // Only the separate effort control has an equivalent mapping; rich
+        // summary/budget requests must still reject without deleting fields.
+        supported ||= source === CHAT && backend === RESPONSES;
       }
       if (feature === 'stop') {
         body[source === CHAT ? 'stop' : 'stop_sequences'] = ['END', 'STOP'];
@@ -1100,6 +1119,7 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
         assert.equal(names.length, 1, 'exactly one output budget, no conflicting defaults'); assert.equal(sent[names[0]], 91);
       }
       if (feature === 'metadata') assert.deepEqual(sent.metadata, metadata);
+      if (feature === 'reasoning-control') { assert.deepEqual(sent.reasoning, { effort: 'high' }); assert.ok(!Object.hasOwn(sent, 'reasoning_effort')); }
       if (feature === 'cache') { assert.equal(sent.prompt_cache_key, 'fixture-prefix'); assert.equal(sent.prompt_cache_retention, '24h'); }
       if (feature === 'structured-output') assert.deepEqual(backend === CHAT ? sent.response_format : sent.text.format, backend === CHAT ? { type: 'json_schema', json_schema: { name: 'fixture', strict: true, schema } } : { type: 'json_schema', name: 'fixture', strict: true, schema });
       if (feature === 'stop') assert.deepEqual(sent[backend === CHAT ? 'stop' : 'stop_sequences'], ['END', 'STOP']);
@@ -1515,5 +1535,98 @@ for (const source of INTERFACES) for (const backend of INTERFACES) {
     const next = await call(source, supplierRequest(source, route, false));
     assert.equal(next.status, 200, next.text); assert.equal(calls.length, before + 2);
     assert.match(calls.at(-1).path, /-primary\//, 'cancellation must not cool the healthy primary');
+  });
+}
+
+// Atomic positive contracts: a clean rejection is still a failed compatibility
+// point. Reuse this file's HTTP fixture instead of creating a second framework.
+const controlPoints = new Map(compatibility.points.map(point => [point.id, point]));
+const valueAt = (object, field) => field.split('.').reduce((value, key) => value?.[key], object);
+const plainContent = content => typeof content === 'string' ? content : (content || []).map(part => part.text || '').join('');
+for (const cell of compatibility.requestCells().filter(cell => cell.applicable)) {
+  test(cell.name, async () => {
+    const point = controlPoints.get(cell.point);
+    const body = { ...request(cell.source, routeFor(cell.backend), cell.stream), ...clone(point.patches[cell.source]) };
+    const payload = contractPayload(cell.backend, point.fixture === 'single-tool' ? 'tools' : 'text');
+    if (point.fixture === 'single-tool') {
+      if (cell.backend === CHAT) payload.choices[0].message.tool_calls = payload.choices[0].message.tool_calls.slice(0, 1);
+      else if (cell.backend === RESPONSES) payload.output = payload.output.slice(0, 1);
+      else payload.content = payload.content.slice(0, 1);
+    }
+    if (cell.point === 'request.n.multiple') payload.choices.push({ index: 1, message: { role: 'assistant', content: '第二个答案🙂' }, finish_reason: 'stop' });
+    if (cell.point.startsWith('request.store.true.') && cell.backend === RESPONSES) payload.store = true;
+    plan = contractFixture(cell.backend, cell.wire, payload);
+    if (cell.point === 'request.n.multiple' && cell.stream) {
+      const { choices, usage, ...top } = payload;
+      plan.events = [
+        { data: { ...top, object: 'chat.completion.chunk', choices: choices.map(choice => ({ index: choice.index, delta: clone(choice.message), finish_reason: null })) } },
+        { data: { ...top, object: 'chat.completion.chunk', choices: choices.map(choice => ({ index: choice.index, delta: {}, finish_reason: choice.finish_reason })), usage } },
+        { raw: '[DONE]' },
+      ];
+    }
+    const before = calls.length;
+    const result = await call(cell.source, body);
+    assert.equal(result.status, 200, `${cell.point}: legal compatibility contract returned ${result.status}; provider calls=${calls.length - before}; ${result.text}`);
+    assert.equal(calls.length, before + 1, 'exactly one provider generation');
+    assert.equal(calls.at(-1).protocol, cell.backend);
+    const sent = calls.at(-1).body;
+    assert.equal(sent.model, backendModel(cell.backend));
+    assert.equal(sent.stream, cell.stream);
+    if (cell.source === cell.backend) assert.deepEqual(sent, { ...body, model: backendModel(cell.backend) }, 'native request fields must be preserved verbatim');
+    else if (point.semantic === 'history') {
+      assert.deepEqual((cell.backend === RESPONSES ? sent.input : sent.messages).map(message => [message.role, plainContent(message.content)]), [['user', 'hello'], ['assistant', 'prior'], ['user', 'next']]);
+    } else if (point.semantic === 'instructions') {
+      const messages = cell.backend === RESPONSES ? sent.input : sent.messages;
+      const system = sent.system ?? sent.instructions;
+      if (system !== undefined && plainContent(system) !== '') {
+        assert.equal(plainContent(system), 'system-fixture');
+        assert.deepEqual(messages.map(message => [message.role, plainContent(message.content)]), [['user', '边界🙂']]);
+      } else assert.deepEqual(messages.map(message => [message.role, plainContent(message.content)]), [['system', 'system-fixture'], ['user', '边界🙂']]);
+    } else {
+      const expected = cell.point === 'request.output_budget' && cell.source === MESSAGES && cell.backend === CHAT ? { max_tokens: 91 } : point.expected[cell.backend];
+      for (const [field, value] of Object.entries(expected)) assert.deepEqual(valueAt(sent, field), value, 'forwarded field ' + field);
+      const targetRoots = new Set(Object.keys(expected).map(field => field.split('.')[0]));
+      for (const field of Object.keys(point.patches[cell.source])) if (!targetRoots.has(field)) assert.ok(!Object.hasOwn(sent, field), 'source-only control must not leak to target: ' + field);
+    }
+    if (cell.point === 'request.n.multiple') {
+      if (!cell.stream) assert.deepEqual(JSON.parse(result.text).choices, payload.choices);
+      else {
+        const events = readEvents(result.text), chunks = events.flatMap(event => event.data?.choices || []);
+        assert.equal(events.at(-1).raw, '[DONE]');
+        assert.deepEqual(chunks.filter(choice => choice.finish_reason != null).map(choice => [choice.index, choice.finish_reason]), [[0, 'stop'], [1, 'stop']]);
+        for (const choice of payload.choices) assert.equal(chunks.filter(chunk => chunk.index === choice.index).map(chunk => chunk.delta?.content || '').join(''), choice.message.content);
+      }
+      return;
+    }
+    const view = replyView(cell.source, result, cell.stream);
+    const terminal = inspectTerminal(cell.source, result, cell.stream).terminal;
+    assert.equal(terminal, cell.source === RESPONSES ? 'completed' : cell.source === CHAT ? point.fixture === 'single-tool' ? 'tool_calls' : 'stop' : point.fixture === 'single-tool' ? 'tool_use' : 'end_turn', 'positive compatibility requires the actual success/tool terminal');
+    if (point.fixture === 'single-tool') assert.deepEqual(view.tools, [supplierTools[0]], 'response tool identity and arguments remain exact');
+    else assert.equal(view.text, '契约答案🙂');
+  });
+}
+
+for (const wire of ['json', 'sse']) for (const stream of [false, true]) {
+  const cell = { point: 'response.native.extensions', source: MESSAGES, backend: MESSAGES, wire, stream };
+  test(compatibility.caseName(cell), async () => {
+    const sample = contractPayload(MESSAGES);
+    sample.provider_extension = { marker: ['root', 7] };
+    sample.content[0].provider_extension = { marker: 'content' };
+    sample.usage.provider_extension = { currency: 'USD', amount: '0.000012' };
+    const fixture = contractFixture(MESSAGES, wire, sample);
+    if (wire === 'sse') for (const entry of fixture.events) if (entry.data.type === 'content_block_start') entry.data.content_block = { ...clone(sample.content[entry.data.index]), text: '' };
+    plan = fixture;
+    const before = calls.length;
+    const result = await call(MESSAGES, supplierRequest(MESSAGES, routeFor(MESSAGES), stream));
+    assert.equal(calls.length, before + 1);
+    const view = replyView(MESSAGES, result, stream);
+    const expected = { ...sample, model: routeFor(MESSAGES) };
+    if (!stream) return assert.deepEqual(view.payload, expected);
+    const start = clone(view.events.find(entry => entry.data.type === 'message_start').data.message);
+    const end = view.events.find(entry => entry.data.type === 'message_delta').data;
+    start.content = view.events.filter(entry => entry.data.type === 'content_block_start').map(entry => clone(entry.data.content_block));
+    for (const entry of view.events.filter(entry => entry.data.delta?.type === 'text_delta')) start.content[entry.data.index].text += entry.data.delta.text;
+    Object.assign(start, end.delta); start.usage = { ...start.usage, ...end.usage };
+    assert.deepEqual(start, expected, 'unknown root/content/usage extensions remain intact throughout native formatting');
   });
 }

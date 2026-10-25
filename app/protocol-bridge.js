@@ -733,10 +733,6 @@ function parseResponsesRequest(body, options = {}) {
     throw new UnsupportedProtocolFeatureError('Responses input 必须是字符串或数组');
   }
 
-  if (body.reasoning && typeof body.reasoning === 'object') {
-    throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移 reasoning 配置');
-  }
-
   for (const name of ['temperature', 'top_p', 'parallel_tool_calls', 'metadata', 'user']) {
     if (Object.prototype.hasOwnProperty.call(body, name)) {
       canonical.params[name] = body[name];
@@ -1113,10 +1109,6 @@ function hasBuiltinTools(body) {
   }));
 }
 
-function hasReasoningState(body) {
-  return Boolean(body && ((body.reasoning && typeof body.reasoning === 'object') || (body.thinking && typeof body.thinking === 'object')));
-}
-
 function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
   if (entryProtocol === targetProtocol) {
     return;
@@ -1131,10 +1123,6 @@ function assertCrossProtocolSupported(entryProtocol, targetProtocol, body) {
   if (hasBuiltinTools(body)) {
     throw new UnsupportedProtocolFeatureError('跨协议路由不支持内置服务端工具，请改用同协议候选');
   }
-  if (hasReasoningState(body)) {
-    throw new UnsupportedProtocolFeatureError('跨协议路由无法迁移 reasoning/thinking 状态');
-  }
-
   const crossesMessages = entryProtocol === 'messages' || targetProtocol === 'messages';
   function checkCache(value) {
     if (Array.isArray(value)) return value.forEach(checkCache);
@@ -1192,6 +1180,11 @@ function transformRequestForTarget({ entryProtocol, targetProtocol, body, target
     : targetProtocol === 'messages'
       ? serializeMessagesRequest(canonical, targetModel, stream)
       : serializeResponsesRequest(canonical, targetModel, stream);
+  if (nativeBridgeHistory) {
+    // Restoring gateway history must not discard native request controls.
+    const historyField = targetProtocol === 'responses' ? 'input' : 'messages';
+    return { ...cloneJson(body), model: targetModel, stream, [historyField]: result[historyField] };
+  }
   if (entryProtocol === 'responses' && targetProtocol === 'chat_completions' && Object.prototype.hasOwnProperty.call(controls, 'max_completion_tokens')) delete result.max_tokens;
   return Object.assign(result, controls);
 }

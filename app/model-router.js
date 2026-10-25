@@ -428,7 +428,9 @@ function checkTargetCompatibility(config, configModel, target, entryProtocol, re
   }
   if (requestCapabilities.storedResponse && (target.protocol !== 'responses' || config.type !== 'apikey')) return 'capability_persistent_responses_unsupported';
   if (target.protocol !== entryProtocol) {
-    if (requestCapabilities.reasoning) {
+    // A concrete body has passed the exact converter above. Keep conservative
+    // capability-only selection, but do not re-reject validated effort mapping.
+    if (requestCapabilities.reasoning && (!requestBody || entryProtocol === 'messages' || target.protocol === 'messages')) {
       return 'capability_reasoning_requires_same_protocol';
     }
     if (requestCapabilities.structuredOutput && (target.protocol === 'messages' || entryProtocol === 'messages' || !requestBody)) {

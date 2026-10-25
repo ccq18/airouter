@@ -20,8 +20,19 @@ function mapCrossProtocolControls({ entryProtocol: from, targetProtocol: to, bod
   };
   for (const key of Object.keys(body)) if (![...COMMON, ...CONTROLS[from]].includes(key)) reject(key, '未识别的跨协议控制字段，请使用同协议候选');
   if (own(body, 'prompt_cache_options')) keys(body.prompt_cache_options, ['mode', 'ttl'], 'prompt_cache_options');
-  if (own(body, 'reasoning_effort')) reject('reasoning_effort', 'effort 参数相似不代表私有 reasoning 输出可迁移；当前需要同协议候选');
-  if (own(body, 'reasoning')) reject('reasoning', '未实现完整 reasoning 输出和私有状态跨协议迁移');
+  // Only the shared effort control is equivalent. This grants neither summary
+  // generation nor permission to migrate opaque provider state.
+  for (const key of ['reasoning_effort', 'reasoning']) if (own(body, key)) {
+    if (!openAiPair) reject(key, 'Messages thinking budget 与 OpenAI effort 没有已核实的等价控制');
+    if (key === 'reasoning') {
+      keys(body.reasoning, ['effort'], 'reasoning');
+      if (!own(body.reasoning, 'effort')) reject('reasoning.effort', '跨协议只支持显式的单独 effort 控制');
+    }
+    const effort = key === 'reasoning' ? body.reasoning.effort : body.reasoning_effort;
+    if (effort !== null && !['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) reject(key === 'reasoning' ? 'reasoning.effort' : key, '必须是官方 effort 枚举值或 null；不替换模型不支持的值');
+    if (to === 'responses') out.reasoning = { effort }; else out.reasoning_effort = effort;
+  }
+  if (own(body, 'thinking')) reject('thinking', '未实现 Claude thinking 控制的等价跨协议映射');
   for (const key of ['modalities', 'audio', 'prediction']) if (own(body, key)) reject(key, '未实现完整音频/预测输出链路，需要同协议候选');
   if (own(body, 'n') && body.n !== 1) reject('n', '目标协议只支持一次生成，不能拆为多次付费调用');
   // These controls are model-visible, even when a particular numeric value
@@ -31,7 +42,7 @@ function mapCrossProtocolControls({ entryProtocol: from, targetProtocol: to, bod
   const maxKeys = from === 'chat_completions' ? ['max_tokens', 'max_completion_tokens'] : from === 'responses' ? ['max_output_tokens'] : ['max_tokens'];
   for (const key of maxKeys) if (body[key] != null && (!Number.isInteger(body[key]) || body[key] <= 0)) reject(key, '输出上限必须为正整数');
   if (from === 'responses' && to === 'chat_completions' && own(body, 'max_output_tokens')) out.max_completion_tokens = body.max_output_tokens;
-  if (own(body, 'background') && body.background !== false && body.background !== null) reject('background', 'Chat 不支持异步后台任务');
+  if (own(body, 'background') && body.background !== false && body.background !== null) reject('background', '目标协议不支持异步后台任务');
   if (own(body, 'truncation') && body.truncation !== 'disabled' && body.truncation !== null) reject('truncation', '不能将服务端自动裁剪变成普通请求或自行裁剪历史');
   for (const key of ['previous_response_id', 'conversation']) if (body[key] != null) reject(key, '服务端上下文不能跨协议迁移');
   if (openAiPair) {
@@ -83,7 +94,10 @@ function mapCrossProtocolControls({ entryProtocol: from, targetProtocol: to, bod
       // include_usage is a gateway entry-stream control, not a Responses option.
     }
   } else {
-    for (const key of ['service_tier', 'safety_identifier', 'user', 'metadata', 'verbosity', 'text', 'response_format', 'logprobs', 'top_logprobs', 'include', 'background', 'truncation', 'top_k']) if (own(body, key)) reject(key, 'Messages 与 OpenAI 没有已实现的等价控制');
+    for (const key of ['service_tier', 'safety_identifier', 'user', 'metadata', 'verbosity', 'text', 'response_format', 'logprobs', 'top_logprobs', 'include', 'background', 'truncation', 'top_k']) {
+      const synchronousDefault = from === 'responses' && (key === 'background' && body[key] === false || key === 'truncation' && body[key] === 'disabled');
+      if (own(body, key) && !synchronousDefault) reject(key, 'Messages 与 OpenAI 没有已实现的等价控制');
+    }
     if (own(body, 'stream_options')) {
       // These describe the caller's reconstructed stream. include_usage can be
       // fulfilled at the Chat entry even when the backend is Messages.

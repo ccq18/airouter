@@ -11,7 +11,8 @@
     "claude:login": "node scripts/claude-auth-login.js",
     "claude:install-login": "node scripts/claude-install-login.js",
     "test": "node --test",
-    "test:protocol": "node --test test/protocol-bridge.test.js test/protocol-request-regressions.test.js test/protocol-stream-regressions.test.js test/protocol-response-boundaries.test.js test/protocol-http-regressions.integration.test.js test/protocol-boundary-contract.integration.test.js test/responses-state-regressions.test.js test/responses-state.integration.test.js test/model-router.test.js test/free-pool-config.test.js test/free-pool-routing.test.js test/free-pool-engine.test.js test/free-pool.integration.test.js test/unified-routing.integration.test.js test/json-wire.test.js test/reasoning-content.test.js test/reasoning-transport-security.test.js test/protocol-reasoning-stream.test.js test/protocol-reasoning.integration.test.js"
+    "test:compatibility": "node scripts/check-protocol-compatibility.js",
+    "test:protocol": "node --test test/protocol-bridge.test.js test/protocol-request-regressions.test.js test/protocol-stream-regressions.test.js test/protocol-response-boundaries.test.js test/protocol-http-regressions.integration.test.js test/protocol-boundary-contract.integration.test.js test/responses-state-regressions.test.js test/responses-state.integration.test.js test/model-router.test.js test/free-pool-config.test.js test/free-pool-routing.test.js test/free-pool-engine.test.js test/free-pool.integration.test.js test/unified-routing.integration.test.js test/json-wire.test.js test/reasoning-content.test.js test/reasoning-transport-security.test.js test/protocol-reasoning-stream.test.js test/protocol-reasoning.integration.test.js test/protocol-compatibility-report.test.js"
   },
   "keywords": [
     "claude",

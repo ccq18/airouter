@@ -165,3 +165,107 @@ for (const [client, backend] of [['responses', 'chat_completions'], ['chat_compl
     while (!(await reader.read()).done) { /* finish normally */ }
   } finally { holdReasoning = false; releaseReasoning?.(); releaseReasoning = null; }
 });
+
+for (const backend of ['chat_completions', 'responses']) {
+  const client = backend === 'responses' ? 'chat_completions' : 'responses';
+  const effort = client === 'responses' ? { reasoning: { effort: 'low' } } : { reasoning_effort: 'low' };
+  function assertEffort(sent) {
+    if (backend === 'responses') { assert.deepEqual(sent.reasoning, { effort: 'low' }); assert.ok(!Object.hasOwn(sent, 'reasoning_effort')); }
+    else { assert.equal(sent.reasoning_effort, 'low'); assert.ok(!Object.hasOwn(sent, 'reasoning')); }
+  }
+  for (const providerWire of ['json', 'sse']) for (const stream of [false, true]) {
+    test(`effort with real reasoning shape ${client} -> ${backend} ${providerWire} -> ${stream ? 'sse' : 'json'}`, async () => {
+      wire = providerWire; toolRound = false;
+      const before = calls.length, result = await entry(client, input(client, backend, { ...effort, stream }));
+      assert.equal(result.status, 200, result.text); assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, backend);
+      assertEffort(calls.at(-1).body);
+      const payload = final(client, result);
+      if (client === 'responses') {
+        assert.deepEqual(payload.output.map(x => x.type), ['reasoning', 'message']);
+        assert.deepEqual(payload.output[0].content, [{ type: 'reasoning_text', text: shapes.go_deepseek_chat.choices[0].message.reasoning_content }]);
+        assert.equal(payload.output[1].content[0].text, '中文🙂');
+      } else {
+        assert.equal(payload.choices[0].message.content, '中文🙂');
+        const detail = payload.choices[0].message.reasoning_details.find(x => x.format === 'airouter-bridge-v1');
+        assert.match(detail.data, /^airouter-state-v1:/);
+        assert.match(result.text, /FIXTURE_CIPHERTEXT_NOT_REAL_STATE/);
+      }
+      if (stream) {
+        const events = collect(result.text); assert.ok(!events.some(x => x.error));
+        if (client === 'responses') assert.equal(events.at(-1).type, 'response.completed');
+        else { assert.match(result.text, /data: \[DONE\]/); assert.equal(events.flatMap(x => x.choices || []).filter(x => x.finish_reason === 'stop').length, 1); }
+      }
+    });
+  }
+  for (const providerWire of ['json', 'sse']) {
+    test(`effort tool roundtrip ${client} -> ${backend} with ${providerWire} reasoning restores exact source and pairing`, async () => {
+      wire = providerWire; toolRound = true;
+      const definition = { name: 'alpha', parameters: { type: 'object', properties: { n: { type: 'integer' } }, required: ['n'] } };
+      const tools = [{ type: 'function', ...(client === 'responses' ? definition : { function: definition }) }];
+      const before = calls.length;
+      const first = await entry(client, input(client, backend, { ...effort, tools, parallel_tool_calls: false }));
+      assert.equal(first.status, 200, first.text); assert.equal(calls.length, before + 1); assertEffort(calls.at(-1).body);
+      assert.equal(calls.at(-1).body.parallel_tool_calls, false);
+      assert.equal((backend === 'responses' ? calls.at(-1).body.tools[0] : calls.at(-1).body.tools[0].function).name, 'alpha');
+      const call = client === 'responses' ? first.payload.output.find(x => x.type === 'function_call') : first.payload.choices[0].message.tool_calls[0];
+      assert.equal(client === 'responses' ? call.call_id : call.id, 'call-reasoning');
+      assert.equal(client === 'responses' ? call.arguments : call.function.arguments, '{"n":1}');
+      toolRound = false;
+      const body = { ...follow(client, backend, first.payload, true), ...effort, tools, parallel_tool_calls: false };
+      const second = await entry(client, body);
+      assert.equal(second.status, 200, second.text); assert.equal(calls.length, before + 2); assertEffort(calls.at(-1).body);
+      if (backend === 'responses') {
+        assert.deepEqual(calls.at(-1).body.input.find(x => x.type === 'reasoning'), shapes.go_native_responses.output[0]);
+        const result = calls.at(-1).body.input.find(x => x.type === 'function_call_output'); assert.equal(result.call_id, 'call-reasoning'); assert.equal(result.output, '10');
+        assert.equal(second.payload.choices[0].message.content, '中文🙂');
+      } else {
+        const sent = calls.at(-1).body.messages;
+        assert.equal(sent.find(x => x.role === 'assistant').reasoning_content, shapes.go_deepseek_chat.choices[0].message.reasoning_content);
+        assert.equal(sent.find(x => x.role === 'tool').tool_call_id, 'call-reasoning'); assert.equal(sent.find(x => x.role === 'tool').content, '10');
+        assert.equal(second.payload.output.find(x => x.type === 'message').content[0].text, '中文🙂');
+      }
+    });
+  }
+}
+
+test('effort does not authorize foreign opaque history or rich reasoning controls and rejected requests keep the target healthy', async () => {
+  wire = 'json'; toolRound = false;
+  for (const reasoning of [{ effort: 'low', summary: 'auto' }, { effort: 'low', encrypted_content: 'foreign' }, { effort: 'low', generate_summary: 'detailed' }, { effort: 'low', context: 'all_turns' }, { effort: 'unknown' }, {}]) {
+    const before = calls.length, rejected = await entry('responses', input('responses', 'chat_completions', { reasoning }));
+    assert.equal(rejected.status, 400, rejected.text); assert.equal(calls.length, before); assert.match(rejected.text, /reasoning/);
+  }
+  const before = calls.length;
+  const foreign = await entry('responses', { ...input('responses', 'chat_completions', { reasoning: { effort: 'low' } }), input: [{ role: 'user', content: 'first' }, shapes.go_native_responses.output[0], { role: 'user', content: 'next' }] });
+  assert.equal(foreign.status, 409, foreign.text); assert.equal(calls.length, before);
+  const healthy = await entry('responses', input('responses', 'chat_completions', { reasoning: { effort: 'low' } }));
+  assert.equal(healthy.status, 200, healthy.text); assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'chat_completions');
+});
+
+test('Messages consumes only explicit synchronous/no-truncation defaults and retains the full ordered transcript', async () => {
+  wire = 'json'; toolRound = false;
+  const history = [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'prior' }, { role: 'user', content: 'last' }];
+  for (const control of [{ background: true }, { truncation: 'auto' }, { background: false, truncation: 'auto' }, { background: true, truncation: 'disabled' }]) {
+    const before = calls.length, rejected = await entry('responses', { model: 'messages', stream: false, input: history, ...control });
+    assert.equal(rejected.status, 400, rejected.text); assert.equal(calls.length, before);
+  }
+  const before = calls.length, response = await entry('responses', { model: 'messages', stream: false, background: false, truncation: 'disabled', input: history });
+  assert.equal(response.status, 200, response.text); assert.equal(calls.length, before + 1); assert.equal(calls.at(-1).protocol, 'messages');
+  const sent = calls.at(-1).body;
+  assert.ok(!Object.hasOwn(sent, 'background')); assert.ok(!Object.hasOwn(sent, 'truncation'));
+  assert.deepEqual(sent.messages.map(message => [message.role, message.content.map(part => part.text).join('')]), [['user', 'first'], ['assistant', 'prior'], ['user', 'last']]);
+});
+
+for (const protocol of ['chat_completions', 'responses']) test(`native ${protocol} keeps effort controls while restoring a public reasoning marker in history`, async () => {
+  wire = 'json'; toolRound = false;
+  const thought = shapes.go_deepseek_chat.choices[0].message.reasoning_content;
+  const provenance = { protocol: 'chat_completions', reasoning_content: thought };
+  const history = protocol === 'chat_completions'
+    ? { messages: [{ role: 'user', content: 'first' }, { role: 'assistant', content: 'prior', reasoning_content: thought, airouter_upstream_reasoning: provenance }, { role: 'user', content: 'next' }], reasoning_effort: 'low' }
+    : { input: [{ role: 'user', content: 'first' }, { type: 'reasoning', content: [{ type: 'reasoning_text', text: thought }], summary: [], airouter_upstream_reasoning: provenance }, { role: 'user', content: 'next' }], reasoning: { effort: 'low' } };
+  const before = calls.length, result = await entry(protocol, input(protocol, protocol, history));
+  assert.equal(result.status, 200, result.text); assert.equal(calls.length, before + 1);
+  const sent = calls.at(-1).body;
+  if (protocol === 'chat_completions') assert.equal(sent.reasoning_effort, 'low');
+  else assert.deepEqual(sent.reasoning, { effort: 'low' });
+  assert.doesNotMatch(JSON.stringify(sent), /airouter_upstream_reasoning|airouter-(?:state|text)-v1:/);
+});

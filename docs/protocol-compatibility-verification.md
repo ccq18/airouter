@@ -1,5 +1,7 @@
 # 三协议兼容性修复与验证
 
+当前逐点测试计划及结果入口为第 10 节。前文测试数量为各次历史快照，不表示所有协议能力已兼容。
+
 ## 1. 范围与依据
 
 核验日期：2026-10-25；基线为 `d639eee`，当前工作区与 `origin/main` 起点一致。修复保留 `config.json`、统一模型路由、免费池、账号与用户文件，不为 `auto` 添加特殊逻辑。
@@ -263,7 +265,7 @@ Responses 没有 stop 请求字段，Messages 没有 OpenAI 标准概率请求�
 - `app/reasoning-transport.js` 复用原上下文存储，另设有界内存记录：默认最多 1000 条、8 MiB，沿用上下文 TTL。句柄绑定调用者、公开路由、入口、原账号、具体后端模型/协议、前置消息/system/tools、块分组和顺序；免费池同时绑定具体成员与凭证来源。pending 句柄在合法完成前不可回传。
 - 重启、TTL、账号/路由变化、篡改、混合来源、块重排均拒绝。`app/credential-context.js` 同时失效凭证引用的依赖池，防止 A→B→A 后旧状态或迟到请求复活；相同原生密文出现不同来源后持续标为歧义，重复观察不能清除。
 - 公开思考历史继续按普通候选优先级选路；携带已验证不透明历史时仅能选择原目标/成员。没有给 `auto` 添加特殊逻辑，免费池的目录、资格、健康和耗尽恢复规则不变。
-- 这与服务端 `previous_response_id` 分开：完整加密历史可在 `store:false` 下原样手动回传；它不建立服务端保存绑定，不扩大 conversation、后台任务、持久续接或跨账号迁移能力。显式 reasoning effort 等控制仍受既有同协议要求约束。
+- 这与服务端 `previous_response_id` 分开：完整加密历史可在 `store:false` 下原样手动回传；它不建立服务端保存绑定，不扩大 conversation、后台任务、持久续接或跨账号迁移能力。单独 effort 控制的后续映射见第 10.6 节；summary 等其他控制仍受原有限制约束。
 
 ### 9.3 复现与自动化证据
 
@@ -292,6 +294,118 @@ Responses 没有 stop 请求字段，Messages 没有 OpenAI 标准概率请求�
 
 真实跨协议 opaque 句柄回传、Claude 真实签名多轮及所有供应商的概率/格式组合仍未完成全面真实验证；相应转换和归属规则由自动化证明。持久服务端续接、conversation、后台任务、重启后的本地句柄恢复仍未实现。外部 OpenCode CLI 未在本轮启动，遵守当前用户禁止调用外部 AI 工具的约定；本轮使用真实 HTTP 客户端验证普通 `auto` 路由。
 
-### 9.5 当前交付门禁
+### 9.5 19c445e 交付门禁快照
 
 Node v22.19.0；`npm run test:protocol` **1188/1188**，完整 `npm test` **1440/1440**，真实退出码均为 0，无 skip/cancel/todo。日志分别为 `/tmp/airouter-reasoning-protocol-final.log` 与 `/tmp/airouter-reasoning-full-final.log`。专项命令已包含新增的 reasoning、来源安全、HTTP 与原始 JSON token 测试，并继续包含原有三协议、状态、取消、免费池和恢复切回回归。
+
+## 10. 逐兼容点测试计划与实施
+
+### 10.1 验收口径与改动边界
+
+2026-10-25 从 `19c445e` 核对：已有九条协议路径 × 四种响应格式及 216 项核心 HTTP 语义用例。缺口是部分测试把字段组合在一起，部分测试接受“保留或拒绝”，总通过数不能表示逐点兼容程度。本次只修改测试、测试运行入口及本文档；不修改应用实现、账号配置，不调用真实供应商、不提交或部署主会话代码。
+
+兼容性验收必须要求正确转发及完整语义，合法可映射请求返回 400/502 同样是失败。没有等价语义的组合标为“无等价映射”，边界拒绝测试单独报告；能够等价但尚未实现的组合继续执行正向验收，失败保留为缺口。缺少、跳过、todo、重复注册的必需用例均不能计作通过。自动化结果不能代替真实供应商验收。
+
+### 10.2 实施顺序与完成条件
+
+| 顺序 | 实施内容 | 完成条件 |
+| --- | --- | --- |
+| 1 | 独立兼容点清单，列出字段路径、合法源协议、等价映射及无等价原因 | 不读取转换器推导预期；必需请求字段均有兼容点；九条方向及格式明确 |
+| 2 | 在现有受控 HTTP 文件增加原子请求字段验收，拆开 temperature/top_p、预算、身份、缓存、格式、工具等；复用核心响应矩阵拆出 usage 子项 | 实际请求体按字段独立断言，错误状态不能算兼容；请求两种 stream 模式，响应四种格式；共享已有临时服务器、fixture、HTTP/SSE 读取 |
+| 3 | 基于 Node 内置测试事件生成逐点 JSON 和 Markdown 报告 | 分开兼容通过/失败、未实现、未覆盖、无等价映射、边界回归；测试异常及缺用例导致非零退出码 |
+| 4 | 验证报告器不会将拒绝、skip、todo 或漏测染绿；运行逐点验收、协议专项、完整测试 | 保留真实退出码及所有失败；如暴露产品缺口，记录实际转发次数、字段和错误，不更改应用或弱化预期 |
+
+### 10.3 兼容点及证据范围
+
+请求字段以独立测试清单为准：通用采样、输出预算、metadata、身份/service_tier、verbosity、输出格式及 Schema 各控制、工具选择/strict/parallel、缓存 key/retention/options、stop、概率与 stream_options，以及原生专属 seed/penalty/n/logit_bias/音频/预测/思考字段。Responses 的服务端状态和 Messages 的专属控制保留原生/边界证据，不能因跨协议被拒绝就计为兼容。
+
+响应复用已有矩阵，覆盖正常文本、拒绝、截断、未知/部分用量、多轮并行工具；分别记录输入/输出/总 token、缓存读取/写入。补充关联现有 ID、多 choices、默认思考、原生 Responses 生命周期、概率和 UTF-8 用例。原生字段、客户端模型身份、未知扩展、原始数字、取消、终态和故障切换继续保留原测试。没有收录的未来 API 字段不在当前有限清单的覆盖承诺中，不能宣称覆盖整个未来协议。
+
+Chat `reasoning_effort` 与 Responses `reasoning.effort` 的单独控制按同一明确 effort 值验收；不将 summary、加密私有历史或跨供应商迁移当成它的等价含义。这个请求控制若尚被笼统拦截，要显示为“未实现/验收失败”，不改为预期拒绝。依据为实际打开的 [OpenAI reasoning 文档](https://developers.openai.com/api/docs/guides/reasoning)及 [Chat 参数契约](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)。这是一项单独的参数映射验收，不宣称任意模型支持全部 effort 值。
+
+原生专属请求字段用例证明网关转发字段，不证明供应商实际接受这些值、产生音频或完成后台任务生命周期。可验证的原生 Responses 保存/续接与完整加密历史另有关联的 HTTP 用例；conversation、后台任务管理、供应商全量模型/参数组合及完整音频工作流不在当前正向证明中，也不计为已兼容。
+
+### 10.4 可执行入口与报告
+
+- `scripts/protocol-compatibility-catalog.js`：独立的字段/语义清单、协议方向、格式、必需正向测试及无等价原因。当前 87 个兼容点、1153 个单元格，其中 995 格要求正向通过，158 格无已核实的等价映射。
+- `test/protocol-boundary-contract.integration.test.js`：复用原临时 HTTP 网关和供应商，新增 484 项原子请求验收、4 项 Messages 原生扩展四路径验收；将原 36 个 text-cache 用例中的 usage 断言拆为 180 个独立子测试，不增加重复 HTTP 请求。正向用例要求状态、实际请求字段、调用次数、完整答案/工具和正确终态。
+- `scripts/protocol-compatibility-report.js` 与 `scripts/check-protocol-compatibility.js`：消费 Node 内置测试事件，按文件及精确用例名匹配证据，生成逐点 JSON/Markdown。继续读取 `package.json` 的现有协议专项文件清单，不维护第二套测试框架或重复服务器。
+- `test/protocol-compatibility-report.test.js`：8 项防误报检查，覆盖仅拒绝测试通过、已知/未知失败、缺失、skip/todo、重复、错误文件、无等价原因及独立清单审计。
+
+使用 Node 22：
+
+```bash
+npm run test:compatibility -- --output /tmp/airouter-compatibility-final
+npm run test:protocol
+npm test
+```
+
+第一个命令生成 `/tmp/airouter-compatibility-final.json` 与 `.md`。报告分别列出兼容通过、兼容失败、未实现、未覆盖、未验证、无效证据及无等价映射；边界拒绝/安全回归另计。`knownGap` 只影响失败的分类，不修改 200 正向预期，也不会放宽门禁；修复后同一测试真实通过才转为兼容。任何必需项失败或缺失均返回非零退出码。
+
+### 10.5 19c445e 修复前结果与暴露的缺口
+
+2026-10-25，基于应用提交 `19c445e`，Node v22.19.0；以下为本次新测试在应用未修改时的结果：
+
+| 命令/证据 | 实际结果 | 退出码 |
+| --- | --- | --- |
+| `npm run test:compatibility` | 987 格兼容通过，其中 HTTP 986 格、单元 1 格；8 格未实现且正向验收失败；158 格无已核实等价映射；当前清单内未覆盖/未验证/无效证据均为 0 | 1 |
+| `npm run test:protocol` | 1864 项：1856 通过、8 失败，零跳过/取消/todo | 1 |
+| 完整 `npm test` | 2116 项：2108 通过、8 失败，零跳过/取消/todo | 1 |
+| 其余已执行回归 | 边界/拒绝 317 项、其他回归 552 项均通过，不增加兼容通过数 | 包含于上列门禁 |
+
+| 兼容点 | 方向 | 格式与失败数 | 实际 HTTP 证据 |
+| --- | --- | --- | --- |
+| `request.reasoning.effort` | Chat→Responses、Responses→Chat | 各 JSON/SSE，共 4 项 | 请求仅带 low effort；网关笼统要求同协议，400 `unsupported_protocol_feature`，供应商调用 0；没有把它误称为 HTTP 静默丢字段 |
+| `request.background.false` | Responses→Messages | JSON/SSE，共 2 项 | 明确同步默认值仍被 400 拒绝，供应商调用 0；没有自动执行后台任务的需求 |
+| `request.truncation.disabled` | Responses→Messages | JSON/SSE，共 2 项 | 明确禁用自动裁剪仍被 400 拒绝，供应商调用 0；没有要求自行裁剪历史 |
+
+上述测试保持失败；本次没有修改应用来实现这些能力，也没有改为“预期拒绝”或 skip/todo。初次另外两项 system 指令测试失败，经核对是合法的 input system 消息配合空 instructions：修正预期表示判断后仍精确断言原始指令、层级、顺序与无重复，不将测试错误记作产品缺陷。完整运行也发现 CLI 名称若以 `test-` 开头会被 Node 自动发现并嵌套运行，现使用 `check-protocol-compatibility.js`，最终不存在此测试入口错误。
+
+最终日志：`/tmp/airouter-compat-{protocol,full,points}-final.log`；真实退出码汇总 `/tmp/airouter-compat-final-exits.json`。测试及运行入口 SHA256 在最终三次命令执行期间一致，清单 `/tmp/airouter-compat-tests-{before,after}.json`。应用、启动器及本地 config.json 前后校验一致，未提交、推送、部署或调用真实供应商。本轮清单之外的能力不能因为“未覆盖=0”而被宣称已兼容；真实供应商验收数量为 0。
+
+### 10.6 三项控制兼容修复与当前验收
+
+本节续接第 10.5 节的旁支失败快照，开始修改应用实现。未回退 `19c445e`，保留旁支清单、报告器、测试及历史结果；不修改 `config.json`、账号、路由或凭证，不提交原有生成图片。
+
+| 问题及实际复现 | 修复位置与当前语义 | 对应验收 |
+| --- | --- | --- |
+| 单独 low effort 双向 JSON/SSE 均在发送前 400，供应商调用 0，共 4 项 | `app/protocol-request-controls.js` 只映射 Chat `reasoning_effort` ↔ Responses `{effort}`；支持当前官方共有枚举及 null，值原样保留，不替换供应商不支持的值。Responses 解析器移除笼统拒绝，路由在完整请求已经通过共享转换器后不再用粗 reasoning 标记拦截。只有能力标记、没有完整请求体时仍保守拒绝 | 原 4 项保持 200、精确字段、完整答案/工具、正确终态及一次调用断言；新增 8 项两方向×上游 JSON/SSE×下游 JSON/SSE 的实际 reasoning 输出验收，以及 4 项 effort + 工具多轮/来源精确还原 |
+| `background:false`→Messages，JSON/SSE 共 2 项发送前 400、调用 0 | 共享字段规则明确消费同步默认值，Messages 请求不携带 background；未实现后台任务 | 原 2 项正向验收不变；true 及 true/disabled 组合继续 400、零调用；随后原主目标仍可用 |
+| `truncation:disabled`→Messages，JSON/SSE 共 2 项发送前 400、调用 0 | 共享字段规则消费禁止自动裁剪的控制，完整历史交给 Messages，不携带 truncation，不裁剪或压缩历史 | 原 2 项正向验收不变；auto 及 false/auto 组合继续 400、零调用；新增精确检查完整 user/assistant/user 顺序 |
+
+字段依据已实际读取：[Chat reasoning_effort](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[Responses reasoning/background/truncation](https://developers.openai.com/api/reference/resources/responses/methods/create)。同一 effort 值具有共享请求控制语义；支持哪些值仍由实际模型决定，不根据一次回答或 token 数推断某模型一定遵循每个档位。`background:false` 与 `truncation:disabled` 的 Messages 适配是网关消费明确默认控制，不冒充 Messages 新增了这两个 API 字段。
+
+#### 10.6.1 回归与失败证据
+
+- 修改应用前重新执行逐点入口，结果仍为 **987 通过、8 未实现失败、158 无等价**，退出码 1：`/tmp/airouter-compatibility-before-fix.{json,md,log}`。
+- 新增的 12 项 effort + 输出/工具组合先 **0/12、退出码 1**，修复后 **12/12、退出码 0**：`/tmp/airouter-effort-combined-{red,green}.log`。独立预期包括公开 reasoning_text、原始来源密文、工具 ID/参数/结果、完成事件、两轮调用次数；不只检查参数改名或 200。
+- 额外两条原生 HTTP 回归先 0/2、退出码 1，证明恢复公开思考标记时同协议 effort 被重建流程删除；修复后 2/2、退出码 0。原生路径现在仅替换恢复后的 input/messages，保留完整根控制字段：`/tmp/airouter-effort-native-history-{red,green}.log`。
+- 新增边界 HTTP 检查：summary/encrypted_content/generate_summary/context/未知 effort/空 reasoning 对象继续明确拒绝；附 effort 的外来加密历史仍 409，零供应商调用。拒绝后原主模型立即成功，未冷却、未转后备。另补共有 effort 枚举/null 的精确映射及非法值/未知子字段断言。
+- 一条旧“Chat high effort 必须拒绝”的组合回归与本期实现冲突，已升级为精确 `{effort:'high'}` 及不泄漏源字段的成功验收；Responses 的 summary、Messages 的 thinking/budget 仍按原边界拒绝。没有将原 8 项正向验收改成拒绝、删除或 skip。
+- 清单仅移除这 8 个已实现格子的 knownGap 标记，方向和 158 格无等价范围均不变。报告器仍验证 knownGap 失败不能染绿；清单审计改为精确要求这批已实现项不再声明缺口，不再要求永远至少存在一个未实现项。
+
+#### 10.6.2 当前自动化结果
+
+Node v22.19.0，零 skip/todo/取消；三项命令保留真实退出码：
+
+| 命令 | 当前结果 | 退出码 |
+| --- | --- | --- |
+| `npm run test:compatibility -- --output /tmp/airouter-compatibility-fixed` | 87 点、1153 格：**995 格兼容通过**（994 HTTP、1 单元），**158 格无等价**；未实现/兼容失败/未覆盖/未验证/无效证据均为 0。边界 319、其他回归 567 分开统计，不加入兼容通过数 | 0 |
+| `npm run test:protocol` | **1881/1881** | 0 |
+| `npm test` | **2133/2133** | 0 |
+
+日志为 `/tmp/airouter-compatibility-fixed.log`、`/tmp/airouter-effort-protocol-final.log`、`/tmp/airouter-effort-full-final.log`。完整门禁继续包含私有状态归属、TTL/重启/迟到/A→B→A、免费池、普通 auto、耗尽接替/恢复、取消、拒绝不重试及输出后不重放；本期未改这些生命周期实现。
+
+#### 10.6.3 独立真实供应商验证
+
+用服务器最新配置的受保护临时副本在本地运行当前代码，额外路由仅存在于副本：Go `gpt-6-luna` 原生 Responses、`claude-haiku-5-5` 原生 Messages。未向服务器持久配置添加路由。
+
+`/tmp/airouter-effort-live/supplier-results.json` 共 **10 项成功**：
+
+- Chat low effort→Go Responses、Responses low effort→Go DeepSeek Chat，分别 JSON/SSE，4 项成功，答案 `7`。
+- Responses background:false→Go Messages、truncation:disabled→Go Messages，分别 JSON/SSE，4 项成功，答案 `7`。
+- 两个 effort 方向均进行真实工具两轮，答案 `30`。DeepSeek 第一轮实际有 23 个 reasoning tokens，单独 reasoning 内容随完整工具历史回传。原生 Responses 工具轮实际没有返回 reasoning/密文，**不将该成功记作真实 opaque 回传证明**。
+
+网关没有删除被请求的 effort 或重试不带参数的请求。真实请求成功证明对应供应商当次接受这组控制及协议，不证明所有模型支持每个 effort 值。逐点报告的 realSupplierChecks 仍为 0，因为它只统计受控自动化；上述真实证据单独保存，不混入 995 格。
+
+仍不开放 reasoning.summary/context/私有 include 等未核实等价控制；不允许 effort 绕过不透明历史来源校验。后台任务、自动裁剪、conversation、持久续接及跨账号/模型迁移的原边界不变。本轮没有新增缓存命中实验，不借用一次回答成功宣称缓存或服务端存储验收。
