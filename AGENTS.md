@@ -17,7 +17,8 @@ Airouter 是一个本地 OpenAI/Claude 兼容 API 转发工具。主进程是 No
 - `openai.js`：HTTP 服务入口、代理转发、管理接口、运行态调度。
 - `run.js`：命令行启动器，负责配置引导、后台启动、停止、重启和日志查看。
 - `app/`：可测试的业务模块。新增逻辑优先放这里，再由 `openai.js` 串接。
-- `public/config-admin.html`、`public/config-admin.js`：管理台页面。
+- `app/provider-presets.js`、`quota-engine.js`、`model-router.js`、`protocol-bridge.js`、`explicit-routing-handler.js`：统一上游、额度、显式路由、协议桥接和对话入口。
+- `public/config-admin.html`、`public/config-admin.js`、`public/config-admin-routing.js`：管理台页面与统一路由 UI。
 - `test/*.test.js`：Node 内置测试。
 - `desktop/`：Tauri 桌面应用、资源准备脚本和 Rust 外壳。
 - `docs/`：配置、运行逻辑和特性设计说明。
@@ -46,6 +47,7 @@ npm run build:windows
 
 - 修改共享业务模块、代理行为、配置解析或管理接口时，运行 `npm test`。
 - 可用 Node 的内置测试过滤单个文件，例如 `node --test test/responses-failover.test.js`。
+- 涉及统一路由时，至少运行 `test/routing-config.test.js`、`test/model-router.test.js`、`test/protocol-bridge.test.js`、`test/quota-engine.test.js` 和 `test/unified-routing.integration.test.js`；集成测试会启动真实本地服务与假上游 HTTP 服务，使用临时配置和随机端口，不访问真实供应商。
 - 涉及 `run.js` 启停行为时，重点跑 `test/run.test.js`。
 - 涉及管理台 HTML/JS 时，重点跑 `test/config-admin.test.js` 和相关 API 测试。
 - 涉及桌面壳或资源准备时，至少跑 `test/desktop-boot.test.js`；能本地构建时再跑对应 `desktop` 构建命令。
@@ -80,19 +82,33 @@ npm run build:windows
 
 ## 代理行为约束
 
-- token 配置项默认优先于 apikey 配置项；只有 token 不可用时才落到 apikey。
-- `apikey.support` 只支持 `gpt` 和 `claude`；默认是 `["gpt"]`。
+- 未启用 `routing.mode: "explicit"` 时保留旧模式：token 配置项默认优先于 apikey 配置项；只有 token 不可用时才落到 apikey。
+- 启用显式路由后，对话入口的优先级只由 `routing.models[].targets` 顺序决定；不得把 Token 优先、API Key 覆盖、会话哈希或全局别名混入显式路由。
+- 显式路由按候选顺序严格选择；额度耗尽才使用下一项，额度恢复后下一次无状态请求自动优先使用高优先级候选。
+- 额度读取失败、缺少字段或无权限时保持 `unknown`，不得当成 `exhausted` 或余额 0；已确认耗尽后读取失败不得自动恢复。
+- 账号鉴权健康/冷却与额度状态分离；下游流式响应已经提交后不得切换上游拼接答案。
+- `apikey.support` 只支持 `gpt` 和 `claude`；默认是 `["gpt"]`，该旧字段只影响 legacy 模式。
 - `/v1/messages` 只注册在 `/v1/messages`，不要新增旧式 `/claude/v1/messages` 兼容路径，除非需求明确。
-- `/v1/responses` 自动切号当前只针对 token-backed responses 请求；同一请求会排除已失败账号继续尝试剩余可用 token 账号。
+- `/v1/responses` 的 legacy 自动切号只针对 token-backed responses 请求；显式路由使用统一候选与有界重试。
+- `previous_response_id` 只能续接到原 Responses 候选；跨账号/跨协议或归属丢失时返回 `upstream_context_unavailable`，不得猜测落点。
 - Hop-by-hop headers 和本地鉴权头不要转发给上游；相关边界已有测试覆盖。
 - 对流式响应和压缩响应的处理要优先保持现有 failover/透传语义，避免提前消费客户端需要的流。
+- 跨协议路由只做已实现且可验证的文本、图片、工具调用/结果和 SSE 转换；结构化输出、内置服务端工具、thinking/加密 reasoning、文件和音频不得静默丢弃，必须明确拒绝或跳过该候选。
 
 ## 配置文件语义
 
 - 顶层 `type` 已废弃；配置类型写在 `configs[]` 的每一项里。
 - 未写 `type` 的配置项视为 token。
-- `responses.model_aliases` 的键和值必须是非空字符串，匹配时忽略大小写。
-- `claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 token 兼容转换链路。
+- `configs[].id` 是稳定本地账号 ID。新账号会自动写入；不得用数组下标引用显式路由中的账号。
+- `configs[].preset` 只用于内置平台默认地址、模型发现和额度解释，不决定调度优先级；内置平台为 `chatgpt`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`claude`，其他为 `custom`。
+- `configs[].models[]` 是账号允许使用的后端模型清单，每项包含 `id`、`protocols`，可选 `capabilities`、`context_window`、`max_output_tokens`。模型清单不会自动公开给客户端。
+- 只有自定义上游需要填写 `models_endpoint`；内置平台的模型列表地址、鉴权和解析规则内置。
+- `routing.mode` 缺省或为 `legacy` 时保留旧调度；`routing.mode: "explicit"` 时启用统一显式路由。
+- `routing.models[].id` 是客户端模型 ID，精确且区分大小写；`targets[]` 的顺序就是优先级，每项必须同时指定 `config_id`、`model` 和 `protocol`。
+- `routing.max_attempts` 是单次请求包含首次在内的最大上游尝试次数，实际不会超过候选数量。
+- 不提供额度模板页签或额度查询凭证选择；额度由内置平台规则读取，未知和读取失败不会变成 0 或耗尽。
+- `responses.model_aliases` 的键和值必须是非空字符串，匹配时忽略大小写；显式路由不使用该全局别名。
+- `claude_code.model` 和 `claude_code.reasoning_effort` 只影响 `/v1/messages` 的 legacy token 兼容转换链路。
 - `port` 和 `proxy_port` 必须保持 1-65535 的端口校验。
 
 ## 文档习惯

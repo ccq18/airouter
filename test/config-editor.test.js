@@ -79,7 +79,10 @@ test('addConfigItem appends a token config and preserves top-level settings', ()
   assert.equal(next.port, 3009);
   assert.equal(next.claude_code.model, 'gpt-5.4');
   assert.equal(next.configs.length, 2);
-  assert.deepEqual(next.configs[1], {
+  assert.match(next.configs[1].id, /^cfg_/);
+  const { id: generatedId, ...appendedConfig } = next.configs[1];
+  assert.ok(generatedId);
+  assert.deepEqual(appendedConfig, {
     access_token: 'token-2',
     account_id: '42',
     description: 'backup',
@@ -108,12 +111,18 @@ test('addConfigItems appends multiple configs in one update', () => {
   assert.equal(next.proxy_port, 7890);
   assert.equal(next.port, 3009);
   assert.equal(next.configs.length, 3);
-  assert.deepEqual(next.configs[1], {
+  assert.match(next.configs[1].id, /^cfg_/);
+  const { id: tokenId, ...tokenConfig } = next.configs[1];
+  assert.ok(tokenId);
+  assert.deepEqual(tokenConfig, {
     access_token: 'token-2',
     account_id: '42',
     description: 'backup',
   });
-  assert.deepEqual(next.configs[2], {
+  assert.match(next.configs[2].id, /^cfg_/);
+  const { id: apiKeyId, ...apiKeyConfig } = next.configs[2];
+  assert.ok(apiKeyId);
+  assert.deepEqual(apiKeyConfig, {
     type: 'apikey',
     apikey: 'sk-example',
     base_url: 'https://api.example.com/v1',
@@ -144,7 +153,10 @@ test('addConfigItems appends without validating existing configs', () => {
 
   assert.equal(next.configs.length, 2);
   assert.deepEqual(next.configs[0], parsed.configs[0]);
-  assert.deepEqual(next.configs[1], {
+  assert.match(next.configs[1].id, /^cfg_/);
+  const { id: generatedId, ...appendedConfig } = next.configs[1];
+  assert.ok(generatedId);
+  assert.deepEqual(appendedConfig, {
     access_token: 'token-2',
     account_id: 'account-2',
     description: 'new token',
@@ -164,7 +176,10 @@ test('addConfigItems appends without validating new runtime fields', () => {
   ]);
 
   assert.equal(next.configs.length, 2);
-  assert.deepEqual(next.configs[1], {
+  assert.match(next.configs[1].id, /^cfg_/);
+  const { id: generatedId, ...appendedConfig } = next.configs[1];
+  assert.ok(generatedId);
+  assert.deepEqual(appendedConfig, {
     type: 'apikey',
     apikey: '',
     base_url: '',

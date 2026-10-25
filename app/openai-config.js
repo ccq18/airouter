@@ -12,6 +12,12 @@ const {
     normalizeSub2ApiCredentials,
 } = require('./sub2api-agent-identity');
 
+const {
+    validateConfigModels,
+    parseRoutingConfig,
+    validateIdentifier,
+} = require('./routing-config');
+
 function isPlainObject(value) {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -193,6 +199,17 @@ function parseOpenAiConfigFile(raw) {
         validateConfigItemArray(parsed.disabled_configs, 'disabled_configs');
     }
 
+    const configIds = new Set();
+    for (const [index, config] of parsed.configs.entries()) {
+        if (typeof config.id === 'string' && config.id.trim()) {
+            const id = config.id.trim();
+            if (configIds.has(id)) {
+                throw new Error(`配置文件 configs[] 的 id 重复: ${id}`);
+            }
+            configIds.add(id);
+        }
+    }
+
     if (parsed.apikeys !== undefined) {
         if (!Array.isArray(parsed.apikeys)) {
             throw new Error('配置文件 apikeys 必须是字符串数组');
@@ -268,6 +285,14 @@ function parseOpenAiConfigFile(raw) {
         }
     }
 
+    if (parsed.routing !== undefined) {
+        if (!isPlainObject(parsed.routing)) {
+            throw new Error('配置文件 routing 必须是对象');
+        }
+
+        parseRoutingConfig(parsed);
+    }
+
     return parsed;
 }
 
@@ -280,6 +305,51 @@ function validateConfigItemArray(configs, fieldName) {
         const configType = getConfigItemType(config);
         if (!SUPPORTED_CONFIG_TYPES.has(configType)) {
             throw new Error(`配置文件 ${fieldName}[${index}] type 仅支持 token、apikey 或 claude_token`);
+        }
+
+        if (config.id !== undefined) {
+            try {
+                validateIdentifier(config.id, `配置文件 ${fieldName}[${index}].id`);
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        }
+
+        if (config.preset !== undefined) {
+            if (typeof config.preset !== 'string' || config.preset.trim().length === 0) {
+                throw new Error(`配置文件 ${fieldName}[${index}].preset 必须是非空字符串`);
+            }
+        }
+
+        if (config.enabled !== undefined && typeof config.enabled !== 'boolean') {
+            throw new Error(`配置文件 ${fieldName}[${index}].enabled 必须是布尔值`);
+        }
+
+        if (config.models !== undefined) {
+            try {
+                validateConfigModels(config.models, { preset: config.preset });
+            } catch (err) {
+                throw new Error(`配置文件 ${fieldName}[${index}] ${err.message}`);
+            }
+        }
+
+        if (config.models_endpoint !== undefined && typeof config.models_endpoint !== 'string') {
+            throw new Error(`配置文件 ${fieldName}[${index}].models_endpoint 必须是字符串`);
+        }
+
+        if (config.protocol_paths !== undefined) {
+            if (!isPlainObject(config.protocol_paths)) {
+                throw new Error(`配置文件 ${fieldName}[${index}].protocol_paths 必须是对象`);
+            }
+
+            for (const [protocol, path] of Object.entries(config.protocol_paths)) {
+                if (!['chat_completions', 'responses', 'messages'].includes(protocol)) {
+                    throw new Error(`配置文件 ${fieldName}[${index}].protocol_paths 包含不支持的协议`);
+                }
+                if (path !== null && typeof path !== 'string') {
+                    throw new Error(`配置文件 ${fieldName}[${index}].protocol_paths.${protocol} 必须是字符串或 null`);
+                }
+            }
         }
 
         if (configType === 'apikey') {
@@ -345,12 +415,15 @@ function createTokenRuntimeConfig(config, index) {
             credentials.agent_private_key &&
             credentials.chatgpt_account_id &&
             credentials.chatgpt_user_id
-        );
+        ) && config.enabled !== false;
 
         return {
             type: 'token',
             subtype: 'sub2api',
             index,
+            id: normalizeString(config.id),
+            preset: normalizeString(config.preset) || 'chatgpt',
+            enabled: config.enabled !== false,
             baseUrl: CHATGPT_BASE_URL,
             apiBasePath: CODEX_API_BASE_PATH,
             access_token: '',
@@ -358,22 +431,30 @@ function createTokenRuntimeConfig(config, index) {
             client_id: '',
             account_id: credentials.chatgpt_account_id,
             credentials,
+            models: Array.isArray(config.models) ? config.models : [],
             description: config.description || credentials.email || `Sub2API 配置 #${index + 1}`,
             runtime: createDefaultTokenRuntime(enabled)
         };
     }
 
-    const enabled = Boolean(config.access_token && config.account_id);
+    const enabled = Boolean(config.access_token && config.account_id) && config.enabled !== false;
+    const baseUrl = normalizeString(config.base_url) || CHATGPT_BASE_URL;
+    const apiBasePath = normalizeString(config.api_base_path) ||
+        (baseUrl === CHATGPT_BASE_URL ? CODEX_API_BASE_PATH : '');
 
     return {
         type: 'token',
         index,
-        baseUrl: CHATGPT_BASE_URL,
-        apiBasePath: CODEX_API_BASE_PATH,
+        id: normalizeString(config.id),
+        preset: normalizeString(config.preset) || 'chatgpt',
+        enabled: config.enabled !== false,
+        baseUrl,
+        apiBasePath,
         access_token: config.access_token || '',
         refresh_token: config.refresh_token || '',
         client_id: config.client_id || '',
         account_id: config.account_id || '',
+        models: Array.isArray(config.models) ? config.models : [],
         description: config.description || `OpenAI 配置 #${index + 1}`,
         runtime: createDefaultTokenRuntime(enabled)
     };
@@ -387,16 +468,30 @@ function createApiKeyRuntimeConfig(config, index) {
         throw new Error('apikey 配置至少需要 apikey 和 base_url');
     }
 
+    const enabled = config.enabled !== false;
+    const runtime = createDefaultApiKeyRuntime();
+    if (!enabled) {
+        runtime.enabled = false;
+        runtime.available = false;
+        runtime.reason = 'disabled';
+    }
+
     return {
         type: 'apikey',
         index,
+        id: normalizeString(config.id),
+        preset: normalizeString(config.preset) || 'custom',
+        enabled,
         baseUrl,
         apiBasePath: '',
         apiKey: apikey,
         support: normalizeApiKeySupport(config.support),
         health: normalizeApiKeyHealth(config.health),
+        models: Array.isArray(config.models) ? config.models : [],
+        models_endpoint: normalizeString(config.models_endpoint),
+        protocol_paths: isPlainObject(config.protocol_paths) ? { ...config.protocol_paths } : {},
         description: config.description || `APIKey 配置 #${index + 1}`,
-        runtime: createDefaultApiKeyRuntime()
+        runtime
     };
 }
 
@@ -420,6 +515,9 @@ function createClaudeTokenRuntimeConfig(config, index) {
     return {
         type: 'claude_token',
         index,
+        id: normalizeString(config.id),
+        preset: normalizeString(config.preset) || 'claude',
+        enabled: config.enabled !== false,
         baseUrl,
         apiBasePath: '',
         access_token: accessToken,
@@ -429,6 +527,7 @@ function createClaudeTokenRuntimeConfig(config, index) {
         account_uuid: accountUuid,
         organization_uuid: organizationUuid,
         expires_at: expiresAt,
+        models: Array.isArray(config.models) ? config.models : [],
         description: config.description || `Claude OAuth 配置 #${index + 1}`,
         runtime: createDefaultClaudeTokenRuntime(Boolean(accessToken))
     };

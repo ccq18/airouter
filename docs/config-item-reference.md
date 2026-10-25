@@ -66,6 +66,66 @@
 
 ```
 
+## 统一上游与显式路由
+
+`configs[]` 新增以下字段：
+
+```json
+{
+  "id": "cfg_example",
+  "preset": "glm-cn",
+  "enabled": true,
+  "models": [
+    {
+      "id": "glm-5.3",
+      "protocols": ["chat_completions"],
+      "capabilities": {"tools": true, "images": true},
+      "context_window": 200000,
+      "max_output_tokens": 8192
+    }
+  ],
+  "protocol_paths": {
+    "chat_completions": "/chat/completions"
+  },
+  "quota_url": "https://example.com/optional-quota"
+}
+```
+
+- `id` 是稳定账号 ID；新建账号会自动生成，显式路由只用它引用账号，不用数组下标。
+- `preset` 支持 `chatgpt`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`claude`、`custom`。preset 只提供默认地址、模型发现和额度解释，不决定优先级。
+- `models[]` 是账号允许使用的后端模型；`protocols` 支持 `chat_completions`、`responses`、`messages`。没有协议的旧模型会按 preset 默认值规范化。
+- 只有 `custom` 需要 `models_endpoint`；内置平台由系统内置模型列表地址、鉴权和解析。
+- `quota_url` 是可选高级覆盖，普通管理页不展示，也不提供额度模板或额度凭证选择。
+- OpenCode Go/Zen 实时模型列表只有 id 等基础字段；没有协议元数据时按模型家族推导：Claude -> `messages`，OpenAI/GPT -> `responses`，GLM/DeepSeek 等 -> `chat_completions`。界面允许手动调整。
+
+显式路由：
+
+```json
+{
+  "routing": {
+    "mode": "explicit",
+    "max_attempts": 3,
+    "models": [
+      {
+        "id": "deepseek",
+        "enabled": true,
+        "entry_protocols": ["chat_completions", "responses", "messages"],
+        "targets": [
+          {"id": "route-a", "config_id": "cfg_glm", "model": "glm-5.3", "protocol": "chat_completions"},
+          {"id": "route-b", "config_id": "cfg_openrouter", "model": "deepseek/deepseek-chat", "protocol": "chat_completions"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `targets[]` 顺序就是严格优先级；每项同时指定上游账号、后端模型和协议。
+- `routing.models[].id` 精确且区分大小写，最长 200 字符，不允许首尾空格或重复。
+- 未配置的客户端模型返回 `model_not_found`；不会使用 `responses.model_aliases` 或 `claude_code.model` 兜底。
+- `max_attempts` 包含首次尝试，实际不会超过候选数量。
+- 额度耗尽、未知和读取失败语义见 [统一模型路由与额度配置设计](unified-model-routing-design.md)。
+
 ## token 配置项
 
 未写 `type` 或 `type` 为 `token` 时，配置项格式如下：
@@ -297,5 +357,5 @@ Version: 0.144.1
 - `access_token`、`refresh_token`、`apikey`、`agent_private_key` 和动态 `AgentAssertion` 都属于敏感信息
 - 顶层 `apikeys`、`auth_token` 也属于敏感信息
 - 不要把完整 AuthSession JSON、`openai.json`、日志里的敏感字段发给别人
-- 管理页只有通过 `auth_token` 后才能查看和复制完整配置；普通运行态摘要不会展示 Agent Identity 私钥、task ID 或动态断言
+- 管理页只有通过 `auth_token` 后才能查看运行态；凭证字段在管理 API 中以掩码返回，不再回显完整 `access_token`、`apikey`、`refresh_token`、账号 ID 或 Agent Identity 私钥
 - 退出 ChatGPT 登录后，`token` 模式下的 `access_token` 可能失效

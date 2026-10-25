@@ -155,6 +155,38 @@ Authorization: Bearer sk-airouter-xxxx
 
 如果没有配置入口 apikey，本机请求不会校验 apikey。
 
+## 统一模型路由（显式模式）
+
+管理台现在只有两个页签：`上游账号` 和 `模型路由`。默认展示列表，新增和编辑通过独立弹窗完成；模型同步先预览并合并到草稿，保存后生效。入口密钥、导入和端口位于设置入口。
+
+- `上游账号`：维护 ChatGPT/Codex、Claude OAuth、OpenCode Zen/Go、OpenRouter、GLM Coding Plan 中国/国际以及自定义接口。内置平台的模型列表地址和鉴权由系统内置；只有自定义接口会显示“模型列表地址”。
+- `模型路由`：为任意客户端模型 ID 配置有序候选。每个候选分别选择上游账号、该账号支持的后端模型和协议。客户端 ID 区分大小写，与后端模型名完全独立。例如可以配置 `deepseek` -> GLM 账号 / `glm-5.3`，也可以配置任何其他名称。
+
+在管理台保存第一条模型路由即可启用显式模式；也可在 `openai.json` 写入：
+
+```json
+{
+  "routing": {
+    "mode": "explicit"
+  }
+}
+```
+
+没有 `routing.mode: "explicit"` 时继续使用旧模式，原有 token/apikey 调度不变。
+
+显式模式的行为：
+
+- 严格按候选顺序使用；第一项可用就一直使用第一项，不会为了平均分流跨过更高优先级。
+- 额度耗尽时使用下一项；确认额度恢复后，下一次不依赖上游私有状态的请求会自动回到更高优先级。
+- 额度未知或查询失败不会被视为耗尽，也不会显示成 0；已知耗尽后查询失败不会自动恢复。
+- 账号鉴权失败/临时冷却与额度状态分开处理。
+- 每个候选在一次请求中最多尝试一次，默认最多 3 次上游尝试，且不会超过候选数量。
+- 流式响应已经开始返回后不会切换上游拼接答案；客户端取消会取消当前上游。
+- `previous_response_id` 只固定在原 Responses 候选；候选不可用、跨协议或服务重启导致归属丢失时返回 `upstream_context_unavailable`，需要客户端重发完整上下文。
+- `GET /v1/models` 返回已启用的客户端模型 ID。后端真实模型只会在管理台状态中展示，不会替换客户端看到的下游模型字段。
+
+跨协议支持文本、图片、工具调用/结果和 SSE。结构化输出、内置服务端工具、thinking/加密 reasoning、文件和音频在不能保真时明确拒绝或跳过候选，不会静默丢弃。ChatGPT/Codex 会尝试通过内置的 `/backend-api/codex/models` 同步模型；不同账号或版本可能不返回该列表，失败时会显示可读原因，可继续手动维护。OpenCode Go 的实时模型列表不包含协议元数据，默认按模型家族推导（Claude -> Messages，OpenAI -> Responses，GLM/DeepSeek 等 -> Chat Completions），可在界面中手动调整。
+
 ## 配合 cc-switch
 
 推荐用 [cc-switch](https://github.com/farion1231/cc-switch) 管理 Codex、Claude Code 等客户端配置。
@@ -172,9 +204,9 @@ API Key: 管理页里的入口 apikey，没有配置就留空
 
 ![cc-switch Claude 配置](docs/img/ccs_claude.png)
 
-## 账号顺序和自动切换
+## 账号顺序和自动切换（legacy 模式）
 
-Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`，或请求头里的 `x-airouter-session-id` / `x-client-request-id`，会通过 HRW/Rendezvous 一致性哈希尽量固定到同一个可用 token 账号。
+未启用 `routing.mode: "explicit"` 时，Airouter 会对 ChatGPT/Codex token 账号做会话粘性调度。相同 `session_id`、`conversation_id`、`thread_id`、`previous_response_id`，或请求头里的 `x-airouter-session-id` / `x-client-request-id`，会通过 HRW/Rendezvous 一致性哈希尽量固定到同一个可用 token 账号。
 
 你可以：
 

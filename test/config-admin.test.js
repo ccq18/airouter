@@ -41,41 +41,51 @@ const {
   configSupports,
 } = require('../public/config-admin.js');
 
-test('config admin exposes role pages and keeps Responses settings on the settings page', () => {
+test('config admin exposes exactly two routing tabs and keeps advanced settings in a closed drawer', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'openai.js'), 'utf8');
-  const settingsPageStart = html.indexOf('data-page="settings"');
-  const hiddenSettingsStart = html.indexOf('<div id="responsesSettingsSection"', settingsPageStart);
-  const settingsPage = settingsPageStart >= 0 && hiddenSettingsStart > settingsPageStart
-    ? html.slice(settingsPageStart, hiddenSettingsStart)
+  const drawerStart = html.indexOf('id="settingsDrawer"');
+  const hiddenSettingsStart = html.indexOf('<div id="responsesSettingsSection"', drawerStart);
+  const settingsDrawer = drawerStart >= 0 && hiddenSettingsStart > drawerStart
+    ? html.slice(drawerStart, hiddenSettingsStart)
     : '';
 
-  assert.match(html, /data-page-link="upstreams"/);
-  assert.match(html, /data-page-link="openai"/);
-  assert.match(html, /data-page-link="claude"/);
-  assert.match(html, /data-page-link="fallbacks"/);
-  assert.match(html, /data-page-link="settings"/);
+  assert.match(html, /data-page-link="upstreams"[^>]*>上游账号/);
+  assert.match(html, /data-page-link="routes"[^>]*>模型路由/);
+  assert.doesNotMatch(html, /data-page-link="openai"/);
+  assert.doesNotMatch(html, /data-page-link="claude"/);
+  assert.doesNotMatch(html, /data-page-link="fallbacks"/);
+  assert.doesNotMatch(html, /data-page-link="settings"/);
   assert.match(serverSource, /\/admin\/configs\/:page\(upstreams\|openai\|claude\|fallbacks\|settings\|routes\|access\)/);
-  assert.ok(settingsPage, 'settings page should be present');
-  assert.match(settingsPage, /Responses 高级设置/);
-  assert.match(settingsPage, /saveResponsesSettingsButton/);
-  assert.match(settingsPage, /responsesModelAliasesInput/);
+  assert.ok(settingsDrawer, 'advanced settings should live in the closed settings drawer');
+  assert.match(html, /class="drawer-layer" id="settingsDrawer" hidden/);
+  assert.match(settingsDrawer, /saveResponsesSettingsButton/);
+  assert.match(settingsDrawer, /responsesModelAliasesInput/);
+  assert.match(settingsDrawer, /id="servicePortInput"/);
   assert.match(html, /id="responsesSettingsSection" class="hidden-settings" hidden><\/div>/);
 });
 
-test('config admin uses upstreams as the default page before role-specific edit pages', () => {
+test('config admin uses list-first account and route views with editors outside them', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
   const messageIndex = html.indexOf('<div id="message"');
-  const upstreamsPageIndex = html.indexOf('data-page="upstreams"');
-  const upstreamIndex = html.indexOf('<h2 class="panel-title">上游配置</h2>');
-  const openAiPageIndex = html.indexOf('data-page="openai"');
-  const addConfigIndex = html.indexOf('<h2 class="panel-title">新增 OpenAI token</h2>');
+  const accountsViewIndex = html.indexOf('data-view="accounts"');
+  const routesViewIndex = html.indexOf('data-view="routes"');
+  const accountDialogIndex = html.indexOf('id="accountDialog"');
+  const routeDialogIndex = html.indexOf('id="routeDialog"');
+  const accountsViewEnd = html.indexOf('data-view="routes"', accountsViewIndex);
+  const accountsView = html.slice(accountsViewIndex, accountsViewEnd);
 
   assert.ok(messageIndex >= 0, 'message area should be present');
-  assert.ok(upstreamsPageIndex > messageIndex, 'upstreams page should follow the message area');
-  assert.ok(upstreamIndex > upstreamsPageIndex, 'upstream config should be inside the upstreams page');
-  assert.ok(openAiPageIndex > upstreamIndex, 'role-specific edit pages should appear after route overview');
-  assert.ok(addConfigIndex > upstreamIndex, 'OpenAI token add panel should appear after route overview');
+  assert.ok(accountsViewIndex > messageIndex, 'accounts view should follow the message area');
+  assert.ok(routesViewIndex > accountsViewIndex, 'routes view should be the second top-level view');
+  assert.ok(accountDialogIndex > routesViewIndex, 'account editor should live outside the list view');
+  assert.ok(routeDialogIndex > accountDialogIndex, 'route editor should be a separate closed dialog');
+  assert.match(accountsView, /id="routingUpstreamsTable"/);
+  assert.match(accountsView, /data-action="new-account"/);
+  assert.doesNotMatch(accountsView, /id="unifiedUpstreamsPanel"/);
+  assert.doesNotMatch(accountsView, /id="rawJsonInput"/);
+  assert.doesNotMatch(accountsView, /id="cards"/);
+  assert.doesNotMatch(accountsView, /data-action="new-route"/);
 });
 
 test('config admin exposes manual runtime config activation controls', () => {
@@ -87,7 +97,7 @@ test('config admin exposes manual runtime config activation controls', () => {
   assert.match(html, /\/admin\/api\/configs\/\$\{index\}\/activate/);
   assert.match(html, /已设为 OpenAI fallback apikey 焦点/);
   assert.match(html, /已设为 Claude fallback apikey 焦点/);
-  assert.match(html, /token 主链路默认启用，无需手动切换/);
+  assert.match(html, /legacy token 组已更新；显式路由不会读取这个焦点/);
   assert.match(html, /getConfigType\(item\) === 'apikey'/);
 });
 
@@ -169,7 +179,7 @@ test('config admin renders upstream configs as grouped cards after adding activa
 
 test('config admin keeps all console controls after UI refresh', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'config-admin.html'), 'utf8');
-  const accessControlStart = html.indexOf('<h2 class="panel-title">入口 apikey</h2>');
+  const accessControlStart = html.indexOf('<h2 class="panel-title">入口 API Key</h2>');
   const accessControlEnd = html.indexOf('<div id="responsesSettingsSection"', accessControlStart);
   const accessControlSection = accessControlStart >= 0 && accessControlEnd > accessControlStart
     ? html.slice(accessControlStart, accessControlEnd)
@@ -177,8 +187,11 @@ test('config admin keeps all console controls after UI refresh', () => {
 
   assert.match(html, /class="topbar"/);
   assert.doesNotMatch(html, /id="statusSummary"/);
-  assert.match(html, /class="section-stack admin-page"/);
-  assert.match(html, /class="admin-page settings-grid"/);
+  assert.match(html, /<section class="admin-page" data-view="accounts"/);
+  assert.match(html, /<section class="admin-page" data-view="routes"[^>]*hidden/);
+  assert.match(html, /class="drawer-layer" id="settingsDrawer" hidden/);
+  assert.match(html, /data-settings-tab="general"/);
+  assert.match(html, /data-settings-tab="compat"/);
   assert.match(html, /id="addApiKeyButton"/);
   assert.match(html, /id="proxySettingsPanel"/);
   assert.match(html, /id="servicePortInput"/);
@@ -213,10 +226,9 @@ test('config admin keeps all console controls after UI refresh', () => {
   assert.doesNotMatch(html, /window\.__TAURI__/);
   assert.match(html, /隐私模式登录 ChatGPT/);
   assert.match(html, /不要退出该登录态/);
-  assert.match(html, /name="configMode" value="token"/);
-  assert.match(html, /name="configMode" value="apikey"/);
-  assert.match(html, /name="apiKeySupport" value="gpt"/);
-  assert.match(html, /name="apiKeySupport" value="claude"/);
+  assert.doesNotMatch(html, /<input[^>]+name="configMode"/);
+  assert.match(html, /name="fallbackSupport" value="gpt"/);
+  assert.match(html, /name="fallbackSupport" value="claude"/);
   assert.match(html, /id="apiKeyHealthModelSelect"/);
   assert.match(html, /id="fallbackHealthModelSelect"/);
   assert.match(html, /name="apiKeyHealthModel"/);

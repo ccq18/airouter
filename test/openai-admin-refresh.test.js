@@ -10,6 +10,7 @@ const {
   openExternalUrl,
   refreshConfigAdminResponse,
   refreshConfigTokenAdminResponse,
+  refreshExplicitUpstreamAuth,
   reportBusinessRequestError,
   registerProcessSafetyHandlers,
   selectReloadedActiveConfig,
@@ -348,6 +349,40 @@ test('refreshConfigTokenAdminResponse rejects configs without refresh_token', as
     }),
     /当前配置项没有 refresh_token/
   );
+});
+
+test('refreshExplicitUpstreamAuth refreshes token credentials and persists them once', async () => {
+  const config = {
+    type: 'token',
+    index: 0,
+    access_token: 'old-access',
+    refresh_token: 'old-refresh',
+    client_id: 'old-client',
+  };
+  const persisted = [];
+  const refreshed = await refreshExplicitUpstreamAuth(config, {
+    refreshOpenAIToken: async payload => {
+      assert.equal(payload.refreshToken, 'old-refresh');
+      assert.equal(payload.clientId, 'old-client');
+      assert.equal(typeof payload.timeoutMs, 'number');
+      return {
+        access_token: 'new-access',
+        refresh_token: 'new-refresh',
+        client_id: 'new-client',
+      };
+    },
+    persistTokenRefreshForConfig: async payload => {
+      persisted.push(payload);
+    },
+  });
+
+  assert.equal(refreshed, true);
+  assert.equal(config.access_token, 'new-access');
+  assert.equal(config.refresh_token, 'new-refresh');
+  assert.equal(config.client_id, 'new-client');
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].accessToken, 'new-access');
+  assert.equal(persisted[0].refreshToken, 'new-refresh');
 });
 
 test('openExternalUrl reports opener spawn errors without leaving an unhandled child error', async () => {

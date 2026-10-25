@@ -138,6 +138,92 @@
       color: #fff;
     }
 
+    .unified-account-form {
+      display: grid;
+      gap: 14px;
+    }
+
+    .unified-inline {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .model-editor,
+    .route-targets-editor {
+      display: grid;
+      gap: 8px;
+    }
+
+    .model-row,
+    .route-target-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 2fr) minmax(260px, 3fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      border: 1px solid var(--line, #e5e7eb);
+      border-radius: 8px;
+      background: #fafafa;
+    }
+
+    .route-target-row {
+      grid-template-columns: minmax(150px, 2fr) minmax(150px, 2fr) minmax(120px, 1fr) auto;
+    }
+
+    .model-protocol-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .discovery-diff {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      font-size: 13px;
+    }
+
+    .route-status-list {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      color: #475569;
+    }
+
+    .route-status-item {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .route-status-chip {
+      border-radius: 999px;
+      padding: 1px 8px;
+      background: #e2e8f0;
+      color: #334155;
+    }
+
+    .route-status-chip.ok {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .route-status-chip.warn {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .route-status-chip.danger {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
     .admin-page[hidden] {
       display: none;
     }
@@ -1158,313 +1244,1698 @@
       }
     }
 
+    /* === Interactive workspace: list first, edit in dialogs === */
+    .eyebrow {
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 38px;
+      height: 38px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    .sidebar-brand .page-title {
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .sidebar-brand .page-subtitle {
+      margin-top: 2px;
+      font-size: 12px;
+    }
+
+    .admin-nav a {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid transparent;
+      transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+    }
+
+    .admin-nav a:hover {
+      border-color: var(--line);
+      background: rgba(255, 255, 255, 0.66);
+    }
+
+    .admin-nav a.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .nav-hint {
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
+      opacity: 0.58;
+    }
+
+    .sidebar-foot {
+      display: grid;
+      gap: 10px;
+      margin-top: 22px;
+      padding: 16px 8px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .sidebar-foot .secondary {
+      width: 100%;
+      background: transparent;
+      border-color: var(--line-strong);
+    }
+
+    .admin-workspace {
+      padding: 30px clamp(18px, 4vw, 48px) 56px;
+    }
+
+    .topbar {
+      align-items: flex-end;
+      margin-bottom: 20px;
+    }
+
+    .topbar .page-title {
+      margin: 0;
+      font-size: clamp(28px, 3.2vw, 38px);
+      letter-spacing: -0.035em;
+    }
+
+    .topbar .page-subtitle {
+      max-width: 720px;
+      margin-top: 6px;
+    }
+
+    .topbar .toolbar {
+      align-items: center;
+    }
+
+    .view-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin: 28px 0 14px;
+    }
+
+    .view-head h2 {
+      margin: 0;
+      font-size: 19px;
+      letter-spacing: -0.02em;
+    }
+
+    .view-head p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .view-head .primary {
+      min-height: 40px;
+      padding-inline: 16px;
+      border-radius: 8px;
+    }
+
+    .account-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 18px;
+      min-height: 20px;
+      margin: -2px 0 14px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.02em;
+    }
+
+    .account-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      align-items: start;
+    }
+
+    .account-card {
+      display: grid;
+      gap: 13px;
+      min-width: 0;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--surface);
+      box-shadow: 0 1px 0 rgba(22, 33, 43, 0.03);
+      transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
+    }
+
+    .account-card:hover {
+      border-color: var(--line-strong);
+      box-shadow: 0 9px 26px rgba(22, 33, 43, 0.055);
+      transform: translateY(-1px);
+    }
+
+    .account-card.is-disabled {
+      background: var(--surface-muted);
+      opacity: 0.78;
+    }
+
+    .account-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .account-identity {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .account-ordinal {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.9;
+      opacity: 0.7;
+    }
+
+    .account-identity h3 {
+      margin: 0;
+      overflow: hidden;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .account-provider {
+      display: block;
+      margin-top: 2px;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .status-dot::before {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--line-strong);
+      content: "";
+    }
+
+    .status-dot.ok::before { background: var(--active); }
+    .status-dot.warn::before { background: var(--warning); }
+    .status-dot.danger::before { background: var(--danger); }
+
+    .account-models {
+      min-width: 0;
+    }
+
+    .account-models-label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      max-height: 78px;
+      overflow: auto;
+    }
+
+    .tag {
+      display: inline-flex;
+      max-width: 100%;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: var(--surface-muted);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .tag-more {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 2;
+    }
+
+    .account-facts {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+      gap: 10px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .fact-label {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .fact-value {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .fact-value .mono {
+      font-size: 11px;
+    }
+
+    .quota-line {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .quota-detail {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .account-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding-top: 2px;
+    }
+
+    .account-actions button {
+      min-height: 30px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      background: transparent;
+      font-size: 12px;
+    }
+
+    .account-actions button:hover {
+      background: var(--surface-muted);
+    }
+
+    .account-actions .danger {
+      margin-left: auto;
+      color: var(--danger);
+      border-color: transparent;
+      background: transparent;
+    }
+
+    .account-actions .danger:hover {
+      background: var(--danger-soft);
+      border-color: rgba(162, 54, 54, 0.18);
+    }
+
+    .route-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .route-card {
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--surface);
+      box-shadow: 0 1px 0 rgba(22, 33, 43, 0.03);
+    }
+
+    .route-card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .route-id {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 15px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .route-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 5px;
+    }
+
+    .route-chain {
+      display: grid;
+      gap: 0;
+      margin: 13px 0 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--line);
+    }
+
+    .route-candidate {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .route-candidate:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .route-priority {
+      display: grid;
+      width: 21px;
+      height: 21px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .route-candidate-copy {
+      display: flex;
+      min-width: 0;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 4px 7px;
+    }
+
+    .route-candidate-copy strong {
+      font-size: 12px;
+    }
+
+    .route-candidate-copy .mono {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .route-candidate-flags {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    .route-empty-candidates {
+      padding: 11px 0 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .route-actions {
+      display: flex;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+
+    .route-actions button {
+      min-height: 30px;
+      padding: 4px 9px;
+      font-size: 12px;
+    }
+
+    .empty-state {
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+      padding: 48px 20px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.48);
+      text-align: center;
+    }
+
+    .empty-state strong {
+      font-size: 15px;
+    }
+
+    .empty-state p {
+      max-width: 420px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .empty-state .primary {
+      margin-top: 6px;
+    }
+
+    .dialog-layer,
+    .drawer-layer {
+      position: fixed;
+      z-index: 60;
+      inset: 0;
+      display: grid;
+      padding: 22px;
+    }
+
+    .dialog-layer {
+      place-items: center;
+    }
+
+    .dialog-backdrop,
+    .drawer-backdrop {
+      position: absolute;
+      inset: 0;
+      border: 0;
+      background: rgba(16, 28, 34, 0.42);
+      backdrop-filter: blur(2px);
+    }
+
+    .dialog {
+      position: relative;
+      display: grid;
+      width: min(760px, 100%);
+      max-height: min(88vh, 900px);
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: 0 28px 80px rgba(16, 28, 34, 0.24);
+      animation: dialog-in 170ms ease-out both;
+    }
+
+    .dialog.wide {
+      width: min(920px, 100%);
+    }
+
+    @keyframes dialog-in {
+      from { opacity: 0; transform: translateY(8px) scale(0.99); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .dialog-head,
+    .drawer-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 19px 22px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .dialog-head h2,
+    .drawer-head h2 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: -0.025em;
+    }
+
+    .dialog-head p,
+    .drawer-head p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .dialog-body,
+    .drawer-body {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 20px 22px 24px;
+    }
+
+    .dialog-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 9px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+
+    .dialog-actions .primary {
+      min-width: 124px;
+    }
+
+    .icon-button {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      flex: 0 0 auto;
+      place-items: center;
+      padding: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--muted);
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .icon-button:hover {
+      background: var(--surface-muted);
+      color: var(--text);
+    }
+
+    .form-section {
+      display: grid;
+      gap: 9px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-muted);
+    }
+
+    .form-section + .form-section {
+      margin-top: 14px;
+    }
+
+    .form-section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .form-section h3 {
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .form-section .field-hint {
+      margin: 0;
+    }
+
+    .advanced-settings {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+
+    .advanced-settings > summary {
+      padding: 11px 13px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      list-style-position: inside;
+      user-select: none;
+    }
+
+    .advanced-settings[open] > summary {
+      border-bottom: 1px solid var(--line);
+      color: var(--text);
+    }
+
+    .advanced-settings-body {
+      display: grid;
+      gap: 13px;
+      padding: 13px;
+    }
+
+    .credential-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-muted);
+    }
+
+    .credential-panel-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .credential-panel-copy strong {
+      font-size: 13px;
+    }
+
+    .credential-panel-copy span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .credential-panel .actions {
+      flex: 0 0 auto;
+    }
+
+    .credential-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--active);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+    }
+
+    .credential-state::before {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      content: "";
+    }
+
+    .model-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px 10px;
+      padding: 9px 10px;
+      border-color: var(--line);
+      background: var(--surface);
+    }
+
+    .model-row-main {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .model-row-main input {
+      min-width: 0;
+    }
+
+    .model-row .advanced-settings {
+      grid-column: 1 / -1;
+      border: 0;
+      background: transparent;
+    }
+
+    .model-row .advanced-settings > summary {
+      padding: 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .model-row .advanced-settings-body {
+      padding: 8px 0 0;
+    }
+
+    .model-row .model-protocol-options label {
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-muted);
+      cursor: pointer;
+      font-size: 10px;
+    }
+
+    .model-row .danger {
+      align-self: start;
+      min-height: 30px;
+      padding: 4px 9px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--danger);
+      font-size: 11px;
+    }
+
+    .discovery-diff {
+      border-radius: 9px;
+      background: var(--surface-muted);
+    }
+
+    .discovery-diff .sync-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+
+    .discovery-diff .sync-row code {
+      font-family: var(--mono);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .discovery-diff .sync-tag {
+      margin-left: auto;
+      flex: 0 0 auto;
+      font-size: 10px;
+    }
+
+    .route-targets-editor {
+      display: grid;
+      gap: 7px;
+    }
+
+    .route-target-row {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .route-target-copy {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .route-target-copy strong {
+      font-size: 12px;
+    }
+
+    .route-target-copy span {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .route-target-row .actions {
+      flex-wrap: nowrap;
+    }
+
+    .route-target-row button {
+      min-width: 30px;
+      min-height: 28px;
+      padding: 2px 7px;
+      font-size: 11px;
+    }
+
+    .target-editor-pane {
+      margin-top: 13px;
+      padding: 14px;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      background: var(--surface-muted);
+    }
+
+    .target-editor-pane h3 {
+      margin: 0 0 12px;
+      font-size: 13px;
+    }
+
+    .target-editor-pane .dialog-sub-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .form-status {
+      min-height: 18px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .form-status.is-error {
+      color: var(--danger);
+      font-weight: 700;
+    }
+
+    body.modal-open .message.show {
+      position: fixed;
+      z-index: 90;
+      top: 16px;
+      left: 50%;
+      width: min(560px, calc(100vw - 32px));
+      transform: translateX(-50%);
+      box-shadow: 0 16px 42px rgba(16, 28, 34, 0.22);
+    }
+
+    .drawer-layer {
+      justify-items: end;
+      padding: 0;
+    }
+
+    .settings-drawer {
+      position: relative;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      width: min(470px, 100%);
+      height: 100%;
+      border-left: 1px solid var(--line-strong);
+      background: var(--surface);
+      box-shadow: -20px 0 60px rgba(16, 28, 34, 0.18);
+      animation: drawer-in 180ms ease-out both;
+    }
+
+    @keyframes drawer-in {
+      from { opacity: 0; transform: translateX(12px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    .settings-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-muted);
+    }
+
+    .settings-tabs button {
+      flex: 1;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .settings-tabs button[aria-selected="true"] {
+      border-color: var(--line);
+      background: var(--surface);
+      color: var(--text);
+      font-weight: 800;
+    }
+
+    .settings-block {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+    }
+
+    .settings-block + .settings-block {
+      margin-top: 12px;
+    }
+
+    .settings-block .panel-head {
+      margin-bottom: 12px;
+      padding: 0;
+    }
+
+    .settings-block .panel-title {
+      font-size: 14px;
+    }
+
+    .notice {
+      padding: 12px 13px;
+      border: 1px solid #e7d9b6;
+      border-radius: 9px;
+      background: #fff9eb;
+      color: #6c511d;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .settings-action-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .settings-action-list button {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      min-height: 44px;
+      text-align: left;
+    }
+
+    .settings-action-list button::after {
+      color: var(--muted);
+      content: "→";
+      font-family: var(--mono);
+    }
+
+    .legacy-dialog-section + .legacy-dialog-section {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+
+    .legacy-dialog-section h3 {
+      margin: 0 0 10px;
+      font-size: 14px;
+    }
+
+    .legacy-dialog-section .panel-head {
+      padding: 0;
+    }
+
+    .command-card {
+      display: grid;
+      gap: 5px;
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-muted);
+    }
+
+    .command-card code {
+      overflow-wrap: anywhere;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .command-card span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    body.modal-open {
+      overflow: hidden;
+    }
+
+    @media (max-width: 980px) {
+      .account-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        grid-template-columns: 1fr;
+      }
+
+      .admin-sidebar {
+        position: static;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px 14px;
+        height: auto;
+        padding: 14px 16px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .sidebar-brand {
+        margin: 0;
+        padding: 0;
+        border: 0;
+      }
+
+      .brand-mark {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        font-size: 13px;
+      }
+
+      .sidebar-brand .page-title {
+        font-size: 17px;
+      }
+
+      .sidebar-brand .page-subtitle,
+      .sidebar-foot .runtime-sync {
+        display: none;
+      }
+
+      .admin-nav {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .admin-nav a {
+        min-height: 36px;
+        justify-content: center;
+        padding: 6px 10px;
+      }
+
+      .nav-hint {
+        display: none;
+      }
+
+      .sidebar-foot {
+        grid-column: 2;
+        grid-row: 1;
+        align-self: center;
+        margin: 0;
+        padding: 0;
+        border: 0;
+      }
+
+      .sidebar-foot .secondary {
+        min-height: 32px;
+        padding: 4px 12px;
+      }
+
+      .admin-workspace {
+        padding: 20px 14px 40px;
+      }
+
+      .topbar {
+        align-items: flex-start;
+      }
+
+      .topbar .page-title {
+        font-size: 28px;
+      }
+
+      .topbar .toolbar {
+        flex: 0 0 auto;
+      }
+
+      .topbar .toolbar button {
+        min-height: 34px;
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+
+      .view-head {
+        align-items: flex-start;
+        margin-top: 22px;
+      }
+
+      .view-head > div {
+        min-width: 0;
+      }
+
+      .account-facts {
+        grid-template-columns: 1fr;
+      }
+
+      .dialog-layer {
+        align-items: end;
+        padding: 0;
+      }
+
+      .dialog {
+        width: 100%;
+        max-height: 92vh;
+        border-radius: 14px 14px 0 0;
+        border-bottom: 0;
+      }
+
+      .dialog-head,
+      .dialog-body {
+        padding-inline: 16px;
+      }
+
+      .dialog-head h2 {
+        font-size: 18px;
+      }
+
+      .dialog-body {
+        padding-bottom: 30px;
+      }
+
+      .form-grid,
+      .unified-inline,
+      .port-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .credential-panel {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .credential-panel .actions,
+      .credential-panel .actions button {
+        width: 100%;
+      }
+
+      .route-candidate {
+        grid-template-columns: 21px minmax(0, 1fr);
+      }
+
+      .route-candidate-flags {
+        grid-column: 2;
+        justify-content: flex-start;
+      }
+
+      .route-card-head {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .route-actions button {
+        flex: 1;
+      }
+
+      .settings-drawer {
+        width: 100%;
+        border-left: 0;
+      }
+    }
+
+    @media (max-width: 430px) {
+      .view-head {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .view-head .primary {
+        width: 100%;
+      }
+
+      .account-actions .danger {
+        margin-left: 0;
+      }
+
+      .toolbar {
+        gap: 6px;
+      }
+    }
   </style>
 </head>
   <body>
   <main class="page">
     <aside class="admin-sidebar">
       <div class="sidebar-brand">
-        <h1 class="page-title">Airouter 管理控制台</h1>
-        <p class="page-subtitle">token 默认主链路，apikey 仅兜底。按页面管理对应配置。</p>
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">A</span>
+          <div>
+            <h1 class="page-title">Airouter</h1>
+            <p class="page-subtitle">本地模型转发控制台</p>
+          </div>
+        </div>
       </div>
 
       <nav class="admin-nav" aria-label="管理页面">
-        <a href="/admin/configs/upstreams" data-page-link="upstreams">上游配置</a>
-        <a href="/admin/configs/openai" data-page-link="openai">OpenAI token</a>
-        <a href="/admin/configs/claude" data-page-link="claude">Claude token</a>
-        <a href="/admin/configs/fallbacks" data-page-link="fallbacks">Fallback apikey</a>
-        <a href="/admin/configs/settings" data-page-link="settings">系统设置</a>
+        <a href="/admin/configs/upstreams" data-page-link="upstreams">上游账号 <span class="nav-hint">ACCOUNTS</span></a>
+        <a href="/admin/configs/routes" data-page-link="routes">模型路由 <span class="nav-hint">ROUTES</span></a>
       </nav>
+
+      <div class="sidebar-foot">
+        <button class="secondary" type="button" data-open-settings>设置</button>
+        <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
+      </div>
     </aside>
 
     <section class="admin-workspace">
       <header class="topbar">
         <div>
-          <h1 class="page-title" id="currentPageTitle">上游配置</h1>
-          <p class="page-subtitle" id="currentPageSubtitle">默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。</p>
+          <p class="eyebrow">Local Router / Admin</p>
+          <h1 class="page-title" id="currentPageTitle">上游账号</h1>
+          <p class="page-subtitle" id="currentPageSubtitle">管理可用账号与它们允许调用的后端模型。编辑在独立面板中完成。</p>
         </div>
         <div class="toolbar">
           <button class="secondary" type="button" id="refreshButton">刷新</button>
-          <button class="secondary" type="button" id="testResponseButton">测试请求</button>
+          <button class="secondary" type="button" id="openSettingsButton">设置</button>
         </div>
       </header>
 
-    <div id="message" class="message" role="status" aria-live="polite"></div>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
 
-    <section class="admin-page" data-page="upstreams">
-      <div id="upstreamMetrics" class="metrics-grid"></div>
-      <div class="panel list-panel">
-      <div class="panel-head">
-        <div>
-          <h2 class="panel-title">上游配置</h2>
-          <p class="panel-note">按 OpenAI token、Claude token、Fallback apikey 分组展示；组内顺序就是调度优先级。</p>
-        </div>
-        <div class="panel-tools">
-          <span id="runtimeSyncStatus" class="runtime-sync">运行态尚未同步</span>
-        </div>
-      </div>
-      <div id="batchToolbar" class="batch-toolbar">
-        <div class="batch-toolbar-left">
-          <span id="batchSelectionSummary" class="count">已选择 0 项</span>
-          <button class="secondary" type="button" id="batchSelectProblemConfigsButton" data-action="batch-select-problem-configs">选择异常配置</button>
-        </div>
-        <div class="batch-toolbar-right">
-          <button class="secondary" type="button" id="batchEnableSelectedButton" data-action="batch-enable-selected" disabled>批量启用所选</button>
-          <button class="secondary" type="button" id="batchDisableSelectedButton" data-action="batch-disable-selected" disabled>批量停用所选</button>
-          <button class="danger" type="button" id="batchDeleteSelectedButton" data-action="batch-delete-selected" disabled>批量删除所选</button>
-        </div>
-      </div>
-      <section id="cards"></section>
-      </div>
-    </section>
-
-    <section class="section-stack admin-page" data-page="openai">
-      <div class="panel">
-        <div class="panel-head">
+      <section class="admin-page" data-view="accounts" aria-labelledby="accountsHeading">
+        <div class="view-head">
           <div>
-            <h2 class="panel-title">新增 OpenAI token</h2>
-            <p class="panel-note">支持 ChatGPT AuthSession 和 Sub2API Agent Identity 导出；列表顺序影响调度优先级。</p>
+            <h2 id="accountsHeading" hidden>上游账号</h2>
+            <p>每个账号独立维护凭证与支持的模型；平台之间没有默认优先级。</p>
+          </div>
+          <button class="primary" type="button" data-action="new-account">＋ 添加上游</button>
+        </div>
+        <div class="account-summary" id="accountSummary" aria-live="polite"></div>
+        <div id="routingUpstreamsTable" class="account-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="admin-page" data-view="routes" aria-labelledby="routesHeading" hidden>
+        <div class="view-head">
+          <div>
+            <h2 id="routesHeading" hidden>模型路由</h2>
+            <p>高优先级额度恢复后，后续请求自动切回。</p>
+          </div>
+          <button class="primary" type="button" data-action="new-route">＋ 新增模型路由</button>
+        </div>
+        <div class="account-summary" aria-live="polite">
+          <span>候选顺序即优先级</span>
+          <span>额度耗尽才尝试下一项</span>
+          <span id="routesRevisionBadge" class="mono" hidden>未读取</span>
+        </div>
+        <div id="modelRoutesList" class="route-list" aria-live="polite"></div>
+      </section>
+    </section>
+  </main>
+
+  <!-- 上游账号编辑：默认关闭，只在新增或编辑时出现 -->
+  <div class="dialog-layer" id="accountDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="accountDialog" aria-label="关闭上游编辑"></button>
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="accountDialogTitle">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow" id="accountDialogEyebrow">Account / New</p>
+          <h2 id="accountDialogTitle">添加上游</h2>
+          <p>选择平台与凭证方式，然后维护允许路由使用的模型列表。</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="accountDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div id="unifiedUpstreamsPanel">
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="upstreamDescriptionInput">账号名称</label>
+              <input id="upstreamDescriptionInput" type="text" placeholder="例如：GLM 主力账号">
+              <p class="field-hint">只用于本机识别，不会作为客户端模型名暴露。</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="upstreamPresetSelect">平台</label>
+              <select id="upstreamPresetSelect"></select>
+              <p class="field-hint" id="upstreamPresetHint">内置平台的接口地址与模型发现规则由系统维护。</p>
+            </div>
+          </div>
+
+          <div class="field" id="upstreamApiKeyField" style="margin-top:14px">
+            <label class="field-label" for="upstreamApiKeyInput">转发凭证</label>
+            <input id="upstreamApiKeyInput" type="password" autocomplete="off" placeholder="留空表示编辑时不改凭证">
+            <p class="field-hint">凭证不会回显；编辑已有账号时留空即可保留原凭证。</p>
+          </div>
+
+          <div id="upstreamCredentialPanel" class="credential-panel" style="margin-top:14px" hidden></div>
+
+          <div class="field" id="customModelsEndpointField" style="margin-top:14px" hidden>
+            <label class="field-label" for="upstreamModelsEndpointInput">模型列表接口</label>
+            <input id="upstreamModelsEndpointInput" type="text" placeholder="/v1/models 或 https://example.com/v1/models">
+            <p class="field-hint">仅自定义接口需要填写；内置平台不显示此字段。</p>
+          </div>
+
+          <details class="advanced-settings" style="margin-top:14px">
+            <summary>高级连接设置</summary>
+            <div class="advanced-settings-body">
+              <div class="field">
+                <label class="field-label" for="upstreamBaseUrlInput">Base URL</label>
+                <input id="upstreamBaseUrlInput" type="url" placeholder="https://...">
+                <p class="field-hint" id="upstreamBaseUrlHint">内置平台会填入官方地址，通常无需修改。</p>
+              </div>
+              <label class="support-option"><input type="checkbox" id="upstreamEnabledInput" checked> 启用这个上游账号</label>
+            </div>
+          </details>
+
+          <div class="form-section" style="margin-top:16px">
+            <div class="form-section-head">
+              <div>
+                <h3>支持的模型</h3>
+                <p class="field-hint">模型清单决定这个账号能被哪些路由候选使用，不会自动公开给客户端。</p>
+              </div>
+              <div class="actions">
+                <button class="secondary" type="button" id="upstreamDiscoverModelsButton">同步模型列表</button>
+                <button class="secondary" type="button" id="upstreamAddModelButton">＋ 手动添加</button>
+              </div>
+            </div>
+            <div id="upstreamModelsEditor" class="model-editor"></div>
+            <div id="upstreamDiscoveryPanel" class="discovery-diff" hidden></div>
+          </div>
+
+          <p class="form-status" id="upstreamEditHint" aria-live="polite"></p>
+          <div class="dialog-actions">
+            <button class="primary" type="button" id="upstreamSaveButton">新增上游账号</button>
+            <button class="secondary" type="button" id="upstreamResetButton">取消</button>
           </div>
         </div>
+      </div>
+    </section>
+  </div>
 
-        <div class="mode-switch" role="radiogroup" aria-label="配置模式" hidden>
-          <label class="mode-option">
-            <input type="radio" name="configMode" value="token" checked>
-            <span>
-              <span class="mode-name">OpenAI token</span>
-              <span class="mode-note">粘贴 ChatGPT AuthSession JSON，适合 Codex 登录态账号。</span>
-            </span>
-          </label>
-          <label class="mode-option">
-            <input type="radio" name="configMode" value="apikey">
-            <span>
-              <span class="mode-name">Fallback apikey</span>
-              <span class="mode-note">填写第三方上游地址和 API Key，作为 token 不可用后的兜底。</span>
-            </span>
-          </label>
+  <!-- 模型路由编辑：默认关闭，只在新增或编辑时出现 -->
+  <div class="dialog-layer" id="routeDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="routeDialog" aria-label="关闭路由编辑"></button>
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="routeDialogTitle">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow" id="routeDialogEyebrow">Route / New</p>
+          <h2 id="routeDialogTitle">新增模型路由</h2>
+          <p>前端 ID 与后端模型名解耦；候选从上到下依次尝试。</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="routeDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="field">
+          <label class="field-label" for="routeModelIdInput">客户端模型 ID</label>
+          <input id="routeModelIdInput" type="text" placeholder="任意 ID，例如 deepseek 或 my-coding-model" maxlength="200">
+          <p class="field-hint">区分大小写，会作为 `/v1/models` 中的公开 ID。</p>
         </div>
 
+        <div class="form-section" style="margin-top:16px">
+          <div class="form-section-head">
+            <div>
+              <h3>后端候选</h3>
+              <p class="field-hint">每一行必须同时选择上游账号和支持的后端模型。</p>
+            </div>
+            <button class="secondary" type="button" id="routeAddTargetButton">＋ 添加候选</button>
+          </div>
+          <div id="routeTargetsEditor" class="route-targets-editor"></div>
+          <div id="routeTargetEditorPane" class="target-editor-pane" hidden></div>
+        </div>
+
+        <details class="advanced-settings" style="margin-top:14px">
+          <summary>高级路由设置</summary>
+          <div class="advanced-settings-body">
+            <div class="field">
+              <span class="field-label">入口协议</span>
+              <div class="model-protocol-options">
+                <label><input type="checkbox" name="routeEntryProtocol" value="chat_completions" checked> Chat Completions</label>
+                <label><input type="checkbox" name="routeEntryProtocol" value="responses" checked> Responses</label>
+                <label><input type="checkbox" name="routeEntryProtocol" value="messages" checked> Claude Messages</label>
+              </div>
+              <p class="field-hint">只有选中的入口协议会接受这个客户端模型 ID。</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="routeMaxAttemptsInput">最大上游尝试次数</label>
+              <input id="routeMaxAttemptsInput" type="number" min="1" max="20" value="3">
+              <p class="field-hint">包含首次尝试，实际次数不会超过候选数量。</p>
+            </div>
+          </div>
+        </details>
+
+        <p class="form-status" id="routeEditHint" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button class="primary" type="button" id="routeSaveButton">保存模型路由</button>
+          <button class="secondary" type="button" id="routeResetButton">取消</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 设置抽屉：入口鉴权、端口、高级设置与旧模式入口，默认关闭 -->
+  <div class="drawer-layer" id="settingsDrawer" hidden>
+    <button class="drawer-backdrop" type="button" data-close-settings aria-label="关闭设置"></button>
+    <aside class="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <header class="drawer-head">
+        <div>
+          <p class="eyebrow">Workspace / Settings</p>
+          <h2 id="settingsTitle">设置</h2>
+          <p>入口鉴权、本地端口与兼容选项集中在这里。</p>
+        </div>
+        <button class="icon-button" type="button" data-close-settings aria-label="关闭设置">×</button>
+      </header>
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button type="button" role="tab" data-settings-tab="general" aria-selected="true">常规设置</button>
+        <button type="button" role="tab" data-settings-tab="compat" aria-selected="false">旧模式与导入</button>
+      </div>
+      <div class="drawer-body">
+        <section data-settings-panel="general">
+          <section class="settings-block">
+            <div class="panel-head">
+              <div>
+                <h2 class="panel-title">入口 API Key</h2>
+                <p class="panel-note">为空时，本机请求不会校验入口 apikey。</p>
+              </div>
+              <div class="panel-tools">
+                <span id="apiKeyStatusBadge" class="badge note">未读取</span>
+              </div>
+            </div>
+            <div class="key-toolbar">
+              <button class="primary" type="button" id="addApiKeyButton">新增随机 apikey</button>
+            </div>
+            <div id="apiKeysList" class="key-list"></div>
+          </section>
+
+          <section class="settings-block">
+            <div class="panel-head">
+              <div>
+                <h2 class="panel-title">Responses 高级设置</h2>
+                <p class="panel-note">模型别名只作用于 legacy Responses 链路，不参与显式路由。</p>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="responsesModelAliasesInput">responses.model_aliases</label>
+              <textarea id="responsesModelAliasesInput" spellcheck="false" placeholder='{
+  "gpt-5.2": "gpt-5.5"
+}'></textarea>
+            </div>
+            <div class="actions">
+              <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
+            </div>
+          </section>
+
+          <section class="settings-block" id="proxySettingsPanel">
+            <div class="panel-head">
+              <div>
+                <h2 class="panel-title">服务端口 / 代理端口</h2>
+                <p class="panel-note">修改服务端口后页面会跳转到新地址。</p>
+              </div>
+            </div>
+            <div class="port-grid">
+              <div class="field">
+                <label class="field-label" for="servicePortInput">服务端口</label>
+                <input id="servicePortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="3009">
+              </div>
+              <div class="field">
+                <label class="field-label" for="proxyPortInput">代理端口</label>
+                <input id="proxyPortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="留空不用代理">
+              </div>
+            </div>
+            <div class="endpoint-card">
+              <div class="endpoint-label">代理访问地址</div>
+              <code class="mono endpoint-value" id="proxyV1Url">http://localhost:3009/v1</code>
+              <div class="endpoint-meta" id="proxyEndpointMeta">Responses: http://localhost:3009/v1/responses</div>
+            </div>
+            <div class="actions">
+              <button class="primary" type="button" id="saveProxySettingsButton">保存端口配置</button>
+            </div>
+            <p class="field-hint">保存后立即生效；服务端口变化时页面会自动跳转到新地址。</p>
+          </section>
+
+          <section class="settings-block">
+            <div class="panel-head">
+              <div>
+                <h2 class="panel-title">测试请求</h2>
+                <p class="panel-note">通过当前运行实例发送一条 Responses 测试消息。</p>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="secondary" type="button" id="testResponseButton">测试请求</button>
+            </div>
+          </section>
+        </section>
+
+        <section data-settings-panel="compat" hidden>
+          <div class="notice">
+            以下入口只在 <code>routing.mode</code> 缺省或为 <code>legacy</code> 时具有旧行为。显式路由启用后，账号之间没有 token / apikey 默认特权，调度只由「模型路由」的候选顺序决定。
+          </div>
+          <div class="settings-action-list">
+            <button class="secondary" type="button" data-action="open-token-import">ChatGPT / Codex 登录态导入 <span>AuthSession / Sub2API</span></button>
+            <button class="secondary" type="button" data-action="open-claude-manager">Claude 登录与管理 <span>OAuth 登录命令</span></button>
+            <button class="secondary" type="button" data-action="open-legacy-configs">旧模式账号与 Fallback <span>排序 / 启用 / 批量处理</span></button>
+          </div>
+          <p class="field-hint" style="margin-top:12px">这些入口默认收在设置中，不会出现在上游账号首页。</p>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ChatGPT / Codex 登录态导入 -->
+  <div class="dialog-layer" id="tokenImportDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="tokenImportDialog" aria-label="关闭登录态导入"></button>
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="tokenImportTitle">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">Import / ChatGPT</p>
+          <h2 id="tokenImportTitle">导入 ChatGPT / Codex 登录态</h2>
+          <p>粘贴 AuthSession 或 Sub2API Agent Identity JSON，保存后即可在账号列表编辑模型。</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="tokenImportDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
         <div id="tokenConfigPanel" class="config-panel">
           <div class="field">
             <label class="field-label" for="rawJsonInput">AuthSession / Sub2API JSON</label>
             <textarea id="rawJsonInput" spellcheck="false"></textarea>
             <p class="field-hint">
-              建议使用浏览器隐私模式登录 ChatGPT 后打开
+              使用浏览器隐私模式登录 ChatGPT 后打开
               <button class="inline-copy-button" type="button" data-copy-url="https://chatgpt.com/api/auth/session">AuthSession 页面</button>
-              复制完整 JSON；传统 AuthSession 不要退出该登录态，否则 token 会失效。也可以直接粘贴 Sub2API 导出的 OpenAI Agent Identity 对象或数组，系统会自动识别并保存为 `token / sub2api`。
+              复制完整 JSON；传统 AuthSession 不要退出该登录态，否则 token 会失效。也可以粘贴 Sub2API 导出的 OpenAI Agent Identity 对象或数组。
             </p>
           </div>
         </div>
-
         <div id="apiKeyConfigPanel" class="config-panel" hidden>
+          <div class="field">
+            <label class="field-label" for="apiKeyBaseUrlInput">Base URL</label>
+            <input id="apiKeyBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
+          </div>
+          <div class="field">
+            <label class="field-label" for="apiKeyInput">API Key</label>
+            <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-...">
+          </div>
+          <div class="field">
+            <label class="field-label" for="apiKeyDescriptionInput">备注</label>
+            <input id="apiKeyDescriptionInput" type="text" placeholder="例如：OpenAI 兼容备用上游">
+          </div>
+          <div class="field">
+            <label class="field-label" for="apiKeyHealthModelSelect">可用性测试模型</label>
+            <select id="apiKeyHealthModelSelect" name="apiKeyHealthModel">
+              <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+              <option value="gpt-5.4">gpt-5.4</option>
+            </select>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button class="primary" type="button" id="addButton">导入登录态</button>
+          <button class="secondary" type="button" data-close-dialog="tokenImportDialog">取消</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Claude 登录与配置 -->
+  <div class="dialog-layer" id="claudeDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="claudeDialog" aria-label="关闭 Claude 登录"></button>
+    <section class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="claudeDialogTitle">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">Import / Claude</p>
+          <h2 id="claudeDialogTitle">Claude 登录与管理</h2>
+          <p>保留现有的 Claude OAuth 登录、共享登录态安装与当前配置列表。</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="claudeDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="command-card">
+          <code>npm run claude:login</code>
+          <span>生成可共享的本地 fake auth token，并写入 Airouter 配置。</span>
+        </div>
+        <div class="command-card">
+          <code>npm run claude:install-login -- --token airouter-oauth-xxx --base-url http://localhost:3009</code>
+          <span>把本地 fake token 写入 Claude Code 本地凭证；安装前会自动备份原登录态。</span>
+        </div>
+        <div class="legacy-dialog-section">
+          <h3>当前 Claude token 配置</h3>
+          <div id="claudeConfigs"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 旧模式兼容：仅在明确进入后展示 -->
+  <div class="dialog-layer" id="legacyConfigsDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="legacyConfigsDialog" aria-label="关闭旧模式设置"></button>
+    <section class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="legacyConfigsTitle">
+      <header class="dialog-head">
+        <div>
+          <p class="eyebrow">Legacy / Compatibility</p>
+          <h2 id="legacyConfigsTitle">旧模式账号与 Fallback</h2>
+          <p>仅用于 legacy 调度：token 组的旧顺序、fallback apikey 与批量维护。</p>
+        </div>
+        <button class="icon-button" type="button" data-close-dialog="legacyConfigsDialog" aria-label="关闭">×</button>
+      </header>
+      <div class="dialog-body">
+        <div class="notice">
+          当前页面默认使用显式路由。这里的「主链路 / 兜底」旧语义不会混入显式路由；如需账号间完全平等，请在「模型路由」中配置每个客户端模型的候选顺序。
+        </div>
+
+        <section class="legacy-dialog-section">
+          <h3>Fallback apikey（legacy）</h3>
           <div class="form-grid">
             <div class="field">
-              <label class="field-label" for="apiKeyBaseUrlInput">Base URL</label>
-              <input id="apiKeyBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
-              <p class="field-hint">OpenAI 兼容接口通常填写到 `/v1`。</p>
+              <label class="field-label" for="fallbackBaseUrlInput">Base URL</label>
+              <input id="fallbackBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
             </div>
             <div class="field">
-              <label class="field-label" for="apiKeyInput">API Key</label>
-              <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-...">
-              <p class="field-hint">会写入本地配置文件，仅用于转发到上游。</p>
+              <label class="field-label" for="fallbackApiKeyInput">API Key</label>
+              <input id="fallbackApiKeyInput" type="password" autocomplete="off" placeholder="sk-...">
             </div>
             <div class="field">
-              <label class="field-label" for="apiKeyDescriptionInput">备注</label>
-              <input id="apiKeyDescriptionInput" type="text" placeholder="例如：OpenAI 兼容备用上游">
+              <label class="field-label" for="fallbackDescriptionInput">备注</label>
+              <input id="fallbackDescriptionInput" type="text" placeholder="例如：GPT 备用上游">
             </div>
             <div class="field">
-              <label class="field-label" for="apiKeyHealthModelSelect">可用性测试模型</label>
-              <select id="apiKeyHealthModelSelect" name="apiKeyHealthModel">
+              <label class="field-label" for="fallbackHealthModelSelect">可用性测试模型</label>
+              <select id="fallbackHealthModelSelect" name="fallbackHealthModel">
                 <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
                 <option value="gpt-5.4">gpt-5.4</option>
               </select>
-              <p class="field-hint">用于 GPT fallback 恢复探测。</p>
             </div>
             <div class="field">
-              <span class="field-label">支持能力</span>
+              <span class="field-label">兜底能力（legacy）</span>
               <div class="support-options">
-                <label class="support-option">
-                  <input type="checkbox" name="apiKeySupport" value="gpt" checked>
-                  <span>GPT</span>
-                </label>
-                <label class="support-option">
-                  <input type="checkbox" name="apiKeySupport" value="claude">
-                  <span>Claude</span>
-                </label>
+                <label class="support-option"><input type="checkbox" name="fallbackSupport" value="gpt" checked><span>GPT</span></label>
+                <label class="support-option"><input type="checkbox" name="fallbackSupport" value="claude"><span>Claude</span></label>
               </div>
-              <p class="field-hint">GPT 用于 OpenAI 兼容 `/v1/*`，也可作为 `/v1/messages` 转换上游；Claude 用于原样转发 `/v1/messages`。</p>
             </div>
           </div>
-        </div>
-
-        <div class="actions">
-          <button class="primary" type="button" id="addButton">新增 OpenAI token</button>
-        </div>
-      </div>
-
-      <div class="panel list-panel">
-        <div class="panel-head">
-          <div>
-            <h2 class="panel-title">当前 OpenAI token 配置</h2>
-            <p class="panel-note">token 默认启用，不需要手动切换；使用排序按钮调整组内优先级。</p>
+          <div class="actions">
+            <button class="primary" type="button" id="addFallbackButton">新增 fallback apikey</button>
           </div>
-        </div>
-        <div id="openAiConfigs"></div>
+        </section>
+
+        <section class="legacy-dialog-section">
+          <div class="panel-head">
+            <div>
+              <h3>当前旧模式配置</h3>
+              <p class="panel-note">组内顺序就是 legacy 调度优先级；显式路由不会读取这里的顺序。</p>
+            </div>
+          </div>
+          <div id="batchToolbar" class="batch-toolbar">
+            <div class="batch-toolbar-left">
+              <span id="batchSelectionSummary" class="count">已选择 0 项</span>
+              <button class="secondary" type="button" id="batchSelectProblemConfigsButton" data-action="batch-select-problem-configs">选择异常配置</button>
+            </div>
+            <div class="batch-toolbar-right">
+              <button class="secondary" type="button" id="batchEnableSelectedButton" data-action="batch-enable-selected" disabled>批量启用所选</button>
+              <button class="secondary" type="button" id="batchDisableSelectedButton" data-action="batch-disable-selected" disabled>批量停用所选</button>
+              <button class="danger" type="button" id="batchDeleteSelectedButton" data-action="batch-delete-selected" disabled>批量删除所选</button>
+            </div>
+          </div>
+          <div id="cards"></div>
+        </section>
+
+        <section class="legacy-dialog-section">
+          <h3>OpenAI token 配置</h3>
+          <div id="openAiConfigs"></div>
+        </section>
+
+        <section class="legacy-dialog-section">
+          <h3>Fallback apikey 配置</h3>
+          <div id="fallbackConfigs"></div>
+        </section>
       </div>
     </section>
+  </div>
 
-    <section class="admin-page panel list-panel" data-page="claude">
-      <div class="panel-head">
-        <div>
-          <h2 class="panel-title">Claude token</h2>
-          <p class="panel-note">Claude token 默认参与 `/v1/messages` 主链路。上方是登录命令，下方是当前配置列表。</p>
-        </div>
-      </div>
-      <div class="endpoint-card">
-        <div class="endpoint-label">登录命令</div>
-        <code class="mono endpoint-value">npm run claude:login</code>
-        <div class="endpoint-meta">服务端脚本会生成可共享的本地 fake auth token，并写入 Airouter 配置。</div>
-      </div>
-      <div class="endpoint-card">
-        <div class="endpoint-label">客户端安装共享登录态</div>
-        <code class="mono endpoint-value">npm run claude:install-login -- --token airouter-oauth-xxx --base-url http://localhost:3009</code>
-        <div class="endpoint-meta">把本地 fake token 写入 Claude Code 本地凭证，并补齐交互模式需要的全局 onboarding 状态；安装前会自动备份原登录态。</div>
-      </div>
-      <div class="panel-head compact">
-        <div>
-          <h3 class="panel-title">当前 Claude token 配置</h3>
-          <p class="panel-note">token 默认启用，不需要手动切换；使用排序按钮调整组内优先级。</p>
-        </div>
-      </div>
-      <div id="claudeConfigs"></div>
-    </section>
-
-    <section class="admin-page panel list-panel" data-page="fallbacks">
-      <div class="panel-head">
-        <div>
-          <h2 class="panel-title">Fallback apikey</h2>
-          <p class="panel-note">上方新增 fallback apikey，下方查看当前 fallback。apikey 只在对应 token 链路不可用时兜底。</p>
-        </div>
-      </div>
-      <div class="form-grid">
-        <div class="field">
-          <label class="field-label" for="fallbackBaseUrlInput">Base URL</label>
-          <input id="fallbackBaseUrlInput" type="url" placeholder="https://api.example.com/v1">
-          <p class="field-hint">GPT 兜底通常填写 OpenAI 兼容 `/v1`；Claude 兜底填写 Claude Messages API 的 `/v1`。</p>
-        </div>
-        <div class="field">
-          <label class="field-label" for="fallbackApiKeyInput">API Key</label>
-          <input id="fallbackApiKeyInput" type="password" autocomplete="off" placeholder="sk-...">
-        </div>
-        <div class="field">
-          <label class="field-label" for="fallbackDescriptionInput">备注</label>
-          <input id="fallbackDescriptionInput" type="text" placeholder="例如：GPT 备用上游">
-        </div>
-        <div class="field">
-          <label class="field-label" for="fallbackHealthModelSelect">可用性测试模型</label>
-          <select id="fallbackHealthModelSelect" name="fallbackHealthModel">
-            <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
-            <option value="gpt-5.4">gpt-5.4</option>
-          </select>
-          <p class="field-hint">用于 GPT fallback 恢复探测。</p>
-        </div>
-        <div class="field">
-          <span class="field-label">兜底能力</span>
-          <div class="support-options">
-            <label class="support-option">
-              <input type="checkbox" name="fallbackSupport" value="gpt" checked>
-              <span>GPT fallback</span>
-            </label>
-            <label class="support-option">
-              <input type="checkbox" name="fallbackSupport" value="claude">
-              <span>Claude fallback</span>
-            </label>
-          </div>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="primary" type="button" id="addFallbackButton">新增 fallback apikey</button>
-      </div>
-      <div class="panel-head compact">
-        <div>
-          <h3 class="panel-title">当前 fallback apikey 配置</h3>
-          <p class="panel-note">apikey 可以设为兜底焦点；使用排序按钮调整组内优先级。</p>
-        </div>
-      </div>
-      <div id="fallbackConfigs"></div>
-    </section>
-
-    <section class="admin-page settings-grid" data-page="settings">
-      <div class="side-stack">
-      <aside class="panel">
-        <div class="panel-head">
-          <div>
-            <h2 class="panel-title">入口 apikey</h2>
-            <p class="panel-note">入口 apikey 为空时，请求不会校验 apikey。</p>
-          </div>
-          <div class="panel-tools">
-            <span id="apiKeyStatusBadge" class="badge note">未读取</span>
-          </div>
-        </div>
-        <div class="key-toolbar">
-          <button class="primary" type="button" id="addApiKeyButton">新增随机 apikey</button>
-        </div>
-        <div id="apiKeysList" class="key-list"></div>
-      </aside>
-
-      <aside class="panel">
-        <div class="panel-head">
-          <div>
-            <h2 class="panel-title">Responses 高级设置</h2>
-            <p class="panel-note">模型别名和测试请求只作用于 OpenAI token 主链路。</p>
-          </div>
-        </div>
-        <div class="field">
-          <label class="field-label" for="responsesModelAliasesInput">responses.model_aliases</label>
-          <textarea id="responsesModelAliasesInput" spellcheck="false" placeholder='{
-  "gpt-5.2": "gpt-5.5"
-}'></textarea>
-        </div>
-        <div class="actions">
-          <button class="primary" type="button" id="saveResponsesSettingsButton">保存 Responses 设置</button>
-        </div>
-      </aside>
-      </div>
-
-      <aside class="panel" id="proxySettingsPanel">
-        <div class="panel-head">
-          <div>
-            <h2 class="panel-title">服务端口 / 代理端口</h2>
-            <p class="panel-note">配置本地服务端口和访问上游时使用的本地代理端口。</p>
-          </div>
-        </div>
-        <div class="port-grid">
-          <div class="field">
-            <label class="field-label" for="servicePortInput">服务端口</label>
-            <input id="servicePortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="3009">
-          </div>
-          <div class="field">
-            <label class="field-label" for="proxyPortInput">代理端口</label>
-            <input id="proxyPortInput" type="number" min="1" max="65535" inputmode="numeric" placeholder="留空不用代理">
-          </div>
-        </div>
-        <div class="endpoint-card">
-          <div class="endpoint-label">代理访问地址</div>
-          <code class="mono endpoint-value" id="proxyV1Url">http://localhost:3009/v1</code>
-          <div class="endpoint-meta" id="proxyEndpointMeta">Responses: http://localhost:3009/v1/responses</div>
-        </div>
-        <div class="actions">
-          <button class="primary" type="button" id="saveProxySettingsButton">保存端口配置</button>
-        </div>
-        <p class="field-hint">保存后立即生效；服务端口变化时页面会自动跳转到新地址。</p>
-      </aside>
-    </section>
-
-    <div id="responsesSettingsSection" class="hidden-settings" hidden></div>
-    </section>
-  </main>
+  <div id="responsesSettingsSection" class="hidden-settings" hidden></div>
 
   <script src="/config-admin.js"></script>
+  <script src="/config-admin-routing.js"></script>
   <script>
     const cardsEl = document.getElementById('cards');
     const upstreamMetricsEl = document.getElementById('upstreamMetrics');
@@ -1554,33 +3025,21 @@
       '/admin/configs': 'upstreams',
       '/admin/configs/': 'upstreams',
       '/admin/configs/upstreams': 'upstreams',
-      '/admin/configs/routes': 'upstreams',
-      '/admin/configs/openai': 'openai',
-      '/admin/configs/claude': 'claude',
-      '/admin/configs/fallbacks': 'fallbacks',
-      '/admin/configs/settings': 'settings',
-      '/admin/configs/access': 'settings',
+      '/admin/configs/routes': 'routes',
+      '/admin/configs/openai': 'upstreams',
+      '/admin/configs/claude': 'upstreams',
+      '/admin/configs/fallbacks': 'upstreams',
+      '/admin/configs/settings': 'upstreams',
+      '/admin/configs/access': 'upstreams',
     };
     const pageTitles = {
       upstreams: {
-        title: '上游配置',
-        subtitle: '默认首页。按类型分组查看运行态、调整顺序，或处理异常配置。',
+        title: '上游账号',
+        subtitle: '管理可用账号与它们允许调用的后端模型。编辑在独立面板中完成。',
       },
-      openai: {
-        title: 'OpenAI token',
-        subtitle: '上面新增 OpenAI token；下面查看当前 token 配置。',
-      },
-      claude: {
-        title: 'Claude token',
-        subtitle: '上面查看登录命令；下面查看当前 Claude token 配置。',
-      },
-      fallbacks: {
-        title: 'Fallback apikey',
-        subtitle: '上面新增 fallback apikey；下面查看当前 fallback 配置。',
-      },
-      settings: {
-        title: '系统设置',
-        subtitle: '管理入口 apikey、Responses 高级设置、服务端口和代理端口。',
+      routes: {
+        title: '模型路由',
+        subtitle: '客户端模型 ID 可任意命名；候选按从上到下的顺序严格选择。',
       },
     };
 
@@ -1621,6 +3080,12 @@
 
       messageEl.className = `message show ${type}`;
       messageEl.textContent = text;
+    }
+
+    function notifyRoutingRefresh(source = 'config-change') {
+      window.dispatchEvent(new CustomEvent('airouter:configs-changed', {
+        detail: { source },
+      }));
     }
 
     function setRuntimeSyncState(state, options = {}) {
@@ -1884,28 +3349,24 @@
         : (item.dispatch_role ? [item.dispatch_role] : []);
       const hasRole = role => roles.includes(role);
 
-      if (hasRole('openai_token_focus')) {
-        tags.push('<span class="badge ok">OpenAI 主链路</span>');
-      } else if (hasRole('openai_token')) {
-        tags.push('<span class="badge ok">OpenAI 主链路</span>');
-      } else if (hasRole('claude_token_focus')) {
-        tags.push('<span class="badge ok">Claude 主链路</span>');
-      } else if (hasRole('claude_token')) {
-        tags.push('<span class="badge ok">Claude 主链路</span>');
+      if (hasRole('openai_token_focus') || hasRole('openai_token')) {
+        tags.push('<span class="badge ok">OpenAI token</span>');
+      } else if (hasRole('claude_token_focus') || hasRole('claude_token')) {
+        tags.push('<span class="badge ok">Claude token</span>');
       }
 
       if (hasRole('openai_apikey_fallback_focus') || hasRole('apikey_fallback_focus')) {
-        tags.push('<span class="badge active">OpenAI 兜底焦点</span>');
+        tags.push('<span class="badge active">OpenAI apikey 焦点</span>');
       } else if (hasRole('openai_apikey_fallback') || item.item && getConfigType(item) === 'apikey' && configSupports(item, 'gpt')) {
-        tags.push('<span class="badge muted">OpenAI 兜底</span>');
+        tags.push('<span class="badge muted">OpenAI apikey</span>');
       }
 
       if (hasRole('claude_apikey_fallback_focus') || hasRole('apikey_fallback_focus')) {
-        tags.push('<span class="badge active">Claude 兜底焦点</span>');
+        tags.push('<span class="badge active">Claude apikey 焦点</span>');
       } else if (hasRole('claude_apikey_fallback') || item.item && getConfigType(item) === 'apikey' && configSupports(item, 'claude')) {
-        tags.push('<span class="badge muted">Claude 兜底</span>');
+        tags.push('<span class="badge muted">Claude apikey</span>');
       } else if (item.is_active) {
-        tags.push('<span class="badge active">当前</span>');
+        tags.push('<span class="badge active">legacy 当前</span>');
       }
 
       if (hasRefreshTokenConfig(item)) {
@@ -2211,19 +3672,19 @@
 
       upstreamMetricsEl.innerHTML = `
         <div class="metric-card">
-          <div class="metric-label"><span>OpenAI token</span><span>MAIN</span></div>
+          <div class="metric-label"><span>OpenAI token</span><span>LEGACY</span></div>
           <div class="metric-value">${openAiCount}</div>
-          <div class="metric-note">默认启用，优先走 token。</div>
+          <div class="metric-note">旧模式下的 token 配置数量。</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label"><span>Claude token</span><span>MAIN</span></div>
+          <div class="metric-label"><span>Claude token</span><span>LEGACY</span></div>
           <div class="metric-value">${claudeCount}</div>
-          <div class="metric-note">负责 /v1/messages 主链路。</div>
+          <div class="metric-note">旧模式下的 Claude token 数量。</div>
         </div>
         <div class="metric-card">
-          <div class="metric-label"><span>Fallback apikey</span><span>FALLBACK</span></div>
+          <div class="metric-label"><span>apikey</span><span>LEGACY</span></div>
           <div class="metric-value">${fallbackCount}</div>
-          <div class="metric-note">只在 token 不可用时兜底。</div>
+          <div class="metric-note">旧模式下的 apikey 配置数量。</div>
         </div>
         <div class="metric-card">
           <div class="metric-label"><span>运行态异常</span><span>SYNC</span></div>
@@ -2518,6 +3979,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', configCount > 1 ? `已写入 ${configCount} 个配置项。` : '配置项已写入配置文件。');
+      notifyRoutingRefresh('token-import');
     }
 
     async function addFallbackConfig() {
@@ -2537,6 +3999,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', 'fallback apikey 已写入配置文件。');
+      notifyRoutingRefresh('fallback-import');
     }
 
     async function addApiKey() {
@@ -2710,6 +4173,7 @@
       }
 
       setMessage('info', `${options.donePrefix}${movedParts.join('、')}。`);
+      notifyRoutingRefresh();
     }
 
     async function batchDisableSelected() {
@@ -2757,6 +4221,7 @@
       }
 
       setMessage('info', `已批量删除 ${deletedParts.join('、')}。`);
+      notifyRoutingRefresh();
     }
 
     async function activateConfig(index, capability = '') {
@@ -2780,7 +4245,7 @@
         : '已设为 OpenAI fallback apikey 焦点；token 可用时仍优先走 token。';
       setMessage('info', activatedType === 'apikey'
         ? fallbackMessage
-        : 'token 主链路默认启用，无需手动切换。');
+        : 'legacy token 组已更新；显式路由不会读取这个焦点。');
     }
 
     async function moveConfigUp(index) {
@@ -2794,6 +4259,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已置顶，当前使用账号未改变。');
+      notifyRoutingRefresh();
     }
 
     async function moveConfigAdjacent(index, direction) {
@@ -2817,6 +4283,7 @@
       setMessage('info', isPrevious
         ? '配置项已上移，当前使用账号未改变。'
         : '配置项已下移，当前使用账号未改变。');
+      notifyRoutingRefresh();
     }
 
     async function copyConfigItemJson(index) {
@@ -2842,6 +4309,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已停用并热重载。');
+      notifyRoutingRefresh();
     }
 
     async function enableConfig(index) {
@@ -2855,6 +4323,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已启用并热重载。');
+      notifyRoutingRefresh();
     }
 
     async function deleteConfig(index) {
@@ -2869,6 +4338,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', '配置项已删除并热重载。');
+      notifyRoutingRefresh();
     }
 
     async function deleteDisabledConfig(index) {
@@ -2883,6 +4353,7 @@
         syncedAt: new Date(),
       });
       setMessage('info', '停用配置项已删除。');
+      notifyRoutingRefresh();
     }
 
     async function sendHelloTestRequest() {

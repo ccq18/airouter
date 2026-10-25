@@ -27,6 +27,8 @@ x-api-key: sk-airouter-xxxx
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/health` | 查看本地服务和当前账号状态 |
+| `GET` | `/v1/models` | 显式路由下返回配置的客户端模型 ID |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions 兼容接口 |
 | `POST` | `/v1/responses` | OpenAI Responses 兼容接口 |
 | `POST` | `/v1/messages` | Claude Messages 兼容接口 |
 | `POST` | `/cpa/v1/responses` | CLIProxyAPI 风格前缀下的 Responses 兼容入口 |
@@ -38,7 +40,7 @@ x-api-key: sk-airouter-xxxx
 
 ## 通用转发规则
 
-Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配置优先级越高；当前活动配置可用时会继续沿用。
+未启用 `routing.mode: "explicit"` 时，Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配置优先级越高；当前活动配置可用时会继续沿用。
 
 `token` 配置项用于 ChatGPT/Codex 登录态链路。普通 `/v1/*` 请求会被 Airouter 转到对应 Codex 能力链路，并自动处理 Responses 默认值、模型别名和运行态可用性选择；OpenAI token 和 Claude token 不依赖手动切换焦点，只区分可用/不可用。
 
@@ -47,6 +49,42 @@ Airouter 会按管理页里的配置顺序选择可用账号。越靠前的配�
 `/cpa/v1/*` 是 CLIProxyAPI 风格前缀入口，内部会剥离 `/cpa` 后复用同一套 `/v1/*` 鉴权、调度和模型别名逻辑；仅该前缀会启用 CLIProxyAPI 风格的额外请求体规范化。
 
 业务接口的 failover 只作用于客户端转发链路，包括 Responses、Messages、Images 和普通 `/v1/*` 代理；`/admin/*`、`/health`、quota 轮询、token refresh 和 apikey 恢复探测不走这套逻辑。上游 `apikey` 在响应提交给客户端前出现非 200 HTTP 状态、请求失败、响应体中断，或 `/v1/responses` HTTP 200 JSON/SSE 中可识别的使用上限错误时，Airouter 会在本次请求内排除当前配置并尝试切到下一个可用配置；切换候选按各 apikey 最近 100 个已完成真实请求的错误率从低到高选择，无历史样本按 0% 处理，同错误率保持配置顺序。如果没有可切换配置，则保留并继续使用当前 apikey，按当前上游错误返回给客户端，避免整个能力池不可用。token 或 apikey-backed `/v1/responses` 即使收到 HTTP 200，只要 JSON 错误对象表明账号额度、凭证或模型容量不可用，也会在响应提交前切换账号；例如 `Selected model is at capacity` 会临时摘除当前 token 并重放到下一个可用配置。响应已经开始写给客户端后不再透明切换，也不会因为后续传输中断把本次请求记为失败。apikey 业务错误不会修改其 `runtime.available`。
+
+启用 `routing.mode: "explicit"` 后，`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 都按 `routing.models[].targets` 的显式顺序选择账号和后端模型，不再使用 Token 优先、API Key 覆盖、全局模型别名或会话哈希。客户端 `model` 是管理台配置的客户端模型 ID，区分大小写；未配置的 ID 返回 `model_not_found`，不会透传到随机账号。下游响应里的模型字段保持客户端该 ID，真实后端模型只在管理台可见。
+
+显式路由的失败处理：
+
+- 严格使用第一个可用候选；额度耗尽才使用下一项，额度恢复后下一次无状态请求自动回到更高优先级。
+- 额度未知/读取失败不等于耗尽；已确认耗尽后读取失败不会自动恢复。
+- 每个候选每次请求最多尝试一次；默认最多 3 次上游尝试，且不超过候选数量。
+- 下游流式响应已经提交后不再切换上游；客户端取消会取消当前上游。
+- `previous_response_id` 固定在原 Responses 候选；跨账号、跨协议或服务重启导致归属丢失时返回 HTTP 409 `upstream_context_unavailable`。
+- 跨协议支持文本、图片、工具调用/结果和 SSE；结构化输出、内置服务端工具、thinking/加密 reasoning、文件和音频无法保真时明确返回错误或跳过候选。
+
+## GET /v1/models
+
+仅在显式路由下返回已启用的客户端模型 ID；legacy 模式继续由通用 `/v1/*` 透传处理。该接口受入口 `apikeys` 保护。
+
+```bash
+curl -sS http://localhost:3009/v1/models \
+  -H "Authorization: Bearer sk-airouter-xxxx"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek",
+      "object": "model",
+      "created": 1779778600,
+      "owned_by": "airouter"
+    }
+  ]
+}
+```
+
+额度耗尽不会删除模型 ID。
 
 ## GET /health
 
@@ -76,6 +114,22 @@ curl -sS http://localhost:3009/health \
   }
 }
 ```
+
+## POST /v1/chat/completions
+
+OpenAI Chat Completions 兼容入口。显式路由下按配置的候选顺序选择上游；同协议原样转发，跨协议时支持文本、图片、工具调用/结果和 SSE 转换。下游 `model` 保持客户端模型 ID。
+
+```bash
+curl -sS http://localhost:3009/v1/chat/completions \
+  -H "Authorization: Bearer sk-airouter-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek",
+    "messages": [{"role": "user", "content": "你好"}]
+  }'
+```
+
+legacy 模式下继续由通用 `/v1/*` 代理链路处理。
 
 ## POST /v1/responses
 
@@ -138,6 +192,8 @@ Airouter 会给 `/v1/responses` 补这些默认值：
 请求里的 `"model": "GPT-5.2"` 会被转成 `"gpt-5.5"`。
 
 ## POST /v1/messages
+
+显式模式按客户端模型路由选择后端模型；本节涉及固定模型和 token 优先的说明仅适用于旧模式。
 
 Claude Messages 兼容入口。请求体使用 JSON。
 

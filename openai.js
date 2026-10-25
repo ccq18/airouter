@@ -52,21 +52,50 @@ const {
 } = require('./app/openai-config');
 const {
     ConfigEditorError,
+    addConfigItem,
     addConfigItems,
+    assignMissingConfigIds,
     buildImportedConfigItem,
     deleteConfigItem,
     deleteConfigItems,
+    deleteConfigItemById,
     deleteDisabledConfigItem,
     deleteDisabledConfigItems,
     disableConfigItem,
     disableConfigItems,
     enableConfigItem,
     enableConfigItems,
+    findConfigIndexById,
+    getConfigById,
     moveConfigItem,
     readParsedConfigFile,
+    updateConfigItemById,
     updateConfigSettings,
+    updateRoutingModels,
     writeParsedConfigFile
 } = require('./app/config-editor');
+const {
+    ensureConfigIds,
+    getPublicModelIds,
+    getRoutingRevision,
+    isExplicitRouting,
+    parseRoutingConfig,
+    findRoutesReferencingModel,
+} = require('./app/routing-config');
+const {
+    listProviderPresets,
+    getProviderPreset,
+    buildDiscoveryRequest,
+    parseModelCatalog,
+    diffModelCatalog,
+} = require('./app/provider-presets');
+const { createQuotaEngine } = require('./app/quota-engine');
+const {
+    createModelRouter,
+    createRoutingHealthStore,
+    createRoutingContextStore,
+} = require('./app/model-router');
+const { createExplicitRoutingHandler } = require('./app/explicit-routing-handler');
 const { reconcileRuntimeConfigs } = require('./app/runtime-config-reconciler');
 const {
     createSub2ApiAgentIdentityManager,
@@ -90,7 +119,9 @@ const {
 // ==================== 配置 ====================
 let runtimePort = normalizeRuntimePort(process.env.PORT, 3009);
 let CONFIG_FILE_NAME = process.env.CONFIG || 'openai.json';
-const CONFIG_FILE = path.join(__dirname, CONFIG_FILE_NAME);
+const CONFIG_FILE = path.isAbsolute(CONFIG_FILE_NAME)
+    ? CONFIG_FILE_NAME
+    : path.join(__dirname, CONFIG_FILE_NAME);
 const sub2ApiAgentIdentityManager = createSub2ApiAgentIdentityManager({
     requestBufferedFn: requestBuffered,
     persistTaskFn: persistSub2ApiTaskForConfig,
@@ -260,7 +291,9 @@ function ensureSecuritySettings(parsed) {
 function loadApiConfigs() {
     const parsed = readParsedConfigFile(CONFIG_FILE);
     const ensured = ensureSecuritySettings(parsed);
-    const finalParsed = ensured.changed ? writeParsedConfigFile(CONFIG_FILE, ensured.parsed) : ensured.parsed;
+    const idEnsured = ensureConfigIds(ensured.parsed);
+    const changed = ensured.changed || idEnsured.changed;
+    const finalParsed = changed ? writeParsedConfigFile(CONFIG_FILE, idEnsured.parsed) : idEnsured.parsed;
     runtimePort = normalizeRuntimePort(finalParsed.port, runtimePort);
     applyProxyEnvironment(finalParsed.proxy_port);
     return buildLoadedConfig(finalParsed);
@@ -278,6 +311,11 @@ let responsesConfig = resolveResponsesOptions({
 let accountManager = null;
 let handleClaudeMessagesRequest = null;
 let handleCpaClaudeMessagesRequest = null;
+let quotaEngine = null;
+let routingHealthStore = null;
+let routingContextStore = null;
+let modelRouter = null;
+let explicitRoutingHandlers = null;
 let server = null;
 let shuttingDown = false;
 const activeSockets = new Set();
@@ -1162,7 +1200,7 @@ function createClaudeMessagesRequestHandler(options = {}) {
                 return config;
             }
 
-            throw new Error(`当前没有可用 claude_token、support 包含 claude 的 apikey、token 或 support 包含 gpt 的 apikey 配置，请先访问 ${buildAdminPath()} 添加账号`);
+            throw new Error(`当前没有可用 claude_token、support 包含 claude 的 apikey、token 或 support 包含 gpt 的 apikey 配置，请先访问 /admin/configs 添加账号`);
         },
         accessLogEnabled: ACCESS_LOG_ENABLED,
         log,
@@ -1264,6 +1302,124 @@ function createClaudeMessagesRequestHandler(options = {}) {
     });
 }
 
+async function refreshExplicitUpstreamAuth(config, deps = {}) {
+    if (!config) {
+        return false;
+    }
+
+    if (isSub2ApiConfig(config)) {
+        const expectedTaskId = config.credentials && config.credentials.task_id
+            ? config.credentials.task_id
+            : '';
+        await sub2ApiAgentIdentityManager.recoverTask(config, expectedTaskId);
+        return true;
+    }
+
+    if (config.type !== 'token' || !config.refresh_token) {
+        return false;
+    }
+
+    const refreshFn = deps.refreshOpenAIToken || refreshOpenAIToken;
+    const persistFn = deps.persistTokenRefreshForConfig || persistTokenRefreshForConfig;
+    const refreshed = await refreshFn({
+        refreshToken: config.refresh_token,
+        clientId: config.client_id,
+        timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+    });
+    const accessToken = typeof refreshed?.access_token === 'string' ? refreshed.access_token.trim() : '';
+    if (!accessToken) {
+        return false;
+    }
+    const refreshToken = typeof refreshed?.refresh_token === 'string' && refreshed.refresh_token.trim()
+        ? refreshed.refresh_token.trim()
+        : config.refresh_token;
+    const clientId = typeof refreshed?.client_id === 'string' && refreshed.client_id.trim()
+        ? refreshed.client_id.trim()
+        : config.client_id;
+
+    config.access_token = accessToken;
+    config.refresh_token = refreshToken;
+    if (clientId) {
+        config.client_id = clientId;
+    }
+
+    await persistFn({
+        config,
+        accessToken,
+        refreshToken,
+        ...(clientId ? { clientId } : {}),
+    });
+    return true;
+}
+
+function ensureUnifiedRoutingRuntime() {
+    if (!quotaEngine) {
+        quotaEngine = createQuotaEngine({
+            timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+            log,
+            warn,
+            now: getCurrentTimestamp,
+        });
+        routingHealthStore = createRoutingHealthStore({
+            now: getCurrentTimestamp,
+        });
+        routingContextStore = createRoutingContextStore({
+            now: getCurrentTimestamp,
+        });
+    }
+
+    const changedQuotaConfigs = quotaEngine.syncConfigs(currentParsedConfig?.configs || []);
+    changedQuotaConfigs.forEach(id => {
+        routingHealthStore.forget(id);
+        routingContextStore.forgetConfig(id);
+    });
+
+    modelRouter = createModelRouter({
+        getParsedConfig: () => currentParsedConfig || { configs: [] },
+        getRuntimeConfigs: () => apiConfigs,
+        quotaEngine,
+        healthStore: routingHealthStore,
+        now: getCurrentTimestamp,
+    });
+
+    const createHandlerFor = entryProtocol => createExplicitRoutingHandler({
+        entryProtocol,
+        getRouter: () => modelRouter,
+        getQuotaEngine: () => quotaEngine,
+        getContextStore: () => routingContextStore,
+        readRequestBody,
+        createUpstreamRequest,
+        upstreamTimeoutMs: UPSTREAM_REQUEST_TIMEOUT_MS,
+        bodyLimitBytes: JSON_REQUEST_BODY_LIMIT_BYTES,
+        idleTimeoutMs: REQUEST_BODY_IDLE_TIMEOUT_MS,
+        clientVersion: process.env.CODEX_CLIENT_VERSION || '0.0.1',
+        accessLogEnabled: ACCESS_LOG_ENABLED,
+        prepareUpstreamConfig: config => sub2ApiAgentIdentityManager.ensureTask(config),
+        refreshUpstreamAuth: config => refreshExplicitUpstreamAuth(config),
+        getAuthIdentityHash: req => sha256Hex(extractRequestApiKey(req.headers) || ''),
+        getSessionKey: (req, body) => getRequestSessionKey(req, req.originalUrl || req.url, body),
+        log,
+        error,
+        now: getCurrentTimestamp,
+    });
+
+    explicitRoutingHandlers = {
+        chat_completions: createHandlerFor('chat_completions'),
+        responses: createHandlerFor('responses'),
+        messages: createHandlerFor('messages'),
+    };
+
+    if (isExplicitRouting(currentParsedConfig)) {
+        quotaEngine.startMonitor(() => (
+            currentParsedConfig && Array.isArray(currentParsedConfig.configs)
+                ? currentParsedConfig.configs
+                : []
+        ));
+    } else {
+        quotaEngine.stopMonitor();
+    }
+}
+
 function applyLoadedConfig(loadedConfig) {
     currentParsedConfig = loadedConfig.parsed;
     apiConfigs = loadedConfig.configs;
@@ -1306,6 +1462,7 @@ function applyLoadedConfig(loadedConfig) {
     handleCpaClaudeMessagesRequest = createClaudeMessagesRequestHandler({
         cpaStyleCompatibility: true
     });
+    ensureUnifiedRoutingRuntime();
 }
 
 function hydrateLoadedConfig(loadedConfig, options = {}) {
@@ -1638,7 +1795,7 @@ function triggerServiceRestart(options = {}) {
 
 function listenOnPort(port) {
     return new Promise((resolve, reject) => {
-        server = app.listen(port, () => {
+        server = app.listen(port, process.env.AIROUTER_BIND_HOST || undefined, () => {
             runtimePort = port;
             log(`端口配置已即时生效: ${buildLocalBaseUrl()}`);
             resolve();
@@ -1886,6 +2043,133 @@ function getDispatchRole(config, activeConfig, fallbackFocus = {}) {
     return roles[0] || 'unavailable';
 }
 
+function redactAdminConfigItem(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return item;
+    }
+
+    const cloned = JSON.parse(JSON.stringify(item));
+    for (const field of ['apikey', 'access_token', 'refresh_token', 'local_auth_token', 'account_id']) {
+        if (Object.prototype.hasOwnProperty.call(cloned, field)) {
+            cloned[field] = cloned[field] ? '***' : '';
+        }
+    }
+    if (cloned.credentials && typeof cloned.credentials === 'object') {
+        cloned.credentials = {
+            configured: true,
+            email: cloned.credentials.email || '',
+            chatgpt_account_id: cloned.credentials.chatgpt_account_id ? '***' : '',
+        };
+    }
+    if (Object.prototype.hasOwnProperty.call(cloned, 'request_auth_token_sha256s')) {
+        cloned.request_auth_token_sha256s = [];
+    }
+    return cloned;
+}
+
+function serializeUnifiedUpstream(item, index) {
+    const runtime = apiConfigs.find(config => config.id === item.id) || apiConfigs[index] || null;
+    const routes = [];
+    const routing = currentParsedConfig && currentParsedConfig.routing;
+    if (routing && Array.isArray(routing.models)) {
+        for (const route of routing.models) {
+            if (route && Array.isArray(route.targets) && route.targets.some(target => target.config_id === item.id)) {
+                routes.push(route.id);
+            }
+        }
+    }
+
+    return {
+        id: item.id,
+        index,
+        type: getConfigItemType(item),
+        preset: item.preset || (getConfigItemType(item) === 'apikey' ? 'custom' : 'chatgpt'),
+        description: item.description || '',
+        enabled: item.enabled !== false,
+        base_url: item.base_url || '',
+        support: Array.isArray(item.support) ? item.support : ['gpt'],
+        models: Array.isArray(item.models) ? item.models : [],
+        models_endpoint: item.models_endpoint || null,
+        protocol_paths: item.protocol_paths || null,
+        has_credentials: Boolean(
+            item.apikey ||
+            item.access_token ||
+            (item.credentials && typeof item.credentials === 'object'),
+        ),
+        has_refresh_token: Boolean(item.refresh_token),
+        route_references: routes,
+        quota: quotaEngine ? quotaEngine.serialize(item.id) : null,
+        runtime: runtime && accountManager ? serializeAccountStatus(accountManager.getAccountStatus(runtime)) : null,
+    };
+}
+
+function buildUpstreamsAdminResponse() {
+    const configs = Array.isArray(currentParsedConfig.configs) ? currentParsedConfig.configs : [];
+    return {
+        revision: getRoutingRevision(currentParsedConfig),
+        presets: listProviderPresets(),
+        routing_mode: isExplicitRouting(currentParsedConfig) ? 'explicit' : 'legacy',
+        configs: configs.map((item, index) => serializeUnifiedUpstream(item, index)),
+    };
+}
+
+function buildModelRoutesAdminResponse() {
+    let routing = { mode: 'legacy', models: [] };
+    let parseError = null;
+    try {
+        routing = parseRoutingConfig(currentParsedConfig);
+    } catch (err) {
+        parseError = err.message;
+    }
+
+    const routeStatus = {};
+    const configs = Array.isArray(currentParsedConfig.configs) ? currentParsedConfig.configs : [];
+    for (const model of routing.models || []) {
+        routeStatus[model.id] = {};
+        for (const protocol of ['chat_completions', 'responses', 'messages']) {
+            routeStatus[model.id][protocol] = modelRouter
+                ? modelRouter.describeRoute(model, protocol)
+                : null;
+        }
+    }
+
+    return {
+        revision: getRoutingRevision(currentParsedConfig),
+        mode: routing.mode,
+        max_attempts: routing.max_attempts ?? 3,
+        parse_error: parseError,
+        models: routing.models || [],
+        route_status: routeStatus,
+        configs: configs.map(item => ({
+            id: item.id,
+            description: item.description || '',
+            enabled: item.enabled !== false,
+            preset: item.preset || '',
+            models: Array.isArray(item.models) ? item.models : [],
+        })),
+        presets: listProviderPresets(),
+        public_model_ids: getPublicModelIds(currentParsedConfig),
+    };
+}
+
+function applyPresetDefaultsToUpstreamItem(item) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        return item;
+    }
+
+    const cloned = { ...item };
+    const preset = getProviderPreset(cloned.preset);
+    if (preset) {
+        if (!cloned.type && preset.default_type) {
+            cloned.type = preset.default_type;
+        }
+        if (!cloned.base_url && preset.default_base_url) {
+            cloned.base_url = preset.default_base_url;
+        }
+    }
+    return cloned;
+}
+
 function buildConfigAdminResponse() {
     const activeConfig = accountManager ? accountManager.getActiveConfig() : null;
     const activeAccountStatus = accountManager ? accountManager.getAccountStatus(activeConfig) : null;
@@ -1928,7 +2212,7 @@ function buildConfigAdminResponse() {
         claude_fallback_config_index: claudeFallbackConfigIndex,
         configs: currentParsedConfig.configs.map((item, index) => ({
             index,
-            item,
+            item: redactAdminConfigItem(item),
             is_active: activeAccountStatus ? activeAccountStatus.index === index : false,
             dispatch_role: apiConfigs[index] ? getDispatchRole(apiConfigs[index], activeConfig, fallbackFocus) : 'unavailable',
             dispatch_roles: apiConfigs[index] ? getDispatchRoles(apiConfigs[index], activeConfig, fallbackFocus) : ['unavailable'],
@@ -1936,8 +2220,11 @@ function buildConfigAdminResponse() {
         })),
         disabled_configs: (Array.isArray(currentParsedConfig.disabled_configs) ? currentParsedConfig.disabled_configs : []).map((item, index) => ({
             index,
-            item
-        }))
+            item: redactAdminConfigItem(item)
+        })),
+        routing: currentParsedConfig.routing ?? null,
+        routing_mode: isExplicitRouting(currentParsedConfig) ? 'explicit' : 'legacy',
+        routing_revision: getRoutingRevision(currentParsedConfig)
     };
 }
 
@@ -2090,7 +2377,7 @@ function deleteApiKeys(parsed, indexes) {
 function createMissingConfigResponse(res) {
     return res.status(503).json({
         error: 'Service Unavailable',
-        message: `当前没有可用配置，请先访问 ${buildAdminPath()} 添加账号`
+        message: `当前没有可用配置，请先访问 /admin/configs 添加账号`
     });
 }
 
@@ -2109,7 +2396,7 @@ function createProxyUnauthorizedResponse(res) {
 function createAdminUnauthorizedJsonResponse(res) {
     return res.status(401).json({
         error: 'Unauthorized',
-        message: `auth_token 校验失败，请通过 ${buildAdminPath()} 访问管理后台`
+        message: 'auth_token 校验失败，请使用正确的管理凭证访问管理后台'
     });
 }
 
@@ -3694,6 +3981,10 @@ app.get('/config-admin.js', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'config-admin.js'));
 });
 
+app.get('/config-admin-routing.js', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'config-admin-routing.js'));
+});
+
 app.use('/admin', requireAdminAuthToken);
 app.use('/admin/api', express.json({ limit: '1mb' }));
 
@@ -3724,6 +4015,329 @@ app.post('/admin/api/configs/refresh', async (req, res) => {
             error: '刷新额度失败',
             details: err.message
         });
+    }
+});
+
+function sendUnifiedAdminError(res, statusCode, code, message, field) {
+    res.status(statusCode).json({
+        error: {
+            code,
+            message,
+            ...(field ? { field } : {}),
+        },
+    });
+}
+
+function getEnabledExplicitRouteModels() {
+    try {
+        return parseRoutingConfig(currentParsedConfig).models || [];
+    } catch (err) {
+        return [];
+    }
+}
+
+app.get('/admin/api/upstreams', (req, res) => {
+    try {
+        res.json(buildUpstreamsAdminResponse());
+    } catch (err) {
+        sendUnifiedAdminError(res, 500, 'upstreams_read_failed', err.message);
+    }
+});
+
+app.post('/admin/api/upstreams', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const rawItem = req.body && req.body.item ? req.body.item : req.body;
+        if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
+            throw new ConfigEditorError('上游账号必须是对象');
+        }
+        const nextParsed = addConfigItems(parsed, [applyPresetDefaultsToUpstreamItem(rawItem)]);
+        const added = nextParsed.configs[nextParsed.configs.length - 1];
+        await persistAndReloadConfig(nextParsed, 'admin_upstream_create', {
+            skipQuotaRefresh: true,
+        });
+        res.status(201).json({
+            ...buildUpstreamsAdminResponse(),
+            added_id: added.id,
+        });
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 500,
+            err instanceof ConfigEditorError ? 'upstream_invalid' : 'upstream_create_failed',
+            err.message,
+        );
+    }
+});
+
+app.put('/admin/api/upstreams/:id', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const configId = req.params.id;
+        const existing = getConfigById(parsed, configId);
+        if (!existing) {
+            sendUnifiedAdminError(res, 404, 'upstream_not_found', '上游账号不存在');
+            return;
+        }
+
+        const patch = req.body && req.body.item ? req.body.item : req.body;
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+            throw new ConfigEditorError('上游账号必须是对象');
+        }
+        if (patch.id && patch.id !== configId) {
+            throw new ConfigEditorError('不能修改上游账号的稳定 ID');
+        }
+        if (patch.type && patch.type !== getConfigItemType(existing)) {
+            throw new ConfigEditorError('不能修改上游账号的凭证类型');
+        }
+
+        if (Array.isArray(patch.models)) {
+            const nextModelIds = new Set(patch.models.map(model => (
+                model && typeof model === 'object' ? model.id : model
+            )));
+            const removedModels = (Array.isArray(existing.models) ? existing.models : [])
+                .map(model => model && typeof model === 'object' ? model.id : model)
+                .filter(modelId => modelId && !nextModelIds.has(modelId));
+            for (const modelId of removedModels) {
+                const affected = findRoutesReferencingModel(parsed, configId, modelId);
+                if (affected.length) {
+                    sendUnifiedAdminError(
+                        res,
+                        400,
+                        'model_referenced',
+                        `后端模型 ${modelId} 仍被路由引用: ${affected.join(', ')}`,
+                        'models',
+                    );
+                    return;
+                }
+            }
+        }
+
+        const merged = {
+            ...existing,
+            ...patch,
+            id: configId,
+            type: getConfigItemType(existing),
+        };
+        const nextParsed = updateConfigItemById(parsed, configId, merged);
+        await persistAndReloadConfig(nextParsed, 'admin_upstream_update', {
+            skipQuotaRefresh: true,
+        });
+        res.json(buildUpstreamsAdminResponse());
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 500,
+            err instanceof ConfigEditorError ? 'upstream_invalid' : 'upstream_update_failed',
+            err.message,
+        );
+    }
+});
+
+app.delete('/admin/api/upstreams/:id', async (req, res) => {
+    try {
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const configId = req.params.id;
+        if (!getConfigById(parsed, configId)) {
+            sendUnifiedAdminError(res, 404, 'upstream_not_found', '上游账号不存在');
+            return;
+        }
+
+        const affectedRoutes = [];
+        const routing = parsed.routing;
+        if (routing && Array.isArray(routing.models)) {
+            for (const route of routing.models) {
+                if (route && Array.isArray(route.targets) && route.targets.some(target => target.config_id === configId)) {
+                    affectedRoutes.push(route.id);
+                }
+            }
+        }
+        if (affectedRoutes.length) {
+            sendUnifiedAdminError(
+                res,
+                409,
+                'upstream_referenced',
+                `上游账号仍被模型路由引用: ${affectedRoutes.join(', ')}`,
+            );
+            return;
+        }
+
+        const nextParsed = deleteConfigItemById(parsed, configId);
+        await persistAndReloadConfig(nextParsed, 'admin_upstream_delete', {
+            skipQuotaRefresh: true,
+        });
+        res.json(buildUpstreamsAdminResponse());
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 500,
+            'upstream_delete_failed',
+            err.message,
+        );
+    }
+});
+
+async function discoverUpstreamModelsById(configId, draft = null) {
+    const config = draft || getConfigById(currentParsedConfig, configId);
+    if (!config) {
+        throw new ConfigEditorError('上游账号不存在');
+    }
+
+    let discoveryRequest;
+    try {
+        discoveryRequest = buildDiscoveryRequest(config);
+    } catch (err) {
+        throw new ConfigEditorError(err.message);
+    }
+
+    const result = await requestBuffered({
+        method: 'GET',
+        targetUrl: discoveryRequest.url,
+        headers: {
+            ...discoveryRequest.headers,
+            accept: 'application/json',
+        },
+        timeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+        maxRedirects: 2,
+    });
+
+    if (result.statusCode < 200 || result.statusCode >= 300) {
+        throw new ConfigEditorError(`模型列表读取失败: HTTP ${result.statusCode}`);
+    }
+
+    let payload;
+    try {
+        payload = JSON.parse(result.bodyText);
+    } catch (err) {
+        throw new ConfigEditorError(`模型列表不是合法 JSON: ${err.message}`);
+    }
+
+    let discovered;
+    try {
+        discovered = parseModelCatalog(payload, config);
+    } catch (err) {
+        throw new ConfigEditorError(err.message);
+    }
+
+    const diff = diffModelCatalog(config.models, discovered);
+    return {
+        config_id: config.id,
+        source_url: discoveryRequest.url,
+        ...diff,
+    };
+}
+
+async function refreshUpstreamQuotaById(configId) {
+    const config = getConfigById(currentParsedConfig, configId);
+    if (!config) {
+        throw new ConfigEditorError('上游账号不存在');
+    }
+    if (!quotaEngine) {
+        throw new ConfigEditorError('统一额度引擎尚未初始化');
+    }
+
+    await quotaEngine.refresh(config, { force: true });
+    return {
+        config_id: config.id,
+        quota: quotaEngine.serialize(config),
+    };
+}
+
+app.post('/admin/api/upstreams/models/discover', async (req, res) => {
+    try {
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        const existing = body.config_id ? getConfigById(currentParsedConfig, body.config_id) : null;
+        if (body.config_id && !existing) throw new ConfigEditorError('上游账号不存在');
+        const draft = applyPresetDefaultsToUpstreamItem({ ...existing, ...body });
+        if (!body.apikey && existing) draft.apikey = existing.apikey;
+        if (!existing && !draft.apikey) throw new ConfigEditorError('同步前请填写转发凭证');
+        res.json(await discoverUpstreamModelsById(body.config_id, draft));
+    } catch (err) {
+        sendUnifiedAdminError(res, err instanceof ConfigEditorError ? 400 : 502, 'model_discovery_failed', err.message);
+    }
+});
+
+app.post('/admin/api/upstreams/:id/models/discover', async (req, res) => {
+    try {
+        res.json(await discoverUpstreamModelsById(req.params.id));
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 502,
+            'model_discovery_failed',
+            err.message,
+        );
+    }
+});
+
+app.post('/admin/api/configs/:id/models/discover', async (req, res) => {
+    try {
+        res.json(await discoverUpstreamModelsById(req.params.id));
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 502,
+            'model_discovery_failed',
+            err.message,
+        );
+    }
+});
+
+async function handleQuotaRefreshById(req, res) {
+    try {
+        const result = await refreshUpstreamQuotaById(req.params.id);
+        res.json({
+            ...result,
+            upstream: buildUpstreamsAdminResponse().configs.find(item => item.id === req.params.id) || null,
+        });
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 502,
+            'quota_refresh_failed',
+            err.message,
+        );
+    }
+}
+
+app.post('/admin/api/upstreams/:id/quota-refresh', handleQuotaRefreshById);
+app.post('/admin/api/configs/:id/quota-refresh', handleQuotaRefreshById);
+
+app.get('/admin/api/model-routes', (req, res) => {
+    try {
+        res.json(buildModelRoutesAdminResponse());
+    } catch (err) {
+        sendUnifiedAdminError(res, 500, 'routes_read_failed', err.message);
+    }
+});
+
+app.put('/admin/api/model-routes', async (req, res) => {
+    try {
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        const currentRevision = getRoutingRevision(currentParsedConfig);
+        if (body.revision && body.revision !== currentRevision) {
+            sendUnifiedAdminError(res, 409, 'revision_conflict', '模型路由已被其他操作修改，请刷新后重试', 'revision');
+            return;
+        }
+        if (!Array.isArray(body.models)) {
+            throw new ConfigEditorError('models 必须是数组');
+        }
+
+        const parsed = readParsedConfigFile(CONFIG_FILE);
+        const nextParsed = updateRoutingModels(parsed, body.models, {
+            maxAttempts: body.max_attempts,
+        });
+        await persistAndReloadConfig(nextParsed, 'admin_update_model_routes', {
+            skipQuotaRefresh: true,
+        });
+        res.json(buildModelRoutesAdminResponse());
+    } catch (err) {
+        sendUnifiedAdminError(
+            res,
+            err instanceof ConfigEditorError ? 400 : 500,
+            err instanceof ConfigEditorError ? 'routes_invalid' : 'routes_update_failed',
+            err.message,
+        );
     }
 });
 
@@ -4217,6 +4831,50 @@ app.get('/health', requireConfiguredApiKeys, (req, res) => {
     });
 });
 
+function explicitRoutingMiddleware(entryProtocol) {
+    return function explicitRoutingEntry(req, res, next) {
+        if (!isExplicitRouting(currentParsedConfig)) {
+            next();
+            return;
+        }
+
+        const handler = explicitRoutingHandlers && explicitRoutingHandlers[entryProtocol];
+        if (typeof handler !== 'function') {
+            res.status(503).json({
+                error: {
+                    code: 'routing_not_ready',
+                    message: '统一路由尚未初始化',
+                },
+            });
+            return;
+        }
+
+        handler(req, res);
+    };
+}
+
+app.get('/v1/models', requireConfiguredApiKeys, (req, res, next) => {
+    if (!isExplicitRouting(currentParsedConfig)) {
+        next();
+        return;
+    }
+
+    const createdAt = Math.floor(Date.now() / 1000);
+    res.json({
+        object: 'list',
+        data: getPublicModelIds(currentParsedConfig).map(id => ({
+            id,
+            object: 'model',
+            created: createdAt,
+            owned_by: 'airouter',
+        })),
+    });
+});
+
+app.post('/v1/chat/completions', requireConfiguredApiKeys, explicitRoutingMiddleware('chat_completions'));
+app.post('/v1/responses', requireConfiguredApiKeys, explicitRoutingMiddleware('responses'));
+app.post('/v1/messages', requireConfiguredApiKeys, explicitRoutingMiddleware('messages'));
+
 app.post('/v1/messages', requireConfiguredApiKeys, (req, res) => {
     if (!accountManager.getActiveConfig()) {
         return createMissingConfigResponse(res);
@@ -4284,7 +4942,7 @@ async function startServer() {
         log('='.repeat(70));
         log('OpenAI 兼容代理服务器已启动');
         log('='.repeat(70));
-        log(`配置管理: ${localBaseUrl}${buildAdminPath()}`);
+        log(`配置管理: ${localBaseUrl}/admin/configs（需要管理凭证）`);
         log(`OpenAI 代理: ${localBaseUrl}/v1`);
         log(`Claude Messages 代理: ${localBaseUrl}/v1/messages`);
         log('='.repeat(70));
@@ -4380,6 +5038,7 @@ module.exports = {
     serializeAccountStatus,
     selectReloadedActiveConfig,
     refreshConfigTokenAdminResponse,
+    refreshExplicitUpstreamAuth,
     startServer,
     triggerServiceCommand,
     triggerServiceRestart,
