@@ -70,7 +70,7 @@ function createRouteTestHandler(options) {
       // never persists a route, changes account enablement, or clears production
       // quota/cooldown state. The normal protocol and credential path is reused.
       const isolated = { ...parsed, routing: { models: [{ ...route, enabled: true, targets: [target], max_attempts: 1 }] } };
-      router = createModelRouter({ parsed: isolated, runtimeConfigs: options.getRuntimeConfigs() });
+      router = createModelRouter({ parsed: isolated, runtimeConfigs: options.getRuntimeConfigs(), poolEngine: options.getPoolEngine?.() });
     }
     const forwarding = options.getForwardingOptions();
     const body = Buffer.from(JSON.stringify(buildTestBody(route.id, request.input, protocol)));

@@ -215,6 +215,20 @@ const PROVIDER_PRESETS = {
   },
 };
 
+// Pools are upstreams with one stable model. Concrete models are maintained by
+// free-pool-engine; these presets do not impose outer routing priority.
+for (const [id, parent, label] of [
+  ['opencode-free', 'opencode-go', 'OpenCode 免费模型池'],
+  ['openrouter-free', 'openrouter', 'OpenRouter 免费模型池'],
+]) {
+  const source = PROVIDER_PRESETS[parent];
+  PROVIDER_PRESETS[id] = {
+    ...source, id, label, pool: true, protocols: ['chat_completions'],
+    quota: { supported: false, reason: '免费池按具体模型权限和免费限流判断，不使用付费套餐额度。' },
+    notes: '固定模型 ID free；内部目录自动维护，质量使用透明分级与近期成功率、速度。',
+  };
+}
+
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -227,6 +241,7 @@ function getProviderPreset(id) {
 function listProviderPresets() {
   return Object.values(PROVIDER_PRESETS).map(preset => ({
     id: preset.id,
+    pool: Boolean(preset.pool),
     label: preset.label,
     credential: preset.credential,
     default_type: preset.default_type,

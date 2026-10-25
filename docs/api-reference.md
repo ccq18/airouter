@@ -41,6 +41,14 @@
 
 账号对象和模型字段详见[配置契约](config-item-reference.md#4-上游账号)。被路由引用的模型或协议不可直接移除；仍被引用的账号不可删除。
 
+### 3.1 免费池详情与刷新
+
+`GET /admin/api/upstreams` 的池账号包含 `credential_ref`、高级配置 `pool`、运行快照 `pool_status`；`models` 只有 `free`，`quota` 为 null。`has_credentials` 包含有效引用来源。`pool_status` 提供 `state`、内部 `models[]`、最后成功/尝试同步时间、异常、价格来源、最近请求实际模型及账号级健康；内部模型含资格证据、上下文/能力、可用状态、档位及依据、近期成功率/延迟。
+
+`POST /admin/api/upstreams/:id/pool-refresh` 使用管理鉴权及已保存凭证，返回 `{ "pool_status": {}, "upstream": {} }`。目录调用失败保留缓存并返回带 `error` 的快照，HTTP 200 不等于同步成功；非池返回 400，未知账号返回 404。普通 `models/discover` 对池拒绝，防止手动目录覆盖固定 `free`。
+
+新增/编辑池沿用账号 POST/PUT。`credential_ref` 与独立 `apikey` 二选一，空引用可切换独立 Key；引用账号不可删除或改成不兼容平台。字段和有效期见[配置契约第 6 节](config-item-reference.md#6-免费模型池)。测试接口的 `attempts[]` 对池额外返回 `pool_id`、`pool_target_id`，`model` 是实际后端模型；客户端模型身份保持原公开 ID。
+
 ## 4. 路由与设置
 
 | 方法与路径 | 请求 | 成功返回 |

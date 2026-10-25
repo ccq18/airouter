@@ -1,3 +1,4 @@
+const { isFreePool } = require('./free-pool-config');
 const fs = require('node:fs');
 const {
     parseOpenAiConfigFile,
@@ -86,7 +87,7 @@ function normalizePortSetting(value, fieldName, options = {}) {
 
 function getEditableFields(type) {
     if (type === 'apikey') {
-        return ['type', 'id', 'preset', 'apikey', 'base_url', 'description', 'models_endpoint', 'quota_url'];
+        return ['type', 'id', 'preset', 'apikey', 'base_url', 'description', 'models_endpoint', 'quota_url', 'credential_ref'];
     }
 
     if (type === 'token') {
@@ -187,6 +188,9 @@ function normalizeConfigItem(item, existingItem = {}) {
             }
         }
 
+        if (Object.prototype.hasOwnProperty.call(normalizedItem, 'pool')) nextItem.pool = structuredClone(normalizedItem.pool);
+        if (nextItem.credential_ref === '') delete nextItem.credential_ref;
+
         if (Object.prototype.hasOwnProperty.call(normalizedItem, 'models')) {
             if (normalizedItem.models === null) {
                 delete nextItem.models;
@@ -205,6 +209,12 @@ function normalizeConfigItem(item, existingItem = {}) {
         }
     }
 
+    if (isFreePool(nextItem)) {
+        if (nextItem.credential_ref) delete nextItem.apikey;
+    } else {
+        delete nextItem.pool;
+        delete nextItem.credential_ref;
+    }
     if (!nextItem.id) {
         delete nextItem.id;
     }

@@ -6,11 +6,16 @@
     messages: 'Claude Messages',
   };
   const TOKEN_PRESETS = new Set(['chatgpt', 'claude']);
+  const POOL_PRESETS = new Set(['opencode-free', 'openrouter-free']);
+  const FREE_MODEL = { id: 'free', protocols: ['chat_completions'] };
+  const POOL_DEFAULTS = { sync_interval_seconds: 900, max_stale_seconds: 3600, max_attempts: 8, strategy: 'quality_first', tiers: {} };
   const DEFAULT_PRESETS = [
     { id: 'chatgpt', label: 'ChatGPT / Codex', credential: 'token', default_base_url: 'https://chatgpt.com', protocols: ['responses'] },
     { id: 'opencode-go', label: 'OpenCode Go', credential: 'apikey', default_base_url: 'https://opencode.ai/inference/go', protocols: [...PROTOCOLS] },
     { id: 'opencode-zen', label: 'OpenCode Zen', credential: 'apikey', default_base_url: 'https://opencode.ai/inference', protocols: [...PROTOCOLS] },
     { id: 'openrouter', label: 'OpenRouter', credential: 'apikey', default_base_url: 'https://openrouter.ai/api/v1', protocols: ['chat_completions', 'responses'] },
+    { id: 'opencode-free', label: 'OpenCode 免费模型池', credential: 'apikey', pool: true, default_base_url: 'https://opencode.ai/inference/go', protocols: ['chat_completions'] },
+    { id: 'openrouter-free', label: 'OpenRouter 免费模型池', credential: 'apikey', pool: true, default_base_url: 'https://openrouter.ai/api/v1', protocols: ['chat_completions'] },
     { id: 'glm-cn', label: 'GLM Coding Plan 中国', credential: 'apikey', default_base_url: 'https://open.bigmodel.cn/api/coding/paas/v4', protocols: ['chat_completions'] },
     { id: 'glm-global', label: 'GLM Coding Plan 国际', credential: 'apikey', default_base_url: 'https://api.z.ai/api/coding/paas/v4', protocols: ['chat_completions'] },
     { id: 'claude', label: 'Claude OAuth', credential: 'token', default_base_url: 'https://api.anthropic.com', protocols: ['messages'] },
@@ -101,6 +106,46 @@
       tone: 'ok',
       detail: statusLabel(quota.reason),
     };
+  }
+
+  function isPoolPreset(preset) {
+    return POOL_PRESETS.has(typeof preset === 'string' ? preset : preset?.id);
+  }
+
+  function poolCredentialOptions(configs, presetId) {
+    const allowed = presetId === 'opencode-free' ? ['opencode-go', 'opencode-zen'] : ['openrouter'];
+    return configs.filter(config => config.type === 'apikey' && allowed.includes(config.preset));
+  }
+
+  function normalizePoolSettings(value = {}) {
+    const settings = { ...POOL_DEFAULTS, ...value };
+    const ranges = { sync_interval_seconds: [60, 86400], max_stale_seconds: [60, 86400], max_attempts: [1, 32] };
+    for (const [field, [min, max]] of Object.entries(ranges)) {
+      const number = Number(settings[field]);
+      if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${field} 须为 ${min}-${max} 的整数`);
+      settings[field] = number;
+    }
+    if (settings.max_stale_seconds < settings.sync_interval_seconds) throw new Error('资格缓存有效期不能短于同步间隔');
+    if (!['quality_first', 'fastest'].includes(settings.strategy)) throw new Error('请选择有效的池内策略');
+    if (!settings.tiers || typeof settings.tiers !== 'object' || Array.isArray(settings.tiers)) throw new Error('质量分级须为模型 ID 到等级的 JSON 对象');
+    for (const [id, tier] of Object.entries(settings.tiers)) {
+      if (!id.trim() || !Number.isInteger(tier) || tier < 1 || tier > 10) throw new Error('质量等级须为 1-10 的整数，1 为最高档');
+    }
+    return settings;
+  }
+
+  function poolStateLabel(value) {
+    return ({ ready: '有可用候选', available: '有可用候选', ok: '可用', empty: '没有合格候选', stale: '资格信息已过期', expired: '资格信息已过期', syncing: '正在同步', unknown: '等待同步', error: '同步异常', cooldown: '冷却中', auth_failed: '凭证验证失败', unavailable: '暂不可用', disabled: '已停用' })[value] || value || '等待同步';
+  }
+
+  function formatPoolTime(value) {
+    if (!value) return '尚无记录';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  function poolValue(value) {
+    return typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value);
   }
 
   function extractTestResponseText(response) {
@@ -206,6 +251,7 @@
       editingTargetIndex: null,
       discovery: null,
       pendingTokenImportFromAccount: false,
+      poolDetailId: '',
       testRoute: null,
       testRun: { running: false, stopped: false, items: [] },
     };
@@ -249,6 +295,18 @@
       settingsDrawer: el('settingsDrawer'),
       tokenImportDialog: el('tokenImportDialog'),
       claudeDialog: el('claudeDialog'),
+      poolFields: el('upstreamPoolFields'),
+      credentialRef: el('upstreamCredentialRefSelect'),
+      poolSyncInterval: el('poolSyncIntervalInput'),
+      poolMaxStale: el('poolMaxStaleInput'),
+      poolMaxAttempts: el('poolMaxAttemptsInput'),
+      poolStrategy: el('poolStrategySelect'),
+      poolTiers: el('poolTiersInput'),
+      poolDetail: el('poolDetailsContent'),
+      poolTitle: el('poolDetailsTitle'),
+      poolRefresh: el('poolRefreshButton'),
+      poolStatus: el('poolDetailsStatus'),
+      modelSection: el('upstreamModelSection'),
       testDialog: el('routeTestDialog'),
       testRouteId: el('routeTestModelId'),
       testInput: el('routeTestInput'),
@@ -404,6 +462,7 @@
         return;
       }
       if (id === 'routeTestDialog') testRunner.stop();
+      if (id === 'poolDetailsDialog') state.poolDetailId = '';
       layer.hidden = true;
       if (id === 'tokenImportDialog') {
         state.pendingTokenImportFromAccount = false;
@@ -530,6 +589,19 @@
       dom.apiKey.disabled = token;
       dom.apiKey.placeholder = token ? '由登录态导入管理' : '留空表示编辑时不改凭证';
       renderCredentialPanel(preset);
+      const pool = isPoolPreset(preset);
+      if (dom.poolFields) dom.poolFields.hidden = !pool;
+      if (dom.modelSection) dom.modelSection.hidden = pool;
+      dom.baseUrl.readOnly = pool;
+      if (pool) {
+        const config = selectedAccountConfig();
+        const options = poolCredentialOptions(getUpstreamConfigs(), preset.id);
+        const selected = config?.credential_ref || (!state.editingUpstreamId ? options.find(item => item.enabled !== false)?.id || options[0]?.id : '') || '';
+        dom.credentialRef.innerHTML = options.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.description || item.id)}${item.enabled === false ? '（已停用）' : ''}</option>`).join('') + '<option value="">使用独立 API Key</option>';
+        dom.credentialRef.value = selected;
+        updatePoolCredentialMode();
+        state.formModels = [cloneJson(FREE_MODEL)];
+      }
       if (state.editingUpstreamId) {
         dom.saveUpstream.textContent = '保存修改';
       } else if (token) {
@@ -539,16 +611,46 @@
       }
       const presetHint = el('upstreamPresetHint');
       if (presetHint) {
-        presetHint.textContent = ({'glm-cn':'自动读取推理额度窗口，工具额度不影响模型转发。','glm-global':'自动读取推理额度窗口，工具额度不影响模型转发。','opencode-go':'自动读取套餐额度；每个会话保持稳定的上游连接标识。','openrouter':'使用同一转发凭证读取账户余额和 Key 限额。','opencode-zen':'支持模型转发和同步；平台尚未提供已验证的普通 Key 余额接口。'}[preset.id]) || (preset.id === 'custom'
+        presetHint.textContent = isPoolPreset(preset) ? '对路由固定提供 free；内部模型按价格与能力自动同步，免费资格不明确的模型不会调用。' : ({'glm-cn':'自动读取推理额度窗口，工具额度不影响模型转发。','glm-global':'自动读取推理额度窗口，工具额度不影响模型转发。','opencode-go':'自动读取套餐额度；每个会话保持稳定的上游连接标识。','openrouter':'使用同一转发凭证读取账户余额和 Key 限额。','opencode-zen':'支持模型转发和同步；平台尚未提供已验证的普通 Key 余额接口。'}[preset.id]) || (preset.id === 'custom'
           ? '自定义接口需要维护 Base URL 和模型列表接口。'
           : '内置平台的接口地址与模型发现规则由系统维护。');
       }
+    }
+
+    function updatePoolCredentialMode() {
+      if (!isPoolPreset(dom.preset.value)) return;
+      const reference = Boolean(dom.credentialRef?.value);
+      dom.apiKeyField.hidden = reference;
+      dom.apiKey.disabled = reference;
+      if (reference) dom.apiKey.value = '';
+    }
+
+    function fillPoolSettings(config) {
+      const settings = { ...POOL_DEFAULTS, ...(config?.pool || {}) };
+      dom.poolSyncInterval.value = settings.sync_interval_seconds;
+      dom.poolMaxStale.value = settings.max_stale_seconds;
+      dom.poolMaxAttempts.value = settings.max_attempts;
+      dom.poolStrategy.value = settings.strategy;
+      dom.poolTiers.value = JSON.stringify(settings.tiers || {}, null, 2);
+    }
+
+    function readPoolSettings() {
+      let tiers;
+      try { tiers = JSON.parse(dom.poolTiers.value || '{}'); }
+      catch { throw new Error('质量分级 JSON 格式不正确'); }
+      return normalizePoolSettings({
+        sync_interval_seconds: dom.poolSyncInterval.value,
+        max_stale_seconds: dom.poolMaxStale.value,
+        max_attempts: dom.poolMaxAttempts.value,
+        strategy: dom.poolStrategy.value, tiers,
+      });
     }
 
     function renderModelEditor() {
       if (!dom.modelsEditor) {
         return;
       }
+      if (isPoolPreset(dom.preset.value)) { dom.modelsEditor.innerHTML = ''; return; }
       dom.modelsEditor.innerHTML = state.formModels.map((model, index) => {
         const protocols = Array.isArray(model.protocols) ? model.protocols : [];
         return `
@@ -593,6 +695,7 @@
     }
 
     function syncModelsFromEditor() {
+      if (isPoolPreset(dom.preset.value)) return [cloneJson(FREE_MODEL)];
       state.formModels = collectModelsFromEditor();
       return state.formModels;
     }
@@ -616,6 +719,7 @@
         dom.preset.value = defaultPresetId();
       }
       updatePresetFields();
+      fillPoolSettings();
       dom.baseUrl.value = getPreset(dom.preset.value)?.default_base_url || '';
       renderModelEditor();
       if (options.close !== false) {
@@ -668,6 +772,7 @@
         }
       }
       updatePresetFields();
+      fillPoolSettings(selectedAccountConfig());
       renderModelEditor();
       openLayer('accountDialog');
       if (options.sync && state.editingUpstreamId) {
@@ -701,7 +806,8 @@
       const providerId = providerIdForConfig(config);
       const provider = getPresetLabel(getPresets(), providerId);
       const status = accountStatus(config);
-      const models = Array.isArray(config.models) ? config.models : [];
+      const pool = isPoolPreset(providerId);
+      const models = pool ? [FREE_MODEL] : Array.isArray(config.models) ? config.models : [];
       const refs = routeReferencesForAccount(config.id);
       const modelTags = models.map(model => {
         const protocols = Array.isArray(model.protocols) ? model.protocols.join(' / ') : '';
@@ -726,7 +832,7 @@
           <div class="account-facts">
             <div>
               <span class="fact-label">额度 / 状态</span>
-              <div class="fact-value quota-line">${renderQuotaCell(config.quota)}</div>
+              <div class="fact-value quota-line">${pool ? `<span class="route-status-chip ${['ready', 'available', 'ok'].includes(config.pool_status?.state) ? 'ok' : 'warn'}">${escapeHtml(poolStateLabel(config.pool_status?.state))}</span><span class="quota-detail">${config.pool_status?.models?.length || 0} 个内部模型 · 独立于付费套餐额度</span>` : renderQuotaCell(config.quota)}</div>
             </div>
             <div>
               <span class="fact-label">路由引用</span>
@@ -735,8 +841,7 @@
           </div>
           <div class="account-actions">
             <button class="secondary" type="button" data-edit-upstream="${escapeHtml(config.id)}">编辑</button>
-            <button class="secondary" type="button" data-sync-account="${escapeHtml(config.id)}">同步模型</button>
-            <button class="secondary" type="button" data-refresh-quota="${escapeHtml(config.id)}">刷新额度</button>
+            ${pool ? `<button class="secondary" type="button" data-pool-details="${escapeHtml(config.id)}">免费池详情</button>` : `<button class="secondary" type="button" data-sync-account="${escapeHtml(config.id)}">同步模型</button><button class="secondary" type="button" data-refresh-quota="${escapeHtml(config.id)}">刷新额度</button>`}
             <button class="danger" type="button" data-delete-upstream="${escapeHtml(config.id)}">删除</button>
           </div>
         </article>
@@ -881,6 +986,7 @@
 
     async function discoverModels() {
       const preset = getPreset(dom.preset.value);
+      if (isPoolPreset(preset)) throw new Error('免费池由系统自动同步，保存后可在免费池详情中查看');
       if (isTokenPreset(preset) && !state.editingUpstreamId) {
         throw new Error('请先通过登录态导入入口添加账号');
       }
@@ -946,7 +1052,12 @@
         item.apikey = apiKey;
       }
 
-      if (!state.editingUpstreamId && !isTokenPreset(preset) && !apiKey) {
+      if (isPoolPreset(preset)) {
+        item.models = [cloneJson(FREE_MODEL)];
+        item.credential_ref = dom.credentialRef.value || '';
+        item.pool = readPoolSettings();
+      }
+      if (!state.editingUpstreamId && !isTokenPreset(preset) && !apiKey && !item.credential_ref) {
         throw new Error('新增账号需要填写 API Key');
       }
       if (!item.base_url && preset.id === 'custom') {
@@ -970,6 +1081,54 @@
       resetUpstreamForm({ close: false });
       closeLayer('accountDialog');
       await loadAll();
+    }
+
+    function renderPoolDetails(config) {
+      const status = config.pool_status || {};
+      const models = Array.isArray(status.models) ? status.models : [];
+      dom.poolTitle.textContent = config.description || config.id;
+      dom.poolStatus.textContent = `${poolStateLabel(status.state)} · 最后成功同步：${formatPoolTime(status.last_sync_at)}${status.error ? ` · ${poolValue(status.error)}` : ''}`;
+      const last = status.last_request;
+      const source = config.credential_ref ? `复用 ${accountLabel(config.credential_ref)}` : '独立 API Key';
+      dom.poolDetail.innerHTML = `
+        <div class="pool-detail-summary"><span class="tag mono">free</span><span>${escapeHtml(source)}</span><span>${models.length} 个内部候选</span></div>
+        <p class="field-hint">${config.pool?.strategy === 'fastest' ? '速度优先' : '质量分级优先，同档结合近期成功率和速度'}。未分级的模型视为同档，不代表自动评定质量。目录能力与价格不明确时不会调用。</p>
+        <p class="pool-request-point"><strong>最近实际落点</strong><span class="mono">${escapeHtml(last ? poolValue(last) : '尚未发生请求')}</span></p>
+        <div class="pool-model-list">${models.map((model, index) => {
+          const latency = Number.isFinite(model.latency_ms) ? `${Math.round(model.latency_ms)} ms` : '暂无样本';
+          const success = Number.isFinite(model.success_rate) ? `${Math.round(model.success_rate <= 1 ? model.success_rate * 100 : model.success_rate)}%` : '暂无样本';
+          const capabilities = Object.entries(model.capabilities || {}).filter(([, enabled]) => enabled === true).map(([name]) => ({ tools: '工具', images: '图片', streaming: '流式', structuredOutput: '结构化输出' })[name] || name);
+          return `<article class="pool-model-card">
+            <div class="pool-model-heading"><strong class="mono">${index + 1}. ${escapeHtml(model.id)}</strong><span class="route-status-chip ${model.status === 'ok' || model.status === 'available' ? 'ok' : 'warn'}">${escapeHtml(poolStateLabel(model.status))}</span></div>
+            <p class="field-hint">质量档位：${escapeHtml(model.quality_tier ?? '未分级')} · 依据：${escapeHtml(poolValue(model.quality_source) || '未分级，同档比较速度与成功率')}</p>
+            <div class="pool-model-metrics"><span>近期响应 ${escapeHtml(latency)}</span><span>成功率 ${escapeHtml(success)}</span><span>上下文 ${escapeHtml(model.context_window || '未核实')}</span></div>
+            <p class="field-hint">${escapeHtml(capabilities.join(' · ') || '仅已核实的基础文本能力')}${model.until ? ` · 恢复时间 ${escapeHtml(formatPoolTime(model.until))}` : ''}</p>
+            <details class="advanced-settings"><summary>免费资格依据</summary><pre class="pool-evidence">${escapeHtml(poolValue(model.free_evidence) || '等待核验')}</pre></details>
+          </article>`;
+        }).join('') || '<div class="empty">暂无已核实的免费候选。可刷新目录查看最新结果；收费或资格不明确的模型不会加入。</div>'}</div>
+        <details class="advanced-settings" style="margin-top:16px"><summary>同步来源与时间</summary><div class="advanced-settings-body"><p class="field-hint">最后尝试：${escapeHtml(formatPoolTime(status.last_attempt_at))}</p><pre class="pool-evidence">${escapeHtml(poolValue(status.source_urls || []))}</pre></div></details>`;
+    }
+
+    function openPoolDetails(configId) {
+      const config = getAccountConfig(configId);
+      if (!config || !isPoolPreset(config.preset)) return;
+      state.poolDetailId = configId;
+      renderPoolDetails(config);
+      openLayer('poolDetailsDialog');
+    }
+
+    async function refreshPool() {
+      const configId = state.poolDetailId;
+      if (!configId) return;
+      dom.poolRefresh.disabled = true;
+      dom.poolStatus.textContent = '正在核验免费模型目录…';
+      try {
+        const result = await requestJson(`/admin/api/upstreams/${encodeURIComponent(configId)}/pool-refresh`, { method: 'POST', body: '{}' });
+        await loadAll();
+        if (state.poolDetailId === configId) renderPoolDetails(result.upstream || { ...getAccountConfig(configId), pool_status: result.pool_status });
+      } catch (error) {
+        if (state.poolDetailId === configId) dom.poolStatus.textContent = `同步失败：${error.message}；保留上次有效模型列表。`;
+      } finally { dom.poolRefresh.disabled = false; }
     }
 
     async function refreshQuota(configId) {
@@ -999,7 +1158,8 @@
         .map(config => ({
           id: config.id,
           label: config.description || config.id,
-          models: config.models,
+          models: isPoolPreset(config.preset) ? [FREE_MODEL] : config.models,
+          pool: isPoolPreset(config.preset),
         }));
     }
 
@@ -1075,17 +1235,18 @@
           </div>
           <div class="field">
             <label class="field-label" for="routeTargetModelSelect">后端模型</label>
-            <select id="routeTargetModelSelect" data-target-editor-field="model">
+            <select id="routeTargetModelSelect" data-target-editor-field="model" ${account.pool ? 'disabled' : ''}>
               ${account.models.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === model?.id ? 'selected' : ''}>${escapeHtml(item.id)}</option>`).join('')}
             </select>
           </div>
         </div>
+        ${account.pool ? '<p class="field-hint">免费池固定使用 free，内部真实模型由池自动选择。</p>' : ''}
         <details class="advanced-settings" style="margin-top:12px">
           <summary>协议：${escapeHtml(protocolLabel(protocol))}</summary>
           <div class="advanced-settings-body">
             <div class="field">
               <label class="field-label" for="routeTargetProtocolSelect">上游协议</label>
-              <select id="routeTargetProtocolSelect" data-target-editor-field="protocol">
+              <select id="routeTargetProtocolSelect" data-target-editor-field="protocol" ${account.pool ? 'disabled' : ''}>
                 ${protocols.map(item => `<option value="${escapeHtml(item)}" ${item === protocol ? 'selected' : ''}>${escapeHtml(protocolLabel(item))}</option>`).join('')}
               </select>
               <p class="field-hint">选项来自这个后端模型声明的协议，不能随意跨协议。</p>
@@ -1577,6 +1738,8 @@
           return;
         }
 
+        const poolButton = event.target.closest('[data-pool-details]');
+        if (poolButton) { openPoolDetails(poolButton.dataset.poolDetails); return; }
         const editUpstream = event.target.closest('[data-edit-upstream]');
         if (editUpstream) {
           openAccount(editUpstream.dataset.editUpstream);
@@ -1678,6 +1841,9 @@
       dom.testCandidatesButton?.addEventListener('click', () => runRouteTest('candidate'));
       dom.testStopButton?.addEventListener('click', () => testRunner.stop());
 
+      dom.credentialRef?.addEventListener('change', updatePoolCredentialMode);
+      dom.poolRefresh?.addEventListener('click', () => { void refreshPool(); });
+
       dom.preset.addEventListener('change', () => {
         if (!state.editingUpstreamId) {
           dom.baseUrl.value = getPreset(dom.preset.value)?.default_base_url || '';
@@ -1685,6 +1851,8 @@
         state.discovery = null;
         renderDiscovery();
         updatePresetFields();
+        fillPoolSettings();
+        renderModelEditor();
       });
 
       dom.addModel.addEventListener('click', () => {
@@ -1834,6 +2002,8 @@
       openAccount,
       openRoute,
       openRouteTest,
+      openPoolDetails,
+      refreshPool,
       runRouteTest,
       openTokenImportFromAccount,
       closeLayer,
@@ -1853,6 +2023,10 @@
 
   const exported = {
     createRoutingAdmin,
+    isPoolPreset,
+    poolCredentialOptions,
+    normalizePoolSettings,
+    poolStateLabel,
     extractTestResponseText,
     normalizeTestResult,
     createRouteTestRunner,

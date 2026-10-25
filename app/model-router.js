@@ -1,3 +1,4 @@
+const { isFreePool, normalizePoolOptions } = require('./free-pool-config');
 const {
   parseRoutingConfig,
   resolveRoute,
@@ -86,6 +87,14 @@ function createRoutingHealthStore(options = {}) {
     });
   }
 
+  function markConfigCooldown(configId, details = {}) {
+    configStates.set(configKey(configId), {
+      status: 'cooldown', reason: normalizeString(details.reason) || 'account_rate_limited',
+      until: now() + Math.min(maxCooldownMs, Number.isFinite(details.cooldownMs) ? Math.max(0, details.cooldownMs) : baseCooldownMs),
+      updatedAt: now(),
+    });
+  }
+
   function markCooldown(configId, details = {}) {
     const targetKey = normalizeString(details.targetKey);
     if (!targetKey) {
@@ -140,6 +149,7 @@ function createRoutingHealthStore(options = {}) {
     getTargetState,
     isAvailable,
     markAuthFailure,
+    markConfigCooldown,
     markCooldown,
     markSuccess,
     serialize,
@@ -259,7 +269,7 @@ function detectRequestCapabilities(entryProtocol, body) {
 
   const tools = Array.isArray(payload.tools) ? payload.tools : [];
   capabilities.tools = tools.length > 0;
-  capabilities.builtinTools = tools.some(tool => {
+  capabilities.builtinTools = Boolean(payload.web_search_options || (Array.isArray(payload.plugins) && payload.plugins.some(plugin => plugin?.enabled !== false))) || tools.some(tool => {
     if (!tool || typeof tool !== 'object') {
       return false;
     }
@@ -382,6 +392,7 @@ function createModelRouter(options = {}) {
     ? options.getRuntimeConfigs
     : () => options.runtimeConfigs || [];
   const quotaEngine = options.quotaEngine;
+  const poolEngine = options.poolEngine;
   const healthStore = options.healthStore || createRoutingHealthStore({ now: options.now });
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
 
@@ -432,13 +443,18 @@ function createModelRouter(options = {}) {
       return { available: false, reason: 'credentials_missing' };
     }
 
-    const configModel = getConfigModel(config, target.model);
+    if (isFreePool(config) && !details.poolModel) {
+      const candidates = poolEngine?.getCandidates(config, requestCapabilities || {}, details.body || {} ) || [];
+      return candidates.length ? { available: true, reason: 'pool_available', probe: false }
+        : { available: false, reason: 'pool_unavailable', detail: poolEngine?.serialize(config)?.error || '没有符合免费资格、能力和健康条件的模型' };
+    }
+    const configModel = details.poolModel || getConfigModel(config, target.model);
     if (!configModel) {
       return { available: false, reason: 'model_not_configured' };
     }
 
     const compatibility = checkTargetCompatibility(
-      getEffectiveConfig(config, runtime),
+      getEffectiveConfig(isFreePool(config) ? { ...config, preset: runtime.poolSourcePreset } : config, runtime),
       configModel,
       target,
       entryProtocol,
@@ -448,10 +464,12 @@ function createModelRouter(options = {}) {
       return { available: false, reason: compatibility };
     }
 
+    if (isFreePool(config)) return { available: true, reason: 'pool_available', probe: false };
+
     const targetKey = buildTargetKey(target);
     const configHealth = healthStore.getConfigState(config.id);
-    if (configHealth.status === 'auth_failed') {
-      return { available: false, reason: 'auth_failed', until: configHealth.until };
+    if (configHealth.status !== 'ok') {
+      return { available: false, reason: configHealth.reason || configHealth.status, until: configHealth.until };
     }
     const targetHealth = healthStore.getTargetState(config.id, targetKey);
     if (targetHealth.status !== 'ok') {
@@ -483,111 +501,64 @@ function createModelRouter(options = {}) {
 
   function select(publicModel, entryProtocol, selectionOptions = {}) {
     const route = resolve(publicModel);
-    if (!route) {
-      return {
-        lease: null,
-        skipped: [],
-        route: null,
-        error: { code: 'model_not_found' },
-      };
-    }
-
-    if (!route.entry_protocols.includes(entryProtocol)) {
-      return {
-        lease: null,
-        skipped: [],
-        route,
-        error: { code: 'entry_protocol_not_supported' },
-      };
-    }
-
-    const excluded = new Set(Array.isArray(selectionOptions.excludeTargetIds) ? selectionOptions.excludeTargetIds : []);
-    const onlyTargetId = typeof selectionOptions.onlyTargetId === 'string' ? selectionOptions.onlyTargetId : '';
+    if (!route) return { lease: null, skipped: [], route: null, error: { code: 'model_not_found' } };
+    if (!route.entry_protocols.includes(entryProtocol)) return { lease: null, skipped: [], route, error: { code: 'entry_protocol_not_supported' } };
+    const excluded = new Set(selectionOptions.excludeTargetIds || []);
+    const onlyTargetId = selectionOptions.onlyTargetId || '';
     const requestCapabilities = selectionOptions.capabilities || detectRequestCapabilities(entryProtocol, selectionOptions.body || {});
+    const attempted = selectionOptions.attemptedTargetIds;
     const skipped = [];
-
-    for (const target of route.targets) {
-      if (onlyTargetId && target.id !== onlyTargetId) {
-        skipped.push({ target_id: target.id, config_id: target.config_id, model: target.model, protocol: target.protocol, reason: 'context_bound_to_other_target' });
-        continue;
+    for (const outer of route.targets) {
+      const config = getConfigById(outer.config_id);
+      const pool = isFreePool(config);
+      if (onlyTargetId && outer.id !== onlyTargetId) {
+        skipped.push({ target_id: outer.id, reason: 'context_bound_to_other_target' }); continue;
       }
-
-      if (excluded.has(target.id)) {
-        skipped.push({ target_id: target.id, config_id: target.config_id, model: target.model, protocol: target.protocol, reason: 'excluded' });
-        continue;
-      }
-
-      const availability = getAvailability(target, entryProtocol, requestCapabilities);
-      if (!availability.available) {
-        skipped.push({
-          target_id: target.id,
-          config_id: target.config_id,
-          model: target.model,
-          protocol: target.protocol,
-          reason: availability.reason,
-          detail: availability.detail || null,
-          until: availability.until ?? null,
-        });
-        continue;
-      }
-
-      let releaseProbe = null;
-      if (availability.probe && quotaEngine) {
-        releaseProbe = quotaEngine.acquireProbe(target.config_id);
-        if (!releaseProbe) {
-          skipped.push({
-            target_id: target.id,
-            config_id: target.config_id,
-            model: target.model,
-            protocol: target.protocol,
-            reason: 'quota_probe_in_flight',
-          });
-          continue;
+      // An outer pool consumes one normal route attempt. Its bounded concrete
+      // candidates may retry inside that slot; no later outer slot is unlocked.
+      if (attempted && attempted.size >= getMaxAttempts(route) && !(pool && attempted.has(outer.id))) continue;
+      if (excluded.has(outer.id)) continue;
+      const poolUsed = pool ? [...excluded].filter(id => {
+        try { const value = JSON.parse(id); return Array.isArray(value) && value[0] === outer.id; } catch (_) { return false; }
+      }).length : 0;
+      const models = pool ? (poolEngine?.getCandidates(config, requestCapabilities, selectionOptions.body || {}) || []).filter(model => !excluded.has(JSON.stringify([outer.id, model.id]))).slice(0, Math.max(0, normalizePoolOptions(config.pool).max_attempts - poolUsed)) : [null];
+      if (!models.length) skipped.push({ target_id: outer.id, config_id: outer.config_id, model: outer.model, protocol: outer.protocol, reason: 'pool_unavailable' });
+      for (const model of models) {
+        const target = model ? { ...outer, id: JSON.stringify([outer.id, model.id]), model: model.id, pool_target_id: outer.id } : outer;
+        if (excluded.has(target.id)) continue;
+        const availability = getAvailability(target, entryProtocol, requestCapabilities, { poolModel: model, body: selectionOptions.body });
+        if (!availability.available) {
+          skipped.push({ target_id: outer.id, config_id: outer.config_id, model: target.model, protocol: target.protocol,
+            reason: availability.reason, detail: availability.detail || null, until: availability.until ?? null }); continue;
         }
+        let releaseProbe = null;
+        if (availability.probe && quotaEngine) {
+          releaseProbe = quotaEngine.acquireProbe(outer.config_id);
+          if (!releaseProbe) { skipped.push({ target_id: outer.id, config_id: outer.config_id, model: outer.model, protocol: outer.protocol, reason: 'quota_probe_in_flight' }); continue; }
+        }
+        const runtime = getRuntimeConfigForId(getRuntimeConfigs(), outer.config_id);
+        let released = false;
+        const started = now();
+        const fingerprint = pool ? poolEngine.fingerprint?.(config) : null;
+        const lease = {
+          route, target, config, runtime, poolModel: model, pool: pool,
+          outerTargetId: outer.id, startedAt: started, poolFingerprint: fingerprint,
+          probe: Boolean(availability.probe),
+          isCurrent: () => pool ? (!poolEngine.isCurrent || poolEngine.isCurrent(config, fingerprint))
+            : (!quotaEngine?.isCurrentConfig || quotaEngine.isCurrentConfig(config)),
+          release() { if (released) return; released = true; if (releaseProbe) { releaseProbe(); releaseProbe = null; } },
+        };
+        return { lease, skipped, route, error: null };
       }
-
-      const config = getConfigById(target.config_id);
-      const runtime = getRuntimeConfigForId(getRuntimeConfigs(), target.config_id);
-      let released = false;
-      const lease = {
-        route,
-        target,
-        config,
-        runtime,
-        probe: Boolean(availability.probe),
-        isCurrent: () => !quotaEngine?.isCurrentConfig || quotaEngine.isCurrentConfig(config),
-        release() {
-          if (released) {
-            return;
-          }
-          released = true;
-          if (releaseProbe) {
-            releaseProbe();
-            releaseProbe = null;
-          }
-        },
-      };
-
-      return {
-        lease,
-        skipped,
-        route,
-        error: null,
-      };
     }
-
-    return {
-      lease: null,
-      skipped,
-      route,
-      error: { code: 'no_available_upstream' },
-    };
+    return { lease: null, skipped, route, error: { code: 'no_available_upstream' } };
   }
 
   function markSuccess(lease) {
     if (!lease || !lease.config) {
       return;
     }
+    if (lease.pool) { if (lease.isCurrent()) poolEngine.recordSuccess(lease.config, lease.poolModel, now() - lease.startedAt); return; }
     if (quotaEngine && quotaEngine.isCurrentConfig && !quotaEngine.isCurrentConfig(lease.config)) return;
     healthStore.markSuccess(lease.config.id, { targetKey: buildTargetKey(lease.target) });
     if (lease.probe && quotaEngine && typeof quotaEngine.recordProbeSuccess === 'function') {
@@ -601,6 +572,7 @@ function createModelRouter(options = {}) {
     }
 
     const config = lease.config;
+    if (lease.pool) { if (lease.isCurrent()) poolEngine.recordFailure(config, lease.poolModel, details); return; }
     if (quotaEngine && quotaEngine.isCurrentConfig && !quotaEngine.isCurrentConfig(config)) return;
     const target = lease.target;
     const targetKey = buildTargetKey(target);
@@ -742,6 +714,7 @@ function createModelRouter(options = {}) {
 
   return {
     resolve,
+    poolEngine,
     getConfig: getConfigById,
     select,
     markSuccess,

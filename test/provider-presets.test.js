@@ -27,10 +27,16 @@ test('provider presets expose the approved built-in providers and custom', () =>
     'glm-global',
     'claude',
     'custom',
+    'opencode-free',
+    'openrouter-free',
   ]);
   assert.equal(getProviderPreset('glm-cn').label, 'GLM Coding Plan 中国');
   assert.equal(getProviderPreset('glm-global').label, 'GLM Coding Plan 国际');
   assert.equal(getProviderPreset('missing'), null);
+  for (const id of ['opencode-free', 'openrouter-free']) {
+    assert.equal(getProviderPreset(id).pool, true);
+    assert.equal(getProviderPreset(id).quota.supported, false);
+  }
   assert.ok(listProviderPresets().every(item => typeof item.id === 'string' && typeof item.label === 'string'));
 });
 

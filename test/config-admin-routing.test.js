@@ -264,7 +264,7 @@ function testAdminHarness(fetch) {
   const document = {
     getElementById(id) {
       if (!nodes.has(id)) nodes.set(id, {
-        id, value: '', hidden: true, disabled: false, textContent: '', innerHTML: '',
+        id, value: '', hidden: true, disabled: false, textContent: '', innerHTML: '', options: [],
         focus() {}, classList: { toggle() {}, add() {}, remove() {} },
       });
       return nodes.get(id);
@@ -338,4 +338,92 @@ test('closing the dialog aborts its request and stops remaining candidates', asy
   await running;
   assert.equal(calls, 1);
   assert.equal(nodes.get('routeTestResults').innerHTML, freshHtml);
+});
+
+
+test('free pool credentials only reference existing accounts on the matching platform', () => {
+  const accounts = [
+    { id: 'go', type: 'apikey', preset: 'opencode-go' },
+    { id: 'zen', type: 'apikey', preset: 'opencode-zen' },
+    { id: 'or', type: 'apikey', preset: 'openrouter' },
+    { id: 'glm', type: 'apikey', preset: 'glm-cn' },
+    { id: 'pool', type: 'apikey', preset: 'opencode-free' },
+    { id: 'invalid', type: 'token', preset: 'openrouter' },
+  ];
+  assert.deepEqual(routingAdmin.poolCredentialOptions(accounts, 'opencode-free').map(item => item.id), ['go', 'zen']);
+  assert.deepEqual(routingAdmin.poolCredentialOptions(accounts, 'openrouter-free').map(item => item.id), ['or']);
+  assert.equal(routingAdmin.isPoolPreset('opencode-free'), true);
+  assert.equal(routingAdmin.isPoolPreset({ id: 'openrouter-free' }), true);
+  assert.equal(routingAdmin.isPoolPreset('opencode-go'), false);
+});
+
+test('pool settings validate explicit quality tiers and bounded catalogue freshness', () => {
+  assert.deepEqual(routingAdmin.normalizePoolSettings(), { sync_interval_seconds: 900, max_stale_seconds: 3600, max_attempts: 8, strategy: 'quality_first', tiers: {} });
+  assert.equal(routingAdmin.normalizePoolSettings({ tiers: { 'unfamiliar-model-id': 1 }, sync_interval_seconds: '120' }).sync_interval_seconds, 120);
+  for (const patch of [{ tiers: [] }, { tiers: { model: 0 } }, { tiers: { model: '1' } }, { strategy: 'random' }, { sync_interval_seconds: 59 }, { max_attempts: 33 }, { max_stale_seconds: 86401 }, { sync_interval_seconds: 900, max_stale_seconds: 100 }]) {
+    assert.throws(() => routingAdmin.normalizePoolSettings(patch));
+  }
+});
+
+function poolHarness() {
+  const calls = [];
+  const pool = { id: 'pool-a', description: 'OpenCode free pool', type: 'apikey', preset: 'opencode-free', credential_ref: 'go', has_credentials: true, base_url: 'https://opencode.ai/inference/go', models: [{ id: 'free', protocols: ['chat_completions'] }], pool: { strategy: 'quality_first', tiers: { 'beam-free': 1 } }, pool_status: { state: 'ready', last_sync_at: 1792900000000, last_request: { model: '<actual-model>' }, source_urls: ['https://example.invalid/models'], models: [{ id: '<unsafe-model>', quality_tier: 1, quality_source: '<configured>', latency_ms: 321, success_rate: 0.75, context_window: 128000, status: 'ok', capabilities: { tools: true }, free_evidence: { prompt: 0, completion: 0 } }] } };
+  const configs = [{ id: 'go', type: 'apikey', preset: 'opencode-go', description: 'Existing Go account', models: [{ id: 'paid-model', protocols: ['chat_completions'] }] }, pool];
+  const harness = testAdminHarness(async (url, options) => {
+    calls.push({ url, options });
+    const payload = url.includes('/pool-refresh') ? { upstream: pool, pool_status: pool.pool_status } : url.includes('/model-routes') ? { models: [], configs, max_attempts: 4 } : { configs };
+    return { status: 200, ok: true, text: async () => JSON.stringify(payload) };
+  });
+  harness.admin.state.upstreams = { configs };
+  harness.admin.state.routes = { models: [], max_attempts: 4 };
+  return { ...harness, configs, pool, calls };
+}
+
+test('pool editor reuses saved credentials, hides editable model lists, and saves fixed free', async () => {
+  const { admin, nodes, calls } = poolHarness();
+  admin.openAccount('pool-a');
+  assert.equal(nodes.get('upstreamPoolFields').hidden, false);
+  assert.equal(nodes.get('upstreamModelSection').hidden, true);
+  assert.equal(nodes.get('upstreamCredentialRefSelect').value, 'go');
+  assert.equal(nodes.get('upstreamApiKeyField').hidden, true);
+  assert.equal(nodes.get('upstreamApiKeyInput').disabled, true);
+  assert.equal(nodes.get('upstreamBaseUrlInput').readOnly, true);
+  assert.match(nodes.get('upstreamCredentialRefSelect').innerHTML, /Existing Go account/);
+  admin.state.formModels = [{ id: 'paid-model', protocols: ['responses'] }];
+  await admin.saveUpstream();
+  const saved = calls.find(call => call.options.method === 'PUT');
+  const body = JSON.parse(saved.options.body);
+  assert.equal(body.credential_ref, 'go');
+  assert.deepEqual(body.models, [{ id: 'free', protocols: ['chat_completions'] }]);
+  assert.deepEqual(body.pool.tiers, { 'beam-free': 1 });
+  assert.equal(body.apikey, undefined);
+  assert.equal(nodes.get('accountDialog').hidden, true);
+});
+
+test('pool details display evidence, statistics and actual landing with escaped upstream content', async () => {
+  const { admin, nodes, calls } = poolHarness();
+  admin.openPoolDetails('pool-a');
+  assert.equal(nodes.get('poolDetailsDialog').hidden, false);
+  const content = nodes.get('poolDetailsContent').innerHTML;
+  assert.match(content, /&lt;unsafe-model&gt;/);
+  assert.match(content, /&lt;actual-model&gt;/);
+  assert.doesNotMatch(content, /<unsafe-model>|<actual-model>|<configured>/);
+  assert.match(content, /321 ms/);
+  assert.match(content, /75%/);
+  assert.match(content, /免费资格依据/);
+  await admin.refreshPool();
+  assert.ok(calls.some(call => call.url.includes('/upstreams/pool-a/pool-refresh') && call.options.method === 'POST'));
+  assert.equal(nodes.get('poolRefreshButton').disabled, false);
+  admin.closeLayer('poolDetailsDialog');
+  assert.equal(admin.state.poolDetailId, '');
+});
+
+test('pool controls stay in independent dialogs and advanced settings, with fixed target model', () => {
+  const poolFields = between(html, 'id="upstreamPoolFields"', 'id="upstreamModelSection"');
+  assert.match(poolFields, /<details class="advanced-settings"/);
+  assert.match(poolFields, /id="poolSyncIntervalInput"/);
+  assert.match(poolFields, /id="poolTiersInput"/);
+  assert.match(html, /class="dialog-layer" id="poolDetailsDialog" hidden/);
+  assert.match(routingJs, /data-target-editor-field="model" \$\{account\.pool \? 'disabled'/);
+  assert.match(routingJs, /免费池固定使用 free/);
 });

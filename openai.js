@@ -16,6 +16,8 @@ const { createQuotaEngine } = require('./app/quota-engine');
 const { createModelRouter, createRoutingHealthStore, createRoutingContextStore } = require('./app/model-router');
 const { createExplicitRoutingHandler } = require('./app/explicit-routing-handler');
 const { createRouteTestHandler } = require('./app/route-testing');
+const { createFreePoolEngine } = require('./app/free-pool-engine');
+const { isFreePool, normalizePoolOptions, credentialSource, FREE_MODEL } = require('./app/free-pool-config');
 const { refreshOpenAIToken } = require('./app/openai-token-refresh');
 const { createSub2ApiAgentIdentityManager, isSub2ApiConfig } = require('./app/sub2api-agent-identity');
 const { generateRandomSecret, getConfiguredApiKeys, extractRequestApiKey, isAuthorizedRequest, isAuthorizedAdminRequest, sha256Hex } = require('./app/request-auth');
@@ -44,6 +46,12 @@ const warn = (...args) => console.warn(...args);
 const quotaEngine = createQuotaEngine({ timeoutMs: QUOTA_TIMEOUT, log, warn });
 const healthStore = createRoutingHealthStore();
 const contextStore = createRoutingContextStore();
+const poolEngine = createFreePoolEngine({
+  getParsedConfig: () => parsedConfig || { configs: [] }, healthStore,
+  cacheFile: `${CONFIG_FILE}.pools-cache.json`,
+  modelsDevUrl: process.env.FREE_POOL_MODELS_METADATA_URL,
+  timeoutMs: QUOTA_TIMEOUT, warn,
+});
 
 function positiveNumber(value, fallback) {
   const number = Number(value);
@@ -76,9 +84,13 @@ function applyConfig(config) {
     contextStore.forgetConfig(id);
   }
   applyProxyEnvironment(config);
+  poolEngine.syncConfigs();
+  if (server) for (const item of config.configs.filter(isFreePool)) {
+    if (poolEngine.serialize(item).last_attempt_at == null) void poolEngine.refresh(item.id);
+  }
   modelRouter = createModelRouter({
     getParsedConfig: () => parsedConfig, getRuntimeConfigs: () => runtimeConfigs,
-    quotaEngine, healthStore,
+    quotaEngine, healthStore, poolEngine,
   });
 }
 
@@ -201,10 +213,12 @@ function upstreamView(item) {
   return {
     id: item.id, type: item.type, preset: item.preset,
     description: item.description || '', enabled: item.enabled !== false,
-    base_url: item.base_url || '', models: item.models || [], models_endpoint: item.models_endpoint || null,
+    base_url: isFreePool(item) ? runtimeConfigs.find(runtime => runtime.id === item.id)?.baseUrl || '' : item.base_url || '', models: item.models || [], models_endpoint: item.models_endpoint || null,
     protocol_paths: item.protocol_paths || null,
-    has_credentials: Boolean(item.apikey || item.access_token || item.credentials),
-    has_refresh_token: Boolean(item.refresh_token), quota: quotaEngine.serialize(item),
+    has_credentials: Boolean(runtimeConfigs.find(runtime => runtime.id === item.id)?.apiKey || item.access_token || item.credentials),
+    credential_ref: item.credential_ref || null,
+    ...(isFreePool(item) ? { pool: normalizePoolOptions(item.pool), pool_status: poolEngine.serialize(item) } : {}),
+    has_refresh_token: Boolean(item.refresh_token), quota: isFreePool(item) ? null : quotaEngine.serialize(item),
     route_references: parseRoutingConfig(parsedConfig).models.filter(route => route.targets.some(target => target.config_id === item.id)).map(route => route.id),
   };
 }
@@ -227,10 +241,18 @@ function routesView() {
 function withPreset(item) {
   const preset = getProviderPreset(item.preset);
   if (!preset) throw new ConfigEditorError('请选择有效的平台');
-  return { ...item, type: preset.default_type, base_url: item.base_url || preset.default_base_url, models: validateConfigModels(item.models === undefined ? [] : item.models, { preset: preset.id }) };
+  const result = { ...item, type: preset.default_type, base_url: item.base_url || preset.default_base_url,
+    models: validateConfigModels(item.models === undefined ? undefined : item.models, { preset: preset.id }) };
+  if (isFreePool(result)) {
+    result.pool = normalizePoolOptions(item.pool);
+    if (result.credential_ref) delete result.apikey;
+    for (const key of ['models_endpoint', 'quota_url', 'protocol_paths']) delete result[key];
+  } else { delete result.pool; delete result.credential_ref; }
+  return result;
 }
 
 async function discoverModels(config) {
+  if (isFreePool(config)) throw new ConfigEditorError('免费池自动维护内部目录，请在池详情中同步');
   const request = buildDiscoveryRequest(config);
   const result = await requestBuffered({ method: 'GET', targetUrl: request.url, headers: { ...request.headers, accept: 'application/json' }, timeoutMs: QUOTA_TIMEOUT, maxRedirects: 2 });
   if (result.statusCode < 200 || result.statusCode >= 300) throw new ConfigEditorError(`模型列表读取失败: HTTP ${result.statusCode}`);
@@ -326,6 +348,15 @@ app.post('/admin/api/upstreams/:id/models/discover', api(async (req, res) => {
   if (!item) reject(404, 'upstream_not_found', '上游账号不存在');
   res.json(await discoverModels(item));
 }));
+app.post('/admin/api/upstreams/:id/pool-refresh', api(async (req, res) => {
+  const item = getConfigById(parsedConfig, req.params.id);
+  if (!item) reject(404, 'upstream_not_found', '上游账号不存在');
+  if (!isFreePool(item)) reject(400, 'not_a_pool', '该账号不是免费池');
+  await poolEngine.refresh(item.id);
+  const current = getConfigById(parsedConfig, req.params.id);
+  if (!current) reject(404, 'upstream_not_found', '上游账号已删除');
+  res.json({ pool_status: poolEngine.serialize(current), upstream: upstreamView(current) });
+}));
 app.post('/admin/api/upstreams/:id/quota-refresh', api(async (req, res) => {
   const item = getConfigById(parsedConfig, req.params.id);
   if (!item) reject(404, 'upstream_not_found', '上游账号不存在');
@@ -361,7 +392,7 @@ function forwardingOptions() {
 }
 app.post('/admin/api/model-routes/test', api(createRouteTestHandler({
   getParsedConfig: () => parsedConfig, getRuntimeConfigs: () => runtimeConfigs,
-  getRouter: () => modelRouter, getForwardingOptions: forwardingOptions,
+  getRouter: () => modelRouter, getForwardingOptions: forwardingOptions, getPoolEngine: () => poolEngine,
   timeoutMs: positiveNumber(process.env.ROUTE_TEST_TIMEOUT_MS, 60000),
 })));
 for (const [endpoint, protocol] of [['chat/completions', 'chat_completions'], ['responses', 'responses'], ['messages', 'messages']]) {
@@ -385,6 +416,7 @@ function shutdownServer() {
   if (stopping) return;
   stopping = true;
   quotaEngine.stopMonitor();
+  poolEngine.stopMonitor();
   if (CONTROL_FILE) fs.unwatchFile(CONTROL_FILE, handleControlFileChange);
   if (!server) return;
   const timer = setTimeout(() => process.exit(0), 5000); timer.unref();
@@ -397,6 +429,8 @@ async function startServer() {
   server = await listenOnPort(effectivePort(parsedConfig));
   quotaEngine.startMonitor(() => parsedConfig.configs);
   void quotaEngine.refreshAll(parsedConfig.configs);
+  poolEngine.startMonitor();
+  void poolEngine.refreshAll();
   if (CONTROL_FILE && CONTROL_TOKEN) {
     fs.watchFile(CONTROL_FILE, { interval: 250 }, handleControlFileChange);
     handleControlFileChange();

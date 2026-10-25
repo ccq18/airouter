@@ -599,6 +599,18 @@ function createExplicitRoutingHandler(options = {}) {
       : body.stream === true;
     const excludeTargetIds = [];
     let attempts = 0;
+    const attemptedTargetIds = new Set();
+    function consumeAttempt(lease) {
+      const id = lease.outerTargetId || lease.target.id;
+      if (!attemptedTargetIds.has(id)) { attemptedTargetIds.add(id); attempts += 1; }
+    }
+    function refundAttempt(lease) {
+      attemptedTargetIds.delete(lease.outerTargetId || lease.target.id);
+      attempts = attemptedTargetIds.size;
+    }
+    function retryable(status, lease, message = '') {
+      return isRetryableStatus(status) || Boolean(lease.pool && status === 400 && /privacy|training|not.?support|unavailable|not available|context.{0,20}length/i.test(message));
+    }
     let lastFailure = null;
     let lastSkipped = [];
     const authRefreshedConfigs = new Set();
@@ -640,14 +652,14 @@ function createExplicitRoutingHandler(options = {}) {
     });
 
     try {
-    while (attempts < maxAttempts && !clientClosed && !committed) {
+    while (!clientClosed && !committed) {
       responseFinished = false;
       if (forcedTargetId && attempts > 0) {
         break;
       }
 
       const selection = router.select(publicModel, entryProtocol, {
-        capabilities,
+        capabilities, body, attemptedTargetIds,
         excludeTargetIds: forcedTargetId ? [] : excludeTargetIds,
         onlyTargetId: forcedTargetId,
       });
@@ -708,6 +720,13 @@ function createExplicitRoutingHandler(options = {}) {
 
       // Preparation may settle after the client closes or a diagnostic expires.
       if (clientClosed || req.aborted || res.destroyed || res.writableEnded) return;
+      if (lease.pool) {
+        // A sync can revoke free eligibility while credential preparation waits.
+        // Check the latest catalog/price/capability snapshot before sending.
+        const currentModel = lease.isCurrent() && router.poolEngine.getCandidates(lease.config, capabilities, body).find(model => model.id === target.model);
+        if (!currentModel) { releaseLease(); excludeTargetIds.push(target.id); continue; }
+        lease.poolModel = currentModel;
+      }
 
       let requestBody;
       try {
@@ -739,12 +758,32 @@ function createExplicitRoutingHandler(options = {}) {
         return;
       }
 
-      const targetUrl = buildTargetUrl(lease.config, runtime, targetProtocol);
+      if (lease.pool) {
+        if (requestBody.max_tokens == null && requestBody.max_completion_tokens == null) requestBody.max_tokens = 2048;
+        router.poolEngine.recordAttempt(lease.config, lease.poolModel);
+        if (lease.config.preset === 'openrouter-free') {
+          // Hard price ceiling on every request; concrete model only, never a
+          // user-supplied models[]/route fallback or billable hosted tool.
+          delete requestBody.models; delete requestBody.route; delete requestBody.plugins;
+          delete requestBody.web_search_options; delete requestBody.transforms;
+          const privacy = requestBody.provider || {};
+          requestBody.provider = {
+            ...(privacy.data_collection === 'deny' ? { data_collection: 'deny' } : {}),
+            ...(privacy.zdr === true ? { zdr: true } : {}),
+            ...(privacy.enforce_distillable_text === true ? { enforce_distillable_text: true } : {}),
+            ...(Array.isArray(privacy.only) ? { only: privacy.only } : {}),
+            ...(Array.isArray(privacy.ignore) ? { ignore: privacy.ignore } : {}),
+            require_parameters: true, allow_fallbacks: false,
+            max_price: { prompt: 0, completion: 0, request: 0, image: 0 } };
+        }
+      }
+      const effectiveConfig = lease.pool ? { ...lease.config, preset: runtime.poolSourcePreset } : lease.config;
+      const targetUrl = buildTargetUrl(effectiveConfig, runtime, targetProtocol);
       if (!targetUrl) {
         releaseLease();
         markNotCommittedFailure(lease, { reason: 'protocol_endpoint_unsupported' });
         excludeTargetIds.push(target.id);
-        attempts += 1;
+        consumeAttempt(lease);
         continue;
       }
 
@@ -761,6 +800,7 @@ function createExplicitRoutingHandler(options = {}) {
           target_id: target.id, config_id: target.config_id,
           account_label: lease.config.description || target.config_id,
           model: target.model, protocol: targetProtocol,
+          ...(lease.pool ? { pool_id: target.config_id, pool_target_id: lease.outerTargetId } : {}),
         });
         upstream = createUpstreamRequest({
           method: 'POST',
@@ -773,12 +813,12 @@ function createExplicitRoutingHandler(options = {}) {
         releaseLease();
         markNotCommittedFailure(lease, { reason: 'upstream_request_error', message: err.message });
         excludeTargetIds.push(target.id);
-        attempts += 1;
+        consumeAttempt(lease);
         lastFailure = { statusCode: 502, message: err.message };
         continue;
       }
       currentUpstream = upstream;
-      attempts += 1;
+      consumeAttempt(lease);
 
       let response;
       try {
@@ -819,7 +859,7 @@ function createExplicitRoutingHandler(options = {}) {
           try {
             if (await refreshUpstreamAuth(runtime)) {
               releaseLease();
-              attempts = Math.max(0, attempts - 1);
+              refundAttempt(lease);
               lastFailure = null;
               continue;
             }
@@ -844,7 +884,7 @@ function createExplicitRoutingHandler(options = {}) {
           retryAfterMs,
         };
 
-        if (!isRetryableStatus(statusCode)) {
+        if (!retryable(statusCode, lease, errorInfo.message)) {
           break;
         }
         continue;
@@ -1081,7 +1121,7 @@ function createExplicitRoutingHandler(options = {}) {
               try {
                 if (await refreshUpstreamAuth(runtime)) {
                   releaseLease();
-                  attempts = Math.max(0, attempts - 1);
+                  refundAttempt(lease);
                   lastFailure = null;
                   continue;
                 }
@@ -1096,7 +1136,7 @@ function createExplicitRoutingHandler(options = {}) {
               reason: result.retry.code || 'upstream_stream_retry',
             });
             releaseLease();
-            if (!isRetryableStatus(result.retry.statusCode)) {
+            if (!retryable(result.retry.statusCode, lease, result.retry.message)) {
               sendProtocolError(
                 res,
                 entryProtocol,
@@ -1142,7 +1182,7 @@ function createExplicitRoutingHandler(options = {}) {
             try {
               if (await refreshUpstreamAuth(runtime)) {
                 releaseLease();
-                attempts = Math.max(0, attempts - 1);
+                refundAttempt(lease);
                 lastFailure = null;
                 continue;
               }
@@ -1158,7 +1198,7 @@ function createExplicitRoutingHandler(options = {}) {
             reason: descriptor.code || 'upstream_error_payload',
           });
           releaseLease();
-          if (isRetryableStatus(descriptor.statusCode)) {
+          if (retryable(descriptor.statusCode, lease, descriptor.message)) {
             excludeTargetIds.push(target.id);
             lastFailure = { statusCode: descriptor.statusCode, message: descriptor.message, code: descriptor.code };
             continue;
@@ -1299,7 +1339,7 @@ function createExplicitRoutingHandler(options = {}) {
           try {
             if (await refreshUpstreamAuth(runtime)) {
               releaseLease();
-              attempts = Math.max(0, attempts - 1);
+              refundAttempt(lease);
               lastFailure = null;
               continue;
             }
@@ -1317,7 +1357,7 @@ function createExplicitRoutingHandler(options = {}) {
             reason: streamError.code || 'upstream_stream_error',
           });
           releaseLease();
-          if (isRetryableStatus(streamError.statusCode)) {
+          if (retryable(streamError.statusCode, lease, streamError.message)) {
             excludeTargetIds.push(target.id);
             lastFailure = {
               statusCode: streamError.statusCode,
@@ -1392,7 +1432,7 @@ function createExplicitRoutingHandler(options = {}) {
           try {
             if (await refreshUpstreamAuth(runtime)) {
               releaseLease();
-              attempts = Math.max(0, attempts - 1);
+              refundAttempt(lease);
               lastFailure = null;
               continue;
             }
@@ -1409,7 +1449,7 @@ function createExplicitRoutingHandler(options = {}) {
           reason: descriptor.code || 'upstream_error_payload',
         });
         releaseLease();
-        if (isRetryableStatus(descriptor.statusCode)) {
+        if (retryable(descriptor.statusCode, lease, descriptor.message)) {
           excludeTargetIds.push(target.id);
           lastFailure = {
             statusCode: descriptor.statusCode,

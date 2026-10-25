@@ -1818,6 +1818,15 @@
       padding: 20px 22px 24px;
     }
 
+    .pool-detail-summary, .pool-model-metrics { display: flex; flex-wrap: wrap; gap: 9px 16px; align-items: center; }
+    .pool-detail-summary { color: var(--muted); font-size: 12px; }
+    .pool-model-list { display: grid; gap: 12px; }
+    .pool-model-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+    .pool-model-heading { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .pool-model-heading strong, .pool-request-point span { overflow-wrap: anywhere; }
+    .pool-model-metrics { font-size: 12px; color: var(--muted); }
+    .pool-request-point { display: grid; gap: 6px; padding: 12px; background: var(--surface-muted); border-radius: 8px; font-size: 12px; }
+    .pool-evidence { max-width: 100%; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
     .route-test-dialog { width: min(860px, 100%); }
     .route-test-dialog .dialog-body { min-width: 0; }
     .route-test-input { min-height: 108px; max-height: 260px; resize: vertical; }
@@ -2579,7 +2588,22 @@
             </div>
           </details>
 
-          <div class="form-section" style="margin-top:16px">
+          <div id="upstreamPoolFields" class="form-section" style="margin-top:16px" hidden>
+            <div class="form-section-head"><div><h3>免费模型池 <span class="tag mono">free</span></h3><p class="field-hint">路由只引用固定的 free，内部模型由系统自动维护。付费套餐耗尽不影响免费候选的独立判断。</p></div></div>
+            <div class="field" style="margin-top:12px"><label class="field-label" for="upstreamCredentialRefSelect">转发凭证来源</label><select id="upstreamCredentialRefSelect"></select><p class="field-hint">可复用对应平台的已有账号；不会复制或显示它的凭证。</p></div>
+            <details class="advanced-settings" style="margin-top:14px"><summary>高级设置 · 同步与池内策略</summary><div class="advanced-settings-body">
+              <div class="form-grid">
+                <div class="field"><label class="field-label" for="poolSyncIntervalInput">同步间隔（秒）</label><input id="poolSyncIntervalInput" type="number" min="60" max="86400" value="900"></div>
+                <div class="field"><label class="field-label" for="poolMaxStaleInput">资格缓存最长有效期（秒）</label><input id="poolMaxStaleInput" type="number" min="60" max="86400" value="3600"></div>
+                <div class="field"><label class="field-label" for="poolStrategySelect">池内策略</label><select id="poolStrategySelect"><option value="quality_first">质量分级优先，同档选快</option><option value="fastest">速度优先</option></select></div>
+                <div class="field"><label class="field-label" for="poolMaxAttemptsInput">池内最多尝试</label><input id="poolMaxAttemptsInput" type="number" min="1" max="32" value="8"></div>
+              </div>
+              <div class="field" style="margin-top:12px"><label class="field-label" for="poolTiersInput">质量分级 JSON</label><textarea id="poolTiersInput" rows="4" class="mono" placeholder='{"model-id": 1}'>{}</textarea><p class="field-hint">1 为最高档，范围 1–10。由你明确配置；未分级模型在同一档，不会按名称猜测质量。</p></div>
+              <p class="field-hint">同步失败保留上次列表；免费资格过期后停止调用，等待成功核验。不会更改平台隐私或训练授权。</p>
+            </div></details>
+          </div>
+
+          <div class="form-section" id="upstreamModelSection" style="margin-top:16px">
             <div class="form-section-head">
               <div>
                 <h3>支持的模型</h3>
@@ -2694,6 +2718,18 @@
         <p class="field-hint">测试路由：走正常路由入口，遵循优先级与额度状态。测试全部候选：逐个直接探测后端模型，不修改配置，也不会开启已停用的账号。</p>
         <p class="form-status" id="routeTestStatus" role="status" aria-live="polite"></p>
         <div id="routeTestResults" class="route-test-results"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="dialog-layer" id="poolDetailsDialog" hidden>
+    <button class="dialog-backdrop" type="button" data-close-dialog="poolDetailsDialog" aria-label="关闭免费池详情"></button>
+    <section class="dialog route-test-dialog" role="dialog" aria-modal="true" aria-labelledby="poolDetailsTitle">
+      <header class="dialog-head"><div><p class="eyebrow">Upstream / Free Pool</p><h2 id="poolDetailsTitle">免费池详情</h2><p>候选资格、健康状态与实际请求落点</p></div><button class="icon-button" type="button" data-close-dialog="poolDetailsDialog" aria-label="关闭">×</button></header>
+      <div class="dialog-body">
+        <div class="route-test-toolbar" style="margin-top:0"><button class="secondary" type="button" id="poolRefreshButton">立即同步</button><button class="secondary" type="button" data-close-dialog="poolDetailsDialog">关闭</button></div>
+        <p id="poolDetailsStatus" class="form-status" role="status" aria-live="polite"></p>
+        <div id="poolDetailsContent"></div>
       </div>
     </section>
   </div>

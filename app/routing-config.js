@@ -1,3 +1,4 @@
+const { isFreePool, FREE_MODEL } = require('./free-pool-config');
 const crypto = require('node:crypto');
 const { getProviderPreset } = require('./provider-presets');
 
@@ -87,6 +88,10 @@ function validateCapabilities(value) {
 }
 
 function validateConfigModels(models, options = {}) {
+  if (isFreePool({ preset: options.preset })) {
+    if (models !== undefined && models !== null && (!Array.isArray(models) || models.length !== 1 || models[0]?.id !== 'free' || (models[0]?.protocols && (models[0].protocols.length !== 1 || models[0].protocols[0] !== 'chat_completions')))) throw new Error('免费模型池只暴露 free / chat_completions');
+    return [{ ...FREE_MODEL, capabilities: {} }];
+  }
   if (typeof models === 'undefined' || models === null) {
     return [];
   }

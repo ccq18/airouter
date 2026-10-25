@@ -73,7 +73,7 @@
 | --- | --- |
 | `id` | 稳定且唯一的账号 ID；缺少时服务生成并持久化 |
 | `type` | 必须为 `apikey`、`token` 或 `claude_token`，不再默认当作 Token |
-| `preset` | 平台：`chatgpt`、`claude`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`custom` |
+| `preset` | 平台：`chatgpt`、`claude`、`opencode-go`、`opencode-zen`、`openrouter`、`glm-cn`、`glm-global`、`custom`、`opencode-free`、`openrouter-free` |
 | `description` | 管理页名称 |
 | `enabled` | 布尔值，缺省为 true；停用使用此字段，不另设停用账号数组 |
 | `base_url` | 上游地址；管理台新增时按平台填入默认值 |
@@ -116,3 +116,38 @@ API Key 账号使用 `apikey`。ChatGPT 登录态使用 `access_token`、`accoun
 | `REQUEST_BODY_IDLE_TIMEOUT_MS` | 接收客户端请求体的空闲超时，默认 30000 ms |
 
 不在配置或日志里记录真实凭证示例。HTTP 操作的请求字段与状态码见 [API 参考](api-reference.md)。
+
+## 6. 免费模型池
+
+`opencode-free` / `openrouter-free` 是普通上游，固定提供 `free / chat_completions`。其他入口通过现有桥接；任意客户端路由均可引用，不对 `auto` 写特殊逻辑。
+
+```json
+{
+  "id": "go-free",
+  "type": "apikey",
+  "preset": "opencode-free",
+  "credential_ref": "go-backup",
+  "models": [{ "id": "free", "protocols": ["chat_completions"] }],
+  "pool": {
+    "sync_interval_seconds": 900,
+    "max_stale_seconds": 3600,
+    "max_attempts": 8,
+    "strategy": "quality_first",
+    "tiers": { "example-model": 1 }
+  }
+}
+```
+
+`credential_ref` 复用同平台普通 API Key 账号，不复制秘密；也可省略引用而填写独立 `apikey`。不允许池互相引用、跨平台引用或同时填写两种凭证。引用账号停用时池停用；引用账号付费额度耗尽时不门控免费池。更换凭证、来源或地址会使旧目录与健康身份失效。OpenCode 按引用账号的 Go/Zen 类型选择内置地址；独立 Key 默认 Go。Zen 免费接口有客户端限制，不能通过伪装客户端绕过。
+
+| 高级字段 | 默认及约束 |
+| --- | --- |
+| `sync_interval_seconds` | 900；60–86400 秒 |
+| `max_stale_seconds` | 3600；60–86400 秒，且不短于同步周期；超过后缓存只展示、不调用 |
+| `max_attempts` | 8；每个请求在该池最多尝试 1–32 个具体模型 |
+| `strategy` | `quality_first` 分级优先，同档结合成功率/延迟；`fastest` 忽略分级，以近期可靠性与延迟排序 |
+| `tiers` | 模型 ID 到整数 1–10 的映射；数字越小优先级越高；未配置默认第 5 档，明确为未评级 |
+
+池不接受 `models_endpoint`、`protocol_paths`、`quota_url` 覆盖，模型列表固定且不可编辑。内部目录是运行缓存，原子保存在配置旁的 `config.json.pools-cache.json`，不含密钥、提示词或返回内容；不进入 Git。重启恢复仅接受身份匹配且价格资格尚未过期的缓存。近期统计在内存保留近 24 小时最多 32 次记录，重启后重新积累。
+
+路由 `max_attempts` 仍限制外层候选次数；池占其中一个名额，内部受 `pool.max_attempts` 独立限制。`auto` 可配置 DeepSeek → GLM → Go 免费池/free → OpenRouter 免费池/free，并设外层尝试上限至少 4；同样规则适用于其他客户端 ID。

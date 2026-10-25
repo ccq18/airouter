@@ -1,3 +1,5 @@
+const { isFreePool, FREE_MODEL, credentialSource, validateFreePools } = require('./free-pool-config');
+const { getProviderPreset } = require('./provider-presets');
 const CHATGPT_BASE_URL = 'https://chatgpt.com';
 const CODEX_API_BASE_PATH = '/backend-api/codex';
 const CLAUDE_API_BASE_URL = 'https://api.anthropic.com';
@@ -111,6 +113,8 @@ function parseOpenAiConfigFile(raw) {
     }
 
     validateConfigItemArray(parsed.configs, 'configs');
+    validateFreePools(parsed.configs);
+    for (const config of parsed.configs) if (isFreePool(config)) config.models = [{ ...FREE_MODEL }];
 
     for (const removedField of ['type', 'disabled_configs', 'responses', 'claude_code']) {
         if (Object.prototype.hasOwnProperty.call(parsed, removedField)) {
@@ -372,7 +376,19 @@ function createClaudeTokenRuntimeConfig(config, index) {
 }
 
 function createRuntimeConfigs(parsed) {
+    validateFreePools(parsed.configs);
     return parsed.configs.map((config, index) => {
+        if (isFreePool(config)) {
+            const source = credentialSource(config, parsed.configs);
+            const sourcePreset = config.preset === 'openrouter-free' ? 'openrouter' : (source.preset === 'opencode-zen' ? 'opencode-zen' : 'opencode-go');
+            const defaultBase = getProviderPreset(sourcePreset).default_base_url;
+            const configuredBase = config.base_url;
+            const builtinBase = ['https://opencode.ai/inference', 'https://opencode.ai/inference/go', 'https://openrouter.ai/api/v1'];
+            const effective = { ...config, models: [{ ...FREE_MODEL }], apikey: source.apikey,
+                enabled: config.enabled !== false && source.enabled !== false,
+                base_url: !configuredBase || builtinBase.includes(configuredBase) ? defaultBase : configuredBase };
+            return { ...createApiKeyRuntimeConfig(effective, index), poolSourcePreset: sourcePreset, credential_ref: config.credential_ref || null };
+        }
         const configType = getConfigItemType(config);
 
         if (configType === 'apikey') {
