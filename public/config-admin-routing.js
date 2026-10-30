@@ -27,6 +27,25 @@
     return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
   }
 
+  const LIMIT_SOURCE_LABELS = { manual: '手动', upstream: '上游', builtin: '内置表', pool: '免费池' };
+  function compactTokens(value) {
+    if (!Number.isInteger(value) || value <= 0) return '';
+    if (value % 1048576 === 0) return `${value / 1048576}M`;
+    if (value >= 1000000 && value % 1000000 === 0) return `${value / 1000000}M`;
+    if (value % 1024 === 0) return `${value / 1024}K`;
+    if (value % 1000 === 0) return `${value / 1000}K`;
+    return String(value);
+  }
+  function formatModelLimit(limits) {
+    if (!limits || !limits.context_window) return '';
+    return `${compactTokens(limits.context_window)}（${LIMIT_SOURCE_LABELS[limits.context_window_source] || '未知'}）`;
+  }
+  function limitTitle(limits) {
+    if (!limits) return '';
+    const line = (label, field) => `${label}: ${limits[field] ? Number(limits[field]).toLocaleString() : '未知'}${limits[`${field}_source`] ? `（${LIMIT_SOURCE_LABELS[limits[`${field}_source`]] || limits[`${field}_source`]}）` : ''}`;
+    return [line('上下文', 'context_window'), line('最大输出', 'max_output_tokens'), limits.builtin_source_url ? `内置表来源: ${limits.builtin_source_url}` : ''].filter(Boolean).join('\n');
+  }
+
   function escapeHtml(value) {
     return String(value ?? '')
       .replaceAll('&', '&amp;')
@@ -873,7 +892,10 @@
       const refs = routeReferencesForAccount(config.id);
       const modelTags = models.map(model => {
         const protocols = Array.isArray(model.protocols) ? model.protocols.join(' / ') : '';
-        return `<span class="tag" title="${escapeHtml(protocols)}">${escapeHtml(model.id)}</span>`;
+        const limits = config.model_limits && config.model_limits[model.id];
+        const limitText = formatModelLimit(limits);
+        const title = [protocols, limitTitle(limits)].filter(Boolean).join('\n');
+        return `<span class="tag" title="${escapeHtml(title)}">${escapeHtml(model.id)}${limitText ? ` · ${escapeHtml(limitText)}` : ''}</span>`;
       }).join('');
       return `
         <article class="account-card${config.enabled === false ? ' is-disabled' : ''}" data-config-id="${escapeHtml(config.id)}">

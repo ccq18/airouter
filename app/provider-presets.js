@@ -1,4 +1,5 @@
 const { parseSub2ApiUsage } = require('./sub2api-quota');
+const { extractUpstreamLimits } = require('./model-limits');
 /**
  * Built-in upstream provider presets.
  *
@@ -610,14 +611,13 @@ function parseModelCatalog(payload, configOrPreset) {
         entry.capabilities = capabilities;
       }
 
-      const contextWindow = parseNumeric(item.context_window ?? item.context_length ?? item.max_context_length);
-      if (contextWindow !== null) {
-        entry.context_window = contextWindow;
+      // OpenAI-style, OpenRouter (top_provider.*) and OpenCode/models.dev (limit.*) shapes.
+      const limits = extractUpstreamLimits(item);
+      if (limits.context_window !== null) {
+        entry.context_window = limits.context_window;
       }
-
-      const maxOutputTokens = parseNumeric(item.max_output_tokens ?? item.max_completion_tokens);
-      if (maxOutputTokens !== null) {
-        entry.max_output_tokens = maxOutputTokens;
+      if (limits.max_output_tokens !== null) {
+        entry.max_output_tokens = limits.max_output_tokens;
       }
     }
 

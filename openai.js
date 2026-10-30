@@ -18,6 +18,7 @@ const { createModelRouter, createRoutingHealthStore, createRoutingContextStore }
 const { createExplicitRoutingHandler } = require('./app/explicit-routing-handler');
 const { createRouteTestHandler } = require('./app/route-testing');
 const { createFreePoolEngine } = require('./app/free-pool-engine');
+const { createModelLimitsStore, summarizeRouteLimits } = require('./app/model-limits');
 const { isFreePool, normalizePoolOptions, credentialSource, FREE_MODEL } = require('./app/free-pool-config');
 const { refreshOpenAIToken } = require('./app/openai-token-refresh');
 const { createSub2ApiAgentIdentityManager, isSub2ApiConfig } = require('./app/sub2api-agent-identity');
@@ -52,6 +53,21 @@ const poolEngine = createFreePoolEngine({
   cacheFile: `${CONFIG_FILE}.pools-cache.json`,
   modelsDevUrl: process.env.FREE_POOL_MODELS_METADATA_URL,
   timeoutMs: QUOTA_TIMEOUT, warn,
+});
+// Upstream /models context limits: refreshed at startup and every MODEL_LIMITS_REFRESH_SECONDS
+// (default 6h; 0 disables). Same discovery request as the admin "sync models" button.
+const MODEL_LIMITS_REFRESH_MS = process.env.MODEL_LIMITS_REFRESH_SECONDS === '0' ? 0 : positiveNumber(process.env.MODEL_LIMITS_REFRESH_SECONDS, 6 * 60 * 60) * 1000;
+const modelLimits = createModelLimitsStore({
+  getParsedConfig: () => parsedConfig || { configs: [] },
+  cacheFile: `${CONFIG_FILE}.model-limits-cache.json`,
+  refreshMs: MODEL_LIMITS_REFRESH_MS, warn,
+  isEligible: config => !isFreePool(config) && hasCredentials(config),
+  fetchCatalog: async config => {
+    const request = buildDiscoveryRequest(config);
+    const result = await requestBuffered({ method: 'GET', targetUrl: request.url, headers: { ...request.headers, accept: 'application/json' }, timeoutMs: QUOTA_TIMEOUT, maxRedirects: 2 });
+    if (result.statusCode < 200 || result.statusCode >= 300) throw new Error(`HTTP ${result.statusCode}`);
+    return parseModelCatalog(JSON.parse(result.bodyText), config);
+  },
 });
 
 function positiveNumber(value, fallback) {
@@ -88,6 +104,8 @@ function applyConfig(config) {
   contextStore.syncRoutes(config);
   applyProxyEnvironment(config);
   poolEngine.syncConfigs();
+  modelLimits.forgetMissing();
+  if (server && MODEL_LIMITS_REFRESH_MS > 0) void modelLimits.tick();
   if (server) for (const item of config.configs.filter(isFreePool)) {
     if (poolEngine.serialize(item).last_attempt_at == null) void poolEngine.refresh(item.id);
   }
@@ -212,13 +230,50 @@ function settingsView() {
   return { apikeys: getConfiguredApiKeys(parsedConfig), port: effectivePort(parsedConfig), proxy_port: parsedConfig.proxy_port || null };
 }
 
+function hasCredentials(item) {
+  return Boolean(runtimeConfigs.find(runtime => runtime.id === item.id)?.apiKey || item.access_token || item.credentials);
+}
+
+/** Resolved limits for one route target: manual > upstream /models > built-in table. */
+function targetLimits(target) {
+  const config = parsedConfig.configs.find(item => item.id === target.config_id);
+  if (!config) return { context_window: null, max_output_tokens: null, context_window_source: null, max_output_tokens_source: null };
+  if (isFreePool(config)) {
+    // The pool picks a catalog model that fits each request, so its ceiling is the largest one.
+    const models = (poolEngine.serialize(config)?.models || []).filter(model => model.status !== 'unavailable');
+    const max = field => models.reduce((best, model) => Number.isInteger(model[field]) && model[field] > (best || 0) ? model[field] : best, null);
+    const context = max('context_window');
+    const output = max('max_output_tokens');
+    return { context_window: context, max_output_tokens: output, context_window_source: context ? 'pool' : null, max_output_tokens_source: output ? 'pool' : null };
+  }
+  return modelLimits.resolve(config, target.model);
+}
+
+function enabledTargets(route) {
+  return (route.targets || []).filter(target => parsedConfig.configs.find(item => item.id === target.config_id)?.enabled !== false);
+}
+
+function publicModelsView() {
+  const routes = new Map(parseRoutingConfig(parsedConfig).models.map(route => [route.id, route]));
+  return getPublicModelIds(parsedConfig).map(id => {
+    const route = routes.get(id);
+    const limits = summarizeRouteLimits(route ? enabledTargets(route).map(targetLimits) : []);
+    return { id, object: 'model', created: 0, owned_by: 'airouter',
+      context_window: limits.context_window, context_length: limits.context_window, max_output_tokens: limits.max_output_tokens,
+      context_window_min: limits.context_window_min, max_output_tokens_min: limits.max_output_tokens_min,
+      context_window_source: limits.context_window_source };
+  });
+}
+
 function upstreamView(item) {
   return {
     id: item.id, type: item.type, preset: item.preset,
     description: item.description || '', enabled: item.enabled !== false,
     base_url: isFreePool(item) ? runtimeConfigs.find(runtime => runtime.id === item.id)?.baseUrl || '' : item.base_url || '', models: item.models || [], models_endpoint: item.models_endpoint || null,
     protocol_paths: item.protocol_paths || null,
-    has_credentials: Boolean(runtimeConfigs.find(runtime => runtime.id === item.id)?.apiKey || item.access_token || item.credentials),
+    has_credentials: hasCredentials(item),
+    // Read-only resolved limits; never written back by the editor (models[] keeps manual values only).
+    ...(isFreePool(item) ? {} : { model_limits: Object.fromEntries((item.models || []).map(model => [model.id, modelLimits.resolve(item, model.id)])), model_limits_status: modelLimits.status(item.id) }),
     credential_ref: item.credential_ref || null,
     ...(isFreePool(item) ? { pool: normalizePoolOptions(item.pool), pool_status: poolEngine.serialize(item) } : {}),
     has_refresh_token: Boolean(item.refresh_token), quota: isFreePool(item) ? null : quotaEngine.serialize(item),
@@ -236,8 +291,12 @@ function routesView() {
   for (const model of routing.models) {
     routeStatus[model.id] = Object.fromEntries(PROTOCOLS.map(protocol => [protocol, modelRouter.describeRoute(model, protocol)]));
   }
+  const routeLimits = Object.fromEntries(routing.models.map(model => {
+    const targets = (model.targets || []).map(target => ({ target_id: target.id, config_id: target.config_id, model: target.model, ...targetLimits(target) }));
+    return [model.id, { targets, ...summarizeRouteLimits(enabledTargets(model).map(targetLimits)) }];
+  }));
   return { revision: getRoutingRevision(parsedConfig), max_attempts: routing.max_attempts, models: routing.models,
-    route_status: routeStatus, configs: parsedConfig.configs.map(item => ({ id: item.id, description: item.description, enabled: item.enabled !== false, preset: item.preset, models: item.models || [] })),
+    route_status: routeStatus, route_limits: routeLimits, configs: parsedConfig.configs.map(item => ({ id: item.id, description: item.description, enabled: item.enabled !== false, preset: item.preset, models: item.models || [] })),
     presets: listProviderPresets(), public_model_ids: getPublicModelIds(parsedConfig) };
 }
 
@@ -246,6 +305,7 @@ function withPreset(item) {
   if (!preset) throw new ConfigEditorError('请选择有效的平台');
   const result = { ...item, type: preset.default_type, base_url: item.base_url || preset.default_base_url,
     models: validateConfigModels(item.models === undefined ? undefined : item.models, { preset: preset.id }) };
+  for (const viewOnly of ['model_limits', 'model_limits_status']) delete result[viewOnly];
   if (preset.id === 'sub2api') {
     try { result.base_url = normalizeSub2ApiBaseUrl(result.base_url); } catch (error) { throw new ConfigEditorError(error.message); }
   }
@@ -382,7 +442,7 @@ app.put('/admin/api/model-routes', api(async (req, res) => {
 }));
 
 app.get('/health', requireApiKey, (req, res) => res.json({ status: 'ok', configs: { total: runtimeConfigs.length }, models: getPublicModelIds(parsedConfig) }));
-app.get('/v1/models', requireApiKey, (req, res) => res.json({ object: 'list', data: getPublicModelIds(parsedConfig).map(id => ({ id, object: 'model', created: 0, owned_by: 'airouter' })) }));
+app.get('/v1/models', requireApiKey, (req, res) => res.json({ object: 'list', data: publicModelsView() }));
 function forwardingOptions() {
   return {
     getRouter: () => modelRouter, getQuotaEngine: () => quotaEngine,
@@ -423,6 +483,7 @@ function shutdownServer() {
   stopping = true;
   quotaEngine.stopMonitor();
   poolEngine.stopMonitor();
+  modelLimits.stopMonitor();
   if (CONTROL_FILE) fs.unwatchFile(CONTROL_FILE, handleControlFileChange);
   if (!server) return;
   const timer = setTimeout(() => process.exit(0), 5000); timer.unref();
@@ -437,6 +498,7 @@ async function startServer() {
   void quotaEngine.refreshAll(parsedConfig.configs);
   poolEngine.startMonitor();
   void poolEngine.refreshAll();
+  modelLimits.startMonitor();
   if (CONTROL_FILE && CONTROL_TOKEN) {
     fs.watchFile(CONTROL_FILE, { interval: 250 }, handleControlFileChange);
     handleControlFileChange();

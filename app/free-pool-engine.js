@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { requestBuffered } = require('./upstream-request');
+const { extractUpstreamLimits, lookupBuiltinLimits } = require('./model-limits');
 
 const POOL_PRESETS = new Set(['opencode-free', 'openrouter-free']);
 const DEFAULTS = { sync_interval_seconds: 900, max_stale_seconds: 3600, max_attempts: 8, strategy: 'quality_first', tiers: {} };
@@ -38,6 +39,13 @@ function isSpecializedClassifier(model) {
     /\bis an? [^.]{0,100}\bguardrail model\b/.test(description);
 }
 function validLimit(value) { return Number.isInteger(value) && value > 0 ? value : null; }
+function poolModelLimits(id, upstream, upstreamSource = 'catalog') {
+  const builtin = lookupBuiltinLimits(id);
+  const context = validLimit(upstream.context_window) || builtin?.context_window || null;
+  const output = validLimit(upstream.max_output_tokens) || builtin?.max_output_tokens || null;
+  const source = validLimit(upstream.context_window) ? upstreamSource : builtin ? 'builtin' : null;
+  return { context_window: context, max_output_tokens: output, source };
+}
 function normalizeOpenRouterCatalog(payload, timestamp = Date.now(), sourceUrl = OPENROUTER_SOURCE) {
   if (!isObject(payload) || !Array.isArray(payload.data)) throw new Error('OpenRouter 模型目录格式不合法');
   const models = [];
@@ -46,12 +54,14 @@ function normalizeOpenRouterCatalog(payload, timestamp = Date.now(), sourceUrl =
     const input = item.architecture?.input_modalities;
     const output = item.architecture?.output_modalities;
     if (!Array.isArray(input) || !input.includes('text') || !Array.isArray(output) || output.length !== 1 || output[0] !== 'text' || !Array.isArray(item.supported_parameters)) continue;
-    const context = validLimit(item.context_length);
-    if (!context || !validLimit(item.top_provider?.max_completion_tokens)) continue;
+    // context_length vs top_provider.context_length: keep the smaller; fall back to the built-in table.
+    const limits = poolModelLimits(item.id, extractUpstreamLimits(item));
+    const context = limits.context_window;
+    if (!context || !limits.max_output_tokens) continue;
     const params = new Set(item.supported_parameters);
     models.push({
       id: item.id, name: typeof item.name === 'string' ? item.name : item.id, protocols: ['chat_completions'],
-      context_window: context, max_output_tokens: validLimit(item.top_provider?.max_completion_tokens),
+      context_window: context, max_output_tokens: limits.max_output_tokens, limits_source: limits.source,
       capabilities: { tools: params.has('tools'), images: input.includes('image'), files: input.includes('file'), audio: input.includes('audio'), streaming: true,
         reasoning: params.has('reasoning') || params.has('reasoning_effort') || params.has('include_reasoning'), structuredOutput: params.has('response_format') || params.has('structured_outputs'), builtinTools: false },
       free_evidence: { source: sourceUrl, kind: 'explicit_zero_pricing', checked_at: timestamp, pricing: clone(item.pricing), note: '目录所有已列价格为零；转发另强制 provider.max_price=0' },
@@ -71,10 +81,18 @@ function normalizeOpenCodeCatalog(catalog, metadata, providerId, timestamp = Dat
     const npm = item.provider?.npm || metadata[providerId].npm || '';
     if (!/\/openai\/v1\/?$/.test(api) && !['@ai-sdk/openai-compatible', '@ai-sdk/openai'].includes(npm)) continue;
     const inputs = item.modalities?.input;
-    if (!Array.isArray(inputs) || !inputs.includes('text') || !Array.isArray(item.modalities?.output) || item.modalities.output.length !== 1 || item.modalities.output[0] !== 'text' || !validLimit(item.limit?.context) || !validLimit(item.limit?.output)) continue;
+    // Prefer the limits OpenCode publishes in the account's own /models catalog, then models.dev,
+    // then the built-in table (exact normalized ids; "-free" variants are never matched).
+    const listedLimits = extractUpstreamLimits(listed);
+    const metaLimits = extractUpstreamLimits(item);
+    const limits = poolModelLimits(listed.id, {
+      context_window: listedLimits.context_window ?? metaLimits.context_window,
+      max_output_tokens: listedLimits.max_output_tokens ?? metaLimits.max_output_tokens,
+    }, listedLimits.context_window ? 'catalog' : 'models.dev');
+    if (!Array.isArray(inputs) || !inputs.includes('text') || !Array.isArray(item.modalities?.output) || item.modalities.output.length !== 1 || item.modalities.output[0] !== 'text' || !limits.context_window || !limits.max_output_tokens) continue;
     models.push({
       id: listed.id, name: item.name || listed.id, protocols: ['chat_completions'],
-      context_window: validLimit(item.limit.context), max_output_tokens: validLimit(item.limit.output),
+      context_window: limits.context_window, max_output_tokens: limits.max_output_tokens, limits_source: limits.source,
       capabilities: { tools: item.tool_call === true, images: inputs.includes('image'), files: inputs.includes('pdf') || inputs.includes('file'), audio: inputs.includes('audio'), streaming: true,
         reasoning: item.reasoning === true, structuredOutput: item.structured_output === true, builtinTools: false },
       free_evidence: { source: sourceUrls[1] || MODELS_DEV_URL, catalog_source: sourceUrls[0] || null, provider: providerId, kind: 'explicit_zero_cost_metadata', checked_at: timestamp,

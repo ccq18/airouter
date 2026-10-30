@@ -302,3 +302,33 @@ test('pool detail order follows scheduling strategy without hiding cooled or inc
   assert.deepEqual(h.engine.getCandidates(h.pool, { images: true }), []);
   assert.equal(h.engine.serialize(h.pool).models.length, 2);
 });
+
+test('pool limits: OpenCode catalog limit wins over models.dev, built-in table fills gaps, free variants are not guessed', () => {
+  const catalog = { data: [
+    { id: 'listed', limit: { context: 200000, output: 32000 } },
+    { id: 'meta-only' },
+    { id: 'glm-5.3' },
+    { id: 'glm-5.3-flash-free' },
+  ] };
+  const noLimit = id => { const model = codeModel(id); delete model.limit; return model; };
+  const metadata = { 'opencode-go': { models: {
+    listed: codeModel('listed', { limit: { context: 1000000, output: 384000 } }),
+    'meta-only': codeModel('meta-only'),
+    'glm-5.3': noLimit('glm-5.3'),
+    'glm-5.3-flash-free': noLimit('glm-5.3-flash-free'),
+  } } };
+  const models = Object.fromEntries(normalizeOpenCodeCatalog(catalog, metadata, 'opencode-go', 1).map(model => [model.id, model]));
+  assert.deepEqual([models.listed.context_window, models.listed.max_output_tokens, models.listed.limits_source], [200000, 32000, 'catalog']);
+  assert.deepEqual([models['meta-only'].context_window, models['meta-only'].limits_source], [32000, 'models.dev']);
+  assert.deepEqual([models['glm-5.3'].context_window, models['glm-5.3'].max_output_tokens, models['glm-5.3'].limits_source], [1048576, 131072, 'builtin']);
+  assert.equal(models['glm-5.3-flash-free'], undefined, 'unknown free variant stays excluded');
+});
+
+test('pool limits: OpenRouter uses the smaller of context_length and top_provider.context_length', () => {
+  const [model] = normalizeOpenRouterCatalog({ data: [routerModel('z-ai/glm-5.1', { context_length: 204800, top_provider: { context_length: 202752, max_completion_tokens: 131072 } })] });
+  assert.equal(model.context_window, 202752);
+  assert.equal(model.max_output_tokens, 131072);
+  const [builtin] = normalizeOpenRouterCatalog({ data: [routerModel('z-ai/glm-5.3', { context_length: undefined, top_provider: {} })] });
+  assert.equal(builtin.context_window, 1048576);
+  assert.equal(builtin.limits_source, 'builtin');
+});
